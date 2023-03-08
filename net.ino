@@ -21,7 +21,7 @@ ESP8266WiFiMulti wifiMulti;
 
 
 void connect_wifi() {
-   configTime(MY_TZ, MY_NTP_SERVER);
+  // configTime(MY_TZ, MY_NTP_SERVER);
 
   // Connect WiFi
   Serial.println("Connecting to WiFi");
