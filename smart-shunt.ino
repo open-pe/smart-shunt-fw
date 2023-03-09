@@ -50,9 +50,13 @@ constexpr int READY_PIN = 12;
 #define IRAM_ATTR
 #endif
 
+// minimize memory footprint
+// - use raw ADC samples
+// - remove p, e
+// - instead of timeval store dt to the prev sample (uint_16)
 struct Sample {
   float u, i, p, e;
-  time_t t;
+   struct timeval t;
 };
 
 volatile bool new_data = false;
@@ -83,7 +87,7 @@ public:
 
 //RingBuf<PointDefaultConstructor, 400> pointBuf;
 
-std::queue<PointDefaultConstructor> pointBuf;
+std::queue<Sample> sampleBuf;
 
 void startReading() {
   if ((++readUICycle % 3) == 0) {
@@ -103,6 +107,8 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
     startReading();
   } else {
     Sample &s(LastSample);
+    gettimeofday(&s.t, NULL);
+
     s.i = ads.computeVolts(adc) * (1000.0f / 12.5f) * (20.4f / 20.32f);
     s.u = LastVoltage;
     s.p = s.i * s.u;
@@ -119,14 +125,7 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
     startReading();
 
 
-    Point point("smart_shunt");
-    point.addTag("device", "ESP8266_proto1");
-    point.addField("I", s.i);
-    point.addField("U", s.u);
-    point.addField("P", s.p);
-    point.addField("E", s.e);
-    point.setTime(WritePrecision::MS);
-    pointBuf.push(point);
+    sampleBuf.push(s);
 
     ++NumSamples;
     LastTime = nowTime;
@@ -207,21 +206,29 @@ void startReadingU() {
 }
 
 std::vector<PointDefaultConstructor> pointFrame(40);
+uint16_t maxBufSize = 0;
 
 void loop(void) {
 
 
   if (new_data) {
-    //Serial.println("New Data!");
-    //Serial.println(pointBuf.size());
     uint16_t i = 0;
-    //PointDefaultConstructor p;
-
     noInterrupts();
-    while (i < pointFrame.size() && !pointBuf.empty()) {
-      pointFrame[i] = pointBuf.front();
-      pointBuf.pop();
-      ++i;
+    {
+      if(sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
+      while (i < pointFrame.size() && !sampleBuf.empty()) {
+        const Sample &s(sampleBuf.front());
+        Point point("smart_shunt");
+        point.addTag("device", "ESP8266_proto1");
+        point.addField("I", s.i);
+        point.addField("U", s.u);
+        point.addField("P", s.p);
+        point.addField("E", s.e);
+        point.setTime(getTimeStamp((struct timeval*)&s.t,3));
+        sampleBuf.pop();
+        pointFrame[i] = point;
+        ++i;
+      }
     }
     new_data = false;
     interrupts();
@@ -257,6 +264,8 @@ void loop(void) {
     Serial.print(", T=");
     Serial.print((nowTime - StartTime) * 1e-6, 1);
     Serial.print("s");
+    Serial.print(", maxBufSize=");
+    Serial.print(maxBufSize);
     //Serial.print(adc2, BIN);
     Serial.println("");
     LastTimeOut = nowTime;
