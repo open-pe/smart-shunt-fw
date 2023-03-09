@@ -24,7 +24,7 @@ void connect_wifi() {
   // configTime(MY_TZ, MY_NTP_SERVER);
 
   // Connect WiFi
-  Serial.println("Connecting to WiFi");
+  //Serial.println("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
   wifiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
   while (wifiMulti.run() != WL_CONNECTED) {
