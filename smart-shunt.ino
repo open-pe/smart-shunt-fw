@@ -52,14 +52,16 @@ constexpr int READY_PIN = 12;
 
 // minimize memory footprint
 // - use raw ADC samples
-// - remove p, e  
+// - remove p, e
 // - instead of timeval store dt to the prev sample (uint_16)
 struct Sample {
   float u, i, e;
   // struct timeval t; // sizeof(timeval)=16
-  unsigned long long t; // 8byte
+  unsigned long long t;  // 8byte
 
-  inline float p() const { return u*i; }
+  inline float p() const {
+    return u * i;
+  }
 };
 
 
@@ -126,12 +128,12 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
       s.e = 0.0f;
     }
 
-    while(sampleBuf.size() > sampleBufMaxSize) {
+    while (sampleBuf.size() > sampleBufMaxSize) {
       sampleBuf.pop();
       ++numDropped;
     }
     sampleBuf.push(s);
-    
+
 
     ++NumSamples;
     LastTime = nowTime;
@@ -147,7 +149,7 @@ InfluxDBClient client;
 unsigned long StartTime = 0;
 
 void setup(void) {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
 
   // ads.setDataRate
@@ -176,9 +178,9 @@ void setup(void) {
                            .writePrecision(WritePrecision::MS)
                            .batchSize(200)
                            .bufferSize(400)
-                           .flushInterval(.5f)
-                           .retryInterval(0) // 0=disable retry
-                           );
+                           .flushInterval(1)  // uint16! min is 1
+                           .retryInterval(0)  // 0=disable retry
+  );
 
   connect_wifi();
   timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
@@ -220,12 +222,14 @@ uint16_t maxBufSize = 0;
 
 void loop(void) {
 
+  constexpr bool hfWrites = false;
+
 
   if (new_data) {
     uint16_t i = 0;
     noInterrupts();
     {
-      if(sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
+      if (sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
       while (i < pointFrame.size() && !sampleBuf.empty()) {
         const Sample &s(sampleBuf.front());
         Point point("smart_shunt");
@@ -247,17 +251,30 @@ void loop(void) {
       Serial.println("new_data but 0 points in buf!");
     }
 
-    //for (uint16_t j = 0; j < i; ++j)
-    //  client.writePoint(pointFrame[j]);
+    if (hfWrites)
+      for (uint16_t j = 0; j < i; ++j)
+        client.writePoint(pointFrame[j]);
   }
 
-  client.checkBuffer();
+  //if (hfWrites)
+  //  client.checkBuffer();
 
   unsigned long nowTime = micros();
 
   if (nowTime - LastTimeOut > 1e6) {
     float sps = NumSamples / ((nowTime - StartTime) * 1e-6);
     Sample s = LastSample;
+
+    if (!hfWrites) {
+      Point point("smart_shunt");
+      point.addTag("device", "ESP8266_proto1");
+      point.addField("I", s.i);
+      point.addField("U", s.u);
+      point.addField("P", s.p());
+      point.addField("E", s.e);
+      point.setTime(s.t);
+      client.writePoint(point);
+    }
 
     Serial.print("U=");
     Serial.print(s.u, 4);
