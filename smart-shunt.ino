@@ -1,6 +1,8 @@
 #include <Adafruit_ADS1X15.h>
 #include <InfluxDbClient.h>
-//# include "SafeQueue.h"
+//#include <RingBuf.h>
+
+#include <queue>
 
 
 /**
@@ -48,17 +50,90 @@ constexpr int READY_PIN = 12;
 #define IRAM_ATTR
 #endif
 
-volatile bool new_data = false;
-//void IRAM_ATTR
-void ICACHE_RAM_ATTR NewDataReadyISR() {
-  new_data = true;
-  // Serial.println("ALERT!");
-}
-
 struct Sample {
   float u, i, p, e;
   time_t t;
 };
+
+volatile bool new_data = false;
+volatile unsigned long NumSamples = 0;
+
+int readUICycle = 0;
+bool readingU = false;
+
+unsigned long LastTime = 0;
+float LastVoltage = 0.0f;
+float Energy = 0;
+
+Sample LastSample;
+
+
+class PointDefaultConstructor : public Point {
+public:
+  PointDefaultConstructor()
+    : Point("smart_shut") {}
+  PointDefaultConstructor(const Point &p)
+    : Point(p) {}
+
+  PointDefaultConstructor &operator=(const PointDefaultConstructor &p) {
+    Point::operator=(p);
+    return *this;
+  }
+};
+
+//RingBuf<PointDefaultConstructor, 400> pointBuf;
+
+std::queue<PointDefaultConstructor> pointBuf;
+
+void startReading() {
+  if ((++readUICycle % 3) == 0) {
+    // occasionally sample U
+    startReadingU();
+  } else {
+    startReadingI();
+  }
+}
+
+//void IRAM_ATTR
+void ICACHE_RAM_ATTR NewDataReadyISR() {
+  int16_t adc = ads.getLastConversionResults();
+
+  if (readingU) {
+    LastVoltage = ads.computeVolts(adc) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
+    startReading();
+  } else {
+    Sample &s(LastSample);
+    s.i = ads.computeVolts(adc) * (1000.0f / 12.5f) * (20.4f / 20.32f);
+    s.u = LastVoltage;
+    s.p = s.i * s.u;
+
+    unsigned long nowTime = micros();
+    if (LastTime != 0) {
+      unsigned long dt_us = nowTime - LastTime;
+      Energy += s.p * (dt_us * (1e-6f / 3600.f));
+      s.e = Energy;
+    } else {
+      s.e = 0.0f;
+    }
+
+    startReading();
+
+
+    Point point("smart_shunt");
+    point.addTag("device", "ESP8266_proto1");
+    point.addField("I", s.i);
+    point.addField("U", s.u);
+    point.addField("P", s.p);
+    point.addField("E", s.e);
+    point.setTime(WritePrecision::MS);
+    pointBuf.push(point);
+
+    ++NumSamples;
+    LastTime = nowTime;
+    new_data = true;
+  }
+}
+
 
 InfluxDBClient client;
 
@@ -66,20 +141,6 @@ unsigned long StartTime = 0;
 
 void setup(void) {
   Serial.begin(9600);
-  Serial.println("Hello!");
-
-  // The ADC input range (or gain) can be changed via the following
-  // functions, but be careful never to exceed VDD +0.3V max, or to
-  // exceed the upper and lower limits if you adjust the input range!
-  // Setting these values incorrectly may destroy your ADC!
-  //                                                                ADS1015  ADS1115
-  //                                                                -------  -------
-  // ads.setGain(GAIN_TWOTHIRDS);  // 2/3x gain +/- 6.144V  1 bit = 3mV      0.1875mV (default)
-  // ads.setGain(GAIN_ONE);        // 1x gain   +/- 4.096V  1 bit = 2mV      0.125mV
-  //ads.setGain(GAIN_TWO);  // 2x gain   +/- 2.048V  1 bit = 1mV      0.0625mV
-  //ads.setGain(GAIN_FOUR);       // 4x gain   +/- 1.024V  1 bit = 0.5mV    0.03125mV
-  // ads.setGain(GAIN_EIGHT);      // 8x gain   +/- 0.512V  1 bit = 0.25mV   0.015625mV
-  // ads.setGain(GAIN_SIXTEEN);    // 16x gain  +/- 0.256V  1 bit = 0.125mV  0.0078125mV
 
 
   // ads.setDataRate
@@ -105,9 +166,9 @@ void setup(void) {
   client.setConnectionParamsV1("http://homeassistant.local:8086", /*db*/ "open_pe", "home_assistant", "h0me");
   client.setWriteOptions(WriteOptions()
                            .writePrecision(WritePrecision::MS)
-                           .batchSize(1000)
-                           .bufferSize(10000)
-                           .flushInterval(2)
+                           .batchSize(40)
+                           .bufferSize(400)
+                           .flushInterval(.5f)
                            .retryInterval(5));
 
   connect_wifi();
@@ -116,71 +177,70 @@ void setup(void) {
   StartTime = micros();
   // when multiplexing channels, TI recommnads single-shot mode (https://e2e.ti.com/support/data-converters-group/data-converters/f/data-converters-forum/563147/ads1115-ads1115-in-continuous-mode-with-alternating-channels)
   // Start continuous conversions.
+
+  startReadingU();
 }
 
-float energy = 0;
 
 
-unsigned long LastTime = 0;
+
+
 unsigned long LastTimeOut = 0;
-unsigned long NumSamples = 0;
+
 
 
 void waiting_for_adc() {
   client.checkBuffer();
 }
 
-
-
-void loop(void) {
-  Sample s;
-
+void startReadingI() {
+  readingU = false;
   //ads.setGain(GAIN_FOUR);   // +- 80 Ampere
   ads.setGain(GAIN_EIGHT);  // +- 40 Ampere
+  ads.startADCReading(ADS1X15_REG_CONFIG_MUX_DIFF_0_1, /*continuous=*/false);
+}
 
-  int16_t adc01 = ads.readADC_Differential_0_1();
-
-  //new_data = false;
-  //ads.startADCReading(ADS1X15_REG_CONFIG_MUX_DIFF_0_1, /*continuous=*/false);
-  //while (!new_data) waiting_for_adc();
-  //int16_t adc01 =  ads.getLastConversionResults();
-
-  s.i = ads.computeVolts(adc01) * (1000.0f / 12.5f) * (20.4f / 20.32f);
-
+void startReadingU() {
+  readingU = true;
   ads.setGain(GAIN_TWO);  // 2x gain   +/- 2.048V  1 bit = 1mV      0.0625mV
+  ads.startADCReading(MUX_BY_CHANNEL[2], /*continuous=*/false);
+}
 
-  int16_t adc2 = ads.readADC_SingleEnded(2);
+std::vector<PointDefaultConstructor> pointFrame(40);
 
-  //new_data = false;
-  //ads.startADCReading(MUX_BY_CHANNEL[2], /*continuous=*/false);
-  //while (!new_data) waiting_for_adc();
-  //int16_t adc2 =  ads.getLastConversionResults();
+void loop(void) {
 
-  s.u = ads.computeVolts(adc2) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
 
-  unsigned long NowTime = micros();
-  ++NumSamples;
-  s.p = s.i * s.u;
+  if (new_data) {
+    //Serial.println("New Data!");
+    //Serial.println(pointBuf.size());
+    uint16_t i = 0;
+    //PointDefaultConstructor p;
 
-  if (LastTime != 0) {
-    unsigned long dt_us = NowTime - LastTime;
-    energy += s.p * (dt_us * (1e-6f / 3600.f));
-    s.e = energy;
+    noInterrupts();
+    while (i < pointFrame.size() && !pointBuf.empty()) {
+      pointFrame[i] = pointBuf.front();
+      pointBuf.pop();
+      ++i;
+    }
+    new_data = false;
+    interrupts();
+
+    if (i == 0) {
+      Serial.println("new_data but 0 points in buf!");
+    }
+
+    for (uint16_t j = 0; j < i; ++j)
+      client.writePoint(pointFrame[j]);
   }
-  LastTime = NowTime;
 
-  Point point("smart_shunt");
-  point.addTag("device", "ESP8266_proto1");
-  point.addField("I", s.i);
-  point.addField("U", s.u);
-  point.addField("P", s.p);
-  point.addField("E", s.e);
-  client.writePoint(point);
+  client.checkBuffer();
 
-  //SampleQ.enqueue(s);
+  unsigned long nowTime = micros();
 
-  if (NowTime - LastTimeOut > 1e6) {
-    float sps = NumSamples / ((NowTime - StartTime) * 1e-6);
+  if (nowTime - LastTimeOut > 1e6) {
+    float sps = NumSamples / ((nowTime - StartTime) * 1e-6);
+    Sample s = LastSample;
 
     Serial.print("U=");
     Serial.print(s.u, 4);
@@ -195,15 +255,10 @@ void loop(void) {
     Serial.print(", SPS=");
     Serial.print(sps, 1);
     Serial.print(", T=");
-    Serial.print((NowTime - StartTime) * 1e-6, 1);
+    Serial.print((nowTime - StartTime) * 1e-6, 1);
     Serial.print("s");
     //Serial.print(adc2, BIN);
     Serial.println("");
-    LastTimeOut = NowTime;
-  }
-
-  if (new_data) {
-    // Serial.println("new_data");
-    //new_data = false;
+    LastTimeOut = nowTime;
   }
 }
