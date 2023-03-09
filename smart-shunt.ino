@@ -52,12 +52,16 @@ constexpr int READY_PIN = 12;
 
 // minimize memory footprint
 // - use raw ADC samples
-// - remove p, e
+// - remove p, e  
 // - instead of timeval store dt to the prev sample (uint_16)
 struct Sample {
-  float u, i, p, e;
-   struct timeval t;
+  float u, i, e;
+  // struct timeval t; // sizeof(timeval)=16
+  unsigned long long t; // 8byte
+
+  inline float p() const { return u*i; }
 };
+
 
 volatile bool new_data = false;
 volatile unsigned long NumSamples = 0;
@@ -85,12 +89,12 @@ public:
   }
 };
 
-//RingBuf<PointDefaultConstructor, 400> pointBuf;
-
+constexpr int sampleBufMaxSize = 400;
 std::queue<Sample> sampleBuf;
+uint32_t numDropped = 0;
 
 void startReading() {
-  if ((++readUICycle % 3) == 0) {
+  if ((++readUICycle % 4) == 0) {
     // occasionally sample U
     startReadingU();
   } else {
@@ -104,33 +108,37 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
 
   if (readingU) {
     LastVoltage = ads.computeVolts(adc) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
-    startReading();
   } else {
     Sample &s(LastSample);
-    gettimeofday(&s.t, NULL);
+    struct timeval u_time;
+    gettimeofday(&u_time, NULL);
+    s.t = getTimeStamp(&u_time, 3);
 
     s.i = ads.computeVolts(adc) * (1000.0f / 12.5f) * (20.4f / 20.32f);
     s.u = LastVoltage;
-    s.p = s.i * s.u;
 
     unsigned long nowTime = micros();
     if (LastTime != 0) {
       unsigned long dt_us = nowTime - LastTime;
-      Energy += s.p * (dt_us * (1e-6f / 3600.f));
+      Energy += s.p() * (dt_us * (1e-6f / 3600.f));
       s.e = Energy;
     } else {
       s.e = 0.0f;
     }
 
-    startReading();
-
-
+    while(sampleBuf.size() > sampleBufMaxSize) {
+      sampleBuf.pop();
+      ++numDropped;
+    }
     sampleBuf.push(s);
+    
 
     ++NumSamples;
     LastTime = nowTime;
     new_data = true;
   }
+
+  startReading();
 }
 
 
@@ -139,7 +147,7 @@ InfluxDBClient client;
 unsigned long StartTime = 0;
 
 void setup(void) {
-  Serial.begin(9600);
+  Serial.begin(115200);
 
 
   // ads.setDataRate
@@ -147,8 +155,9 @@ void setup(void) {
   // RATE_ADS1115_128SPS (default)
   // RATE_ADS1115_250SPS, RATE_ADS1115_475SPS
 
-  //ads.setDataRate(RATE_ADS1115_860SPS);
-  ads.setDataRate(RATE_ADS1115_250SPS);
+  ads.setDataRate(RATE_ADS1115_860SPS);
+  //ads.setDataRate(RATE_ADS1115_250SPS);
+  //ads.setDataRate(RATE_ADS1115_475SPS);
   Wire.setClock(400000UL);
 
   if (!ads.begin()) {
@@ -165,10 +174,11 @@ void setup(void) {
   client.setConnectionParamsV1("http://homeassistant.local:8086", /*db*/ "open_pe", "home_assistant", "h0me");
   client.setWriteOptions(WriteOptions()
                            .writePrecision(WritePrecision::MS)
-                           .batchSize(40)
+                           .batchSize(200)
                            .bufferSize(400)
                            .flushInterval(.5f)
-                           .retryInterval(5));
+                           .retryInterval(0) // 0=disable retry
+                           );
 
   connect_wifi();
   timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
@@ -205,7 +215,7 @@ void startReadingU() {
   ads.startADCReading(MUX_BY_CHANNEL[2], /*continuous=*/false);
 }
 
-std::vector<PointDefaultConstructor> pointFrame(40);
+std::vector<PointDefaultConstructor> pointFrame(20);
 uint16_t maxBufSize = 0;
 
 void loop(void) {
@@ -222,9 +232,9 @@ void loop(void) {
         point.addTag("device", "ESP8266_proto1");
         point.addField("I", s.i);
         point.addField("U", s.u);
-        point.addField("P", s.p);
+        point.addField("P", s.p());
         point.addField("E", s.e);
-        point.setTime(getTimeStamp((struct timeval*)&s.t,3));
+        point.setTime(s.t);
         sampleBuf.pop();
         pointFrame[i] = point;
         ++i;
@@ -237,8 +247,8 @@ void loop(void) {
       Serial.println("new_data but 0 points in buf!");
     }
 
-    for (uint16_t j = 0; j < i; ++j)
-      client.writePoint(pointFrame[j]);
+    //for (uint16_t j = 0; j < i; ++j)
+    //  client.writePoint(pointFrame[j]);
   }
 
   client.checkBuffer();
@@ -254,7 +264,7 @@ void loop(void) {
     Serial.print("V, I=");
     Serial.print(s.i, 3);
     Serial.print("A, P=");
-    Serial.print(s.p, 3);
+    Serial.print(s.p(), 3);
     Serial.print("W, E=");
     Serial.print(s.e);
     Serial.print("Wh, N=");
@@ -266,6 +276,8 @@ void loop(void) {
     Serial.print("s");
     Serial.print(", maxBufSize=");
     Serial.print(maxBufSize);
+    Serial.print(", numDropped=");
+    Serial.print(numDropped);
     //Serial.print(adc2, BIN);
     Serial.println("");
     LastTimeOut = nowTime;
