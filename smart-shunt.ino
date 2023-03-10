@@ -7,15 +7,14 @@
 
 /**
 * TODO:
-- i2c speed?
+- handle integer flip over
 - auto-gain
-- sample I more often than U
-- SampleRate?
 - AC RMS
 - Min-Max
 - Peak-to-Peak
 - Auto-correlation, max Frequency, DC+AC
-
+- Linear Calibration (atomated)
+- trapezoidal integration
 
 - do i need to pull one current sense input to V_DD/2 ?
 If VOUT is connected to the ADC positive input (AINP) and VCM is connected to the ADC negative input (AINN),
@@ -56,7 +55,6 @@ constexpr int READY_PIN = 12;
 // - instead of timeval store dt to the prev sample (uint_16)
 struct Sample {
   float u, i, e;
-  // struct timeval t; // sizeof(timeval)=16
   unsigned long long t;  // 8byte
 
   inline float p() const {
@@ -71,7 +69,7 @@ volatile unsigned long NumSamples = 0;
 int readUICycle = 0;
 bool readingU = false;
 
-unsigned long LastTime = 0;
+volatile unsigned long LastTime = 0;
 float LastVoltage = 0.0f;
 float Energy = 0;
 
@@ -91,7 +89,7 @@ public:
   }
 };
 
-constexpr int sampleBufMaxSize = 400;
+constexpr int sampleBufMaxSize = 200;
 std::queue<Sample> sampleBuf;
 uint32_t numDropped = 0;
 
@@ -108,6 +106,8 @@ void startReading() {
 void ICACHE_RAM_ATTR NewDataReadyISR() {
   int16_t adc = ads.getLastConversionResults();
 
+  // TODO detect clipping
+
   if (readingU) {
     LastVoltage = ads.computeVolts(adc) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
   } else {
@@ -115,7 +115,6 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
     struct timeval u_time;
     gettimeofday(&u_time, NULL);
     s.t = getTimeStamp(&u_time, 3);
-
     s.i = ads.computeVolts(adc) * (1000.0f / 12.5f) * (20.4f / 20.32f);
     s.u = LastVoltage;
 
@@ -147,12 +146,13 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
 InfluxDBClient client;
 
 unsigned long StartTime = 0;
+unsigned long LastTimeOut = 0;
+unsigned long NSamplesLastTimeOut = 0;
 
 void setup(void) {
   Serial.begin(9600);
 
-
-  // ads.setDataRate
+  connect_wifi_async();
 
   // RATE_ADS1115_128SPS (default)
   // RATE_ADS1115_250SPS, RATE_ADS1115_475SPS
@@ -164,15 +164,13 @@ void setup(void) {
 
   if (!ads.begin()) {
     Serial.println("Failed to initialize ADS.");
-    while (1)
-      ;
+    while (1) yield();
   }
 
+  // listen to the ADC's ALERT pin
   pinMode(READY_PIN, INPUT_PULLUP);
-  // We get a falling edge every time a new sample is ready.
   attachInterrupt(digitalPinToInterrupt(READY_PIN), NewDataReadyISR, FALLING);
 
-  // const String &serverUrl, const String &db, const String &user, const String &password, const char *certInfo
   client.setConnectionParamsV1("http://homeassistant.local:8086", /*db*/ "open_pe", "home_assistant", "h0me");
   client.setWriteOptions(WriteOptions()
                            .writePrecision(WritePrecision::MS)
@@ -182,26 +180,17 @@ void setup(void) {
                            .retryInterval(0)  // 0=disable retry
   );
 
-  connect_wifi();
+  wait_for_wifi();
   timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
 
   StartTime = micros();
-  // when multiplexing channels, TI recommnads single-shot mode (https://e2e.ti.com/support/data-converters-group/data-converters/f/data-converters-forum/563147/ads1115-ads1115-in-continuous-mode-with-alternating-channels)
-  // Start continuous conversions.
 
-  startReadingU();
+  // when multiplexing channels, TI recommnads single-shot mode
+  startReading();
 }
 
-
-
-
-
-unsigned long LastTimeOut = 0;
-
-
-
 void waiting_for_adc() {
-  client.checkBuffer();
+  //client.checkBuffer();
 }
 
 void startReadingI() {
@@ -220,10 +209,42 @@ void startReadingU() {
 std::vector<PointDefaultConstructor> pointFrame(20);
 uint16_t maxBufSize = 0;
 
+struct MeanWindow {
+  // TODO trapezoidal sum?
+  float sum;
+  uint32_t num;
+
+  float getMean() const {
+    return sum / num;
+  }
+  void clear() {
+    sum = 0.f;
+    num = 0.f;
+  }
+  void add(float x) {
+    sum += x;
+    ++num;
+  }
+
+  float pop() {
+    float m = getMean();
+    clear();
+    return m;
+  }
+
+  MeanWindow() {
+    clear();
+  }
+};
+
+struct MeanWindow MeanI {};
+struct MeanWindow MeanU {};
+
 void loop(void) {
 
   constexpr bool hfWrites = false;
 
+  unsigned long nowTime = micros();
 
   if (new_data) {
     uint16_t i = 0;
@@ -240,6 +261,8 @@ void loop(void) {
         point.addField("E", s.e);
         point.setTime(s.t);
         sampleBuf.pop();
+        MeanI.add(s.i);
+        MeanU.add(s.u);
         pointFrame[i] = point;
         ++i;
       }
@@ -254,34 +277,50 @@ void loop(void) {
     if (hfWrites)
       for (uint16_t j = 0; j < i; ++j)
         client.writePoint(pointFrame[j]);
+  } else {
+    auto lastTime = LastTime;
+    if (nowTime > lastTime && (nowTime - lastTime) > 2e6) {
+      Serial.println("Timeout waiting for new sample!");
+      Serial.println((nowTime - lastTime) * 1e-6);
+      Serial.println(lastTime);
+      Serial.println(nowTime);
+      noInterrupts();
+      startReading(); // TODO this is for some reason not necessary
+      interrupts();
+    }
   }
 
   //if (hfWrites)
   //  client.checkBuffer();
 
-  unsigned long nowTime = micros();
-
   if (nowTime - LastTimeOut > 1e6) {
-    float sps = NumSamples / ((nowTime - StartTime) * 1e-6);
+    // capture
     Sample s = LastSample;
+    auto nSamples = NumSamples;
 
+    // compute
+    float sps = (nSamples - NSamplesLastTimeOut) / ((nowTime - LastTimeOut) * 1e-6);
+    float i_mean = MeanI.pop(), u_mean = MeanU.pop();
+    float p_mean = u_mean * i_mean;
+
+  /*
     if (!hfWrites) {
       Point point("smart_shunt");
       point.addTag("device", "ESP8266_proto1");
-      point.addField("I", s.i);
-      point.addField("U", s.u);
-      point.addField("P", s.p());
+      point.addField("I", i_mean);
+      point.addField("U", u_mean);
+      point.addField("P", p_mean);
       point.addField("E", s.e);
       point.setTime(s.t);
       client.writePoint(point);
-    }
+    } /**/
 
     Serial.print("U=");
-    Serial.print(s.u, 4);
+    Serial.print(u_mean, 4);
     Serial.print("V, I=");
-    Serial.print(s.i, 3);
+    Serial.print(i_mean, 3);
     Serial.print("A, P=");
-    Serial.print(s.p(), 3);
+    Serial.print(p_mean, 3);
     Serial.print("W, E=");
     Serial.print(s.e);
     Serial.print("Wh, N=");
@@ -297,6 +336,8 @@ void loop(void) {
     Serial.print(numDropped);
     //Serial.print(adc2, BIN);
     Serial.println("");
+
+    NSamplesLastTimeOut = nSamples;
     LastTimeOut = nowTime;
   }
 }

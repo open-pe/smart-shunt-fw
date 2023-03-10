@@ -16,21 +16,21 @@ WiFiMulti wifiMulti;
 #include <ESP8266WiFiMulti.h>
 ESP8266WiFiMulti wifiMulti;
 #define DEVICE "ESP8266"
-#include <ESP8266WiFi.h>            // we need wifi to get internet access
+#include <ESP8266WiFi.h>  // we need wifi to get internet access
 #endif
 
 
-void connect_wifi() {
-  // configTime(MY_TZ, MY_NTP_SERVER);
-
-  // Connect WiFi
-  //Serial.println("Connecting to WiFi");
+void connect_wifi_async() {
   WiFi.mode(WIFI_STA);
   wifiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
+}
+
+void wait_for_wifi() {
   while (wifiMulti.run() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(500);
+    delay(50);
   }
   Serial.print("Connected to WiFi, RSSI ");
-  Serial.println( WiFi.RSSI());
+  Serial.print(WiFi.RSSI());
+  Serial.print(", IP ");
+  Serial.println(WiFi.localIP());
 }
