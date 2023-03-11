@@ -3,10 +3,13 @@
 //#include <RingBuf.h>
 
 #include <queue>
+#include <WiFiUDP.h>
 
 
 /**
 * TODO:
+- linearity test
+- 160 mhz
 - handle integer flip over
 - auto-gain
 - AC RMS
@@ -15,6 +18,9 @@
 - Auto-correlation, max Frequency, DC+AC
 - Linear Calibration (atomated)
 - trapezoidal integration
+
+- Telemetry https://github.com/Overdrivr/Telemetry
+- MQTT ?
 
 - do i need to pull one current sense input to V_DD/2 ?
 If VOUT is connected to the ADC positive input (AINP) and VCM is connected to the ADC negative input (AINN),
@@ -71,9 +77,9 @@ bool readingU = false;
 
 volatile unsigned long LastTime = 0;
 float LastVoltage = 0.0f;
-float Energy = 0;
+double Energy = 0;
 
-Sample LastSample;
+float LastP = 0.0f;
 
 
 class PointDefaultConstructor : public Point {
@@ -93,8 +99,12 @@ constexpr int sampleBufMaxSize = 200;
 std::queue<Sample> sampleBuf;
 uint32_t numDropped = 0;
 
+const std::array<adsGain_t, 6> gains = { GAIN_TWOTHIRDS, GAIN_ONE, GAIN_TWO, GAIN_FOUR, GAIN_EIGHT, GAIN_SIXTEEN };
+adsGain_t gainI = GAIN_EIGHT, gainU = GAIN_TWO;
+
 void startReading() {
-  if ((++readUICycle % 4) == 0) {
+  //if ((++readUICycle % 4) == 0) {
+  if (random(0, 4) == 0) {  // random sampling better than cyclic
     // occasionally sample U
     startReadingU();
   } else {
@@ -102,16 +112,32 @@ void startReading() {
   }
 }
 
+const std::array<int16_t, 6> adcThres = { 0u, 17476u, 8738u, 4370u, 2185u, 1093u };
+
+adsGain_t chooseGain(int16_t adc) {
+  int16_t absAdc = abs(adc);
+  uint8_t newGain = 0;
+  for (uint8_t i = adcThres.size() - 1; i >= 0; --i) {
+    if (absAdc < adcThres[i]) {
+      newGain = i;
+      return gains[i];
+    }
+  }
+}
+
 //void IRAM_ATTR
 void ICACHE_RAM_ATTR NewDataReadyISR() {
   int16_t adc = ads.getLastConversionResults();
+
+  //auto &newGain(readingU ? gainU : gainI);
+  //newGain = chooseGain(adc);
 
   // TODO detect clipping
 
   if (readingU) {
     LastVoltage = ads.computeVolts(adc) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
   } else {
-    Sample &s(LastSample);
+    Sample s;
     struct timeval u_time;
     gettimeofday(&u_time, NULL);
     s.t = getTimeStamp(&u_time, 3);
@@ -119,9 +145,11 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
     s.u = LastVoltage;
 
     unsigned long nowTime = micros();
+    auto P = s.p();
     if (LastTime != 0) {
+      // we use simple trapezoidal rule here
       unsigned long dt_us = nowTime - LastTime;
-      Energy += s.p() * (dt_us * (1e-6f / 3600.f));
+      Energy += (double)((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
       s.e = Energy;
     } else {
       s.e = 0.0f;
@@ -136,6 +164,7 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
 
     ++NumSamples;
     LastTime = nowTime;
+    LastP = P;
     new_data = true;
   }
 
@@ -195,18 +224,17 @@ void waiting_for_adc() {
 
 void startReadingI() {
   readingU = false;
-  //ads.setGain(GAIN_FOUR);   // +- 80 Ampere
-  ads.setGain(GAIN_EIGHT);  // +- 40 Ampere
+  ads.setGain(gainI);
   ads.startADCReading(ADS1X15_REG_CONFIG_MUX_DIFF_0_1, /*continuous=*/false);
 }
 
 void startReadingU() {
   readingU = true;
-  ads.setGain(GAIN_TWO);  // 2x gain   +/- 2.048V  1 bit = 1mV      0.0625mV
+  ads.setGain(gainU);
   ads.startADCReading(MUX_BY_CHANNEL[2], /*continuous=*/false);
 }
 
-std::vector<PointDefaultConstructor> pointFrame(20);
+std::vector<PointDefaultConstructor> pointFrame(10);
 uint16_t maxBufSize = 0;
 
 struct MeanWindow {
@@ -239,6 +267,10 @@ struct MeanWindow {
 
 struct MeanWindow MeanI {};
 struct MeanWindow MeanU {};
+struct MeanWindow MeanP {};
+unsigned long long windowTimestamp = 0;
+
+WiFiUDP udp;
 
 void loop(void) {
 
@@ -253,17 +285,23 @@ void loop(void) {
       if (sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
       while (i < pointFrame.size() && !sampleBuf.empty()) {
         const Sample &s(sampleBuf.front());
-        Point point("smart_shunt");
-        point.addTag("device", "ESP8266_proto1");
-        point.addField("I", s.i);
-        point.addField("U", s.u);
-        point.addField("P", s.p());
-        point.addField("E", s.e);
-        point.setTime(s.t);
-        sampleBuf.pop();
         MeanI.add(s.i);
         MeanU.add(s.u);
-        pointFrame[i] = point;
+        MeanP.add(s.p());
+        windowTimestamp = s.t;
+
+        if (hfWrites) {
+          Point point("smart_shunt");
+          point.addTag("device", "ESP8266_proto1");
+          point.addField("I", s.i, 3);
+          point.addField("U", s.u, 3);
+          point.addField("P", s.p(), 3);
+          point.addField("E", s.e, 3);
+          point.setTime(s.t);
+          pointFrame[i] = point;
+        }
+
+        sampleBuf.pop();
         ++i;
       }
     }
@@ -275,17 +313,20 @@ void loop(void) {
     }
 
     if (hfWrites)
-      for (uint16_t j = 0; j < i; ++j)
-        client.writePoint(pointFrame[j]);
+      influxWritePointsUDP(&pointFrame[0], pointFrame.size());
+    //for (uint16_t j = 0; j < i; ++j)
+    //  client.writePoint(pointFrame[j]);
   } else {
     auto lastTime = LastTime;
     if (nowTime > lastTime && (nowTime - lastTime) > 2e6) {
+      Serial.println("");
       Serial.println("Timeout waiting for new sample!");
       Serial.println((nowTime - lastTime) * 1e-6);
       Serial.println(lastTime);
       Serial.println(nowTime);
+      Serial.println("");
       noInterrupts();
-      startReading(); // TODO this is for some reason not necessary
+      startReading();  // TODO this is for some reason not necessary
       interrupts();
     }
   }
@@ -295,26 +336,26 @@ void loop(void) {
 
   if (nowTime - LastTimeOut > 1e6) {
     // capture
-    Sample s = LastSample;
     auto nSamples = NumSamples;
+    auto energy = Energy;
 
     // compute
     float sps = (nSamples - NSamplesLastTimeOut) / ((nowTime - LastTimeOut) * 1e-6);
-    float i_mean = MeanI.pop(), u_mean = MeanU.pop();
-    float p_mean = u_mean * i_mean;
+    float i_mean = MeanI.pop(), u_mean = MeanU.pop(), p_mean = MeanP.pop();
 
-  /*
+/*
     if (!hfWrites) {
       Point point("smart_shunt");
       point.addTag("device", "ESP8266_proto1");
-      point.addField("I", i_mean);
-      point.addField("U", u_mean);
-      point.addField("P", p_mean);
-      point.addField("E", s.e);
-      point.setTime(s.t);
-      client.writePoint(point);
-    } /**/
-
+      point.addField("I", i_mean, 4);
+      point.addField("U", u_mean, 4);
+      point.addField("P", p_mean, 4);
+      point.addField("E", energy, 4);
+      point.setTime(windowTimestamp);
+      //influxWritePointsUDP(&point, 1);
+      //client.writePoint(point);
+    }
+*/
     Serial.print("U=");
     Serial.print(u_mean, 4);
     Serial.print("V, I=");
@@ -322,7 +363,7 @@ void loop(void) {
     Serial.print("A, P=");
     Serial.print(p_mean, 3);
     Serial.print("W, E=");
-    Serial.print(s.e);
+    Serial.print(energy, 3);
     Serial.print("Wh, N=");
     Serial.print(NumSamples);
     Serial.print(", SPS=");
@@ -335,7 +376,7 @@ void loop(void) {
     Serial.print(", numDropped=");
     Serial.print(numDropped);
     //Serial.print(adc2, BIN);
-    Serial.println("");
+    Serial.println();
 
     NSamplesLastTimeOut = nSamples;
     LastTimeOut = nowTime;
