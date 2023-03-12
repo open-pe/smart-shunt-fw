@@ -265,6 +265,36 @@ struct MeanWindow {
   }
 };
 
+
+void printTime() {
+  char buffer[26];
+  int millisec;
+  struct timeval tv;
+
+  gettimeofday(&tv, NULL);
+
+  millisec = lrint(tv.tv_usec / 1000.0);  // Round to nearest millisec
+  if (millisec >= 1000) {                 // Allow for rounding up to nearest second
+    millisec -= 1000;
+    tv.tv_sec++;
+  }
+
+  strftime(buffer, 26, "%H:%M:%S", localtime(&tv.tv_sec));
+  // printf("%s.%03d\n", buffer, millisec);
+  Serial.print(buffer);
+  Serial.print('.');
+  Serial.print(millisec);
+  Serial.print(' ');
+
+  /*
+  char buff[100];
+    time_t now = time (0);
+    strftime (buff, 100, "%H:%M:%S.000", localtime (&now));
+    printf ("%s\n", buff);
+    return 0;
+  */
+}
+
 struct MeanWindow MeanI {};
 struct MeanWindow MeanU {};
 struct MeanWindow MeanP {};
@@ -356,6 +386,7 @@ void loop(void) {
       //client.writePoint(point);
     }
 */
+    printTime();
     Serial.print("U=");
     Serial.print(u_mean, 4);
     Serial.print("V, I=");
