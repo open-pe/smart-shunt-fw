@@ -103,8 +103,8 @@ const std::array<adsGain_t, 6> gains = { GAIN_TWOTHIRDS, GAIN_ONE, GAIN_TWO, GAI
 adsGain_t gainI = GAIN_EIGHT, gainU = GAIN_TWO;
 
 void startReading() {
-  //if ((++readUICycle % 4) == 0) {
-  if (random(0, 4) == 0) {  // random sampling better than cyclic
+  if ((++readUICycle % 4) == 0) {
+    //if (random(0, 4) == 0) {  // random sampling better than cyclic
     // occasionally sample U
     startReadingU();
   } else {
@@ -125,23 +125,50 @@ adsGain_t chooseGain(int16_t adc) {
   }
 }
 
-//void IRAM_ATTR
-void ICACHE_RAM_ATTR NewDataReadyISR() {
-  int16_t adc = ads.getLastConversionResults();
+float computeVolts(int16_t counts, adsGain_t gain) {
+  uint8_t m_bitShift = 0; // ads1115
+  // see data sheet Table 3
+  float fsRange;
+  switch (gain) {
+  case GAIN_TWOTHIRDS:
+    fsRange = 6.144f;
+    break;
+  case GAIN_ONE:
+    fsRange = 4.096f;
+    break;
+  case GAIN_TWO:
+    fsRange = 2.048f;
+    break;
+  case GAIN_FOUR:
+    fsRange = 1.024f;
+    break;
+  case GAIN_EIGHT:
+    fsRange = 0.512f;
+    break;
+  case GAIN_SIXTEEN:
+    fsRange = 0.256f;
+    break;
+  default:
+    fsRange = 0.0f;
+  }
+  return counts * (fsRange / (32768 >> m_bitShift));
+}
 
-  //auto &newGain(readingU ? gainU : gainI);
+void processSampleFromADC(int16_t adc, bool readU) {
+
+  //auto &newGain(readU ? gainU : gainI);
   //newGain = chooseGain(adc);
 
   // TODO detect clipping
 
-  if (readingU) {
-    LastVoltage = ads.computeVolts(adc) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
+  if (readU) {
+    LastVoltage = computeVolts(adc, gainU) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
   } else {
     Sample s;
     struct timeval u_time;
     gettimeofday(&u_time, NULL);
     s.t = getTimeStamp(&u_time, 3);
-    s.i = ads.computeVolts(adc) * (1000.0f / 12.5f) * (20.4f / 20.32f);
+    s.i = computeVolts(adc, gainI) * (1000.0f / 12.5f) * (20.4f / 20.32f);
     s.u = LastVoltage;
 
     unsigned long nowTime = micros();
@@ -165,10 +192,14 @@ void ICACHE_RAM_ATTR NewDataReadyISR() {
     ++NumSamples;
     LastTime = nowTime;
     LastP = P;
-    new_data = true;
   }
+}
 
-  startReading();
+//void IRAM_ATTR
+void ICACHE_RAM_ATTR NewDataReadyISR() {
+  //getSampleFromADC();
+  new_data = true;
+  //startReading();
 }
 
 
@@ -309,8 +340,14 @@ void loop(void) {
   unsigned long nowTime = micros();
 
   if (new_data) {
+    int16_t adc = ads.getLastConversionResults();
+    new_data = false;
+    bool readU = readingU;
+    startReading();
+    processSampleFromADC(adc, readU);
+
     uint16_t i = 0;
-    noInterrupts();
+    //noInterrupts();
     {
       if (sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
       while (i < pointFrame.size() && !sampleBuf.empty()) {
@@ -335,11 +372,11 @@ void loop(void) {
         ++i;
       }
     }
-    new_data = false;
-    interrupts();
+    //new_data = false;
+    //interrupts();
 
     if (i == 0) {
-      Serial.println("new_data but 0 points in buf!");
+      //Serial.println("new_data but 0 points in buf!");
     }
 
     if (hfWrites)
@@ -348,7 +385,7 @@ void loop(void) {
     //  client.writePoint(pointFrame[j]);
   } else {
     auto lastTime = LastTime;
-    if (nowTime > lastTime && (nowTime - lastTime) > 2e6) {
+    if (nowTime > lastTime && (nowTime - lastTime) > 4e6) {
       Serial.println("");
       Serial.println("Timeout waiting for new sample!");
       Serial.println((nowTime - lastTime) * 1e-6);
@@ -373,7 +410,7 @@ void loop(void) {
     float sps = (nSamples - NSamplesLastTimeOut) / ((nowTime - LastTimeOut) * 1e-6);
     float i_mean = MeanI.pop(), u_mean = MeanU.pop(), p_mean = MeanP.pop();
 
-/*
+
     if (!hfWrites) {
       Point point("smart_shunt");
       point.addTag("device", "ESP8266_proto1");
@@ -382,10 +419,10 @@ void loop(void) {
       point.addField("P", p_mean, 4);
       point.addField("E", energy, 4);
       point.setTime(windowTimestamp);
-      //influxWritePointsUDP(&point, 1);
+      influxWritePointsUDP(&point, 1);
       //client.writePoint(point);
     }
-*/
+
     printTime();
     Serial.print("U=");
     Serial.print(u_mean, 4);
