@@ -401,7 +401,7 @@ void loop(void) {
   //if (hfWrites)
   //  client.checkBuffer();
 
-  if (nowTime - LastTimeOut > 1e6) {
+  if (nowTime - LastTimeOut > 500e3) {
     // capture
     auto nSamples = NumSamples;
     auto energy = Energy;
