@@ -126,30 +126,30 @@ adsGain_t chooseGain(int16_t adc) {
 }
 
 float computeVolts(int16_t counts, adsGain_t gain) {
-  uint8_t m_bitShift = 0; // ads1115
+  uint8_t m_bitShift = 0;  // ads1115
   // see data sheet Table 3
   float fsRange;
   switch (gain) {
-  case GAIN_TWOTHIRDS:
-    fsRange = 6.144f;
-    break;
-  case GAIN_ONE:
-    fsRange = 4.096f;
-    break;
-  case GAIN_TWO:
-    fsRange = 2.048f;
-    break;
-  case GAIN_FOUR:
-    fsRange = 1.024f;
-    break;
-  case GAIN_EIGHT:
-    fsRange = 0.512f;
-    break;
-  case GAIN_SIXTEEN:
-    fsRange = 0.256f;
-    break;
-  default:
-    fsRange = 0.0f;
+    case GAIN_TWOTHIRDS:
+      fsRange = 6.144f;
+      break;
+    case GAIN_ONE:
+      fsRange = 4.096f;
+      break;
+    case GAIN_TWO:
+      fsRange = 2.048f;
+      break;
+    case GAIN_FOUR:
+      fsRange = 1.024f;
+      break;
+    case GAIN_EIGHT:
+      fsRange = 0.512f;
+      break;
+    case GAIN_SIXTEEN:
+      fsRange = 0.256f;
+      break;
+    default:
+      fsRange = 0.0f;
   }
   return counts * (fsRange / (32768 >> m_bitShift));
 }
@@ -209,6 +209,12 @@ unsigned long StartTime = 0;
 unsigned long LastTimeOut = 0;
 unsigned long NSamplesLastTimeOut = 0;
 
+esp_adc_cal_characteristics_t adc_chars;
+uint32_t readADC_Cal(int ADC_Raw)
+{
+  return(esp_adc_cal_raw_to_voltage(ADC_Raw, &adc_chars));
+}
+
 void setup(void) {
   Serial.begin(9600);
 
@@ -239,6 +245,14 @@ void setup(void) {
                            .flushInterval(1)  // uint16! min is 1
                            .retryInterval(0)  // 0=disable retry
   );
+
+  adcAttachPin(36); // adc1ch0 SENSOR_VP
+  adcAttachPin(37); // adc1ch1 SENSOR_VP
+  adcAttachPin(38); // adc1ch2 SENSOR_VP
+  analogSetPinAttenuation(36, ADC_ATTEN_DB_6); // 150 mV ~ 1750 mV
+  analogSetPinAttenuation(37, ADC_ATTEN_DB_6); // 150 mV ~ 1750 mV
+  analogSetPinAttenuation(38, ADC_ATTEN_DB_6); // 150 mV ~ 1750 mV
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_6, ADC_WIDTH_BIT_12, 1100, &adc_chars);
 
   wait_for_wifi();
   timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
@@ -333,6 +347,21 @@ unsigned long long windowTimestamp = 0;
 
 WiFiUDP udp;
 
+void samplePoint(Point &p, const Sample &s, const char *device) {
+  point.addTag("device", device);
+  point.addField("I", s.i, 3);
+  point.addField("U", s.u, 3);
+  point.addField("P", s.p(), 3);
+  point.addField("E", s.e, 3);
+  point.setTime(s.t);
+}
+
+void readEspAdc() {
+  auto i =  (readADC_Cal(analogRead(37)) - readADC_Cal(analogRead(36)))  * (1000.0f / 12.5f) * (20.4f / 20.32f);
+  auto u = readADC_Cal(analogRead(38)) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
+
+}
+
 void loop(void) {
 
   constexpr bool hfWrites = false;
@@ -347,42 +376,29 @@ void loop(void) {
     processSampleFromADC(adc, readU);
 
     uint16_t i = 0;
-    //noInterrupts();
-    {
-      if (sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
-      while (i < pointFrame.size() && !sampleBuf.empty()) {
-        const Sample &s(sampleBuf.front());
-        MeanI.add(s.i);
-        MeanU.add(s.u);
-        MeanP.add(s.p());
-        windowTimestamp = s.t;
 
-        if (hfWrites) {
-          Point point("smart_shunt");
-          point.addTag("device", "ESP8266_proto1");
-          point.addField("I", s.i, 3);
-          point.addField("U", s.u, 3);
-          point.addField("P", s.p(), 3);
-          point.addField("E", s.e, 3);
-          point.setTime(s.t);
-          pointFrame[i] = point;
-        }
 
-        sampleBuf.pop();
-        ++i;
+    if (sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
+    while (i < pointFrame.size() && !sampleBuf.empty()) {
+      const Sample &s(sampleBuf.front());
+      MeanI.add(s.i);
+      MeanU.add(s.u);
+      MeanP.add(s.p());
+      windowTimestamp = s.t;
+
+      if (hfWrites) {
+        Point point("smart_shunt");
+        samplePoint(point, s, "ESP8266_proto1");
+        pointFrame[i] = point;
       }
-    }
-    //new_data = false;
-    //interrupts();
 
-    if (i == 0) {
-      //Serial.println("new_data but 0 points in buf!");
+      sampleBuf.pop();
+      ++i;
     }
 
-    if (hfWrites)
-      influxWritePointsUDP(&pointFrame[0], pointFrame.size());
-    //for (uint16_t j = 0; j < i; ++j)
-    //  client.writePoint(pointFrame[j]);
+
+    if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size());
+
   } else {
     auto lastTime = LastTime;
     if (nowTime > lastTime && (nowTime - lastTime) > 4e6) {
@@ -392,11 +408,11 @@ void loop(void) {
       Serial.println(lastTime);
       Serial.println(nowTime);
       Serial.println("");
-      noInterrupts();
       startReading();  // TODO this is for some reason not necessary
-      interrupts();
     }
   }
+
+
 
   //if (hfWrites)
   //  client.checkBuffer();
