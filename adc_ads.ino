@@ -3,6 +3,12 @@ class PowerSampler_ADS : public PowerSampler {
   Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
   //Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
 
+volatile bool new_data = false;
+
+
+int readUICycle = 0;
+bool readingU = false;
+
   float LastVoltage = 0.0f;
 
   const std::array<adsGain_t, 6> gains = { GAIN_TWOTHIRDS, GAIN_ONE, GAIN_TWO, GAIN_FOUR, GAIN_EIGHT, GAIN_SIXTEEN };

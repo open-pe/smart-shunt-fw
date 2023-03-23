@@ -31,6 +31,7 @@ public:
     Sample s;
     auto i0 = analogRead(PIN_I0);
     auto i1 = analogRead(PIN_I1) auto u = analogRead(PIN_U);
+    // TODO detect clipping
     s.setTimeNow();
     s.i = (readADC_Cal(i1) - readADC_Cal(i0)) * (1000.0f / 12.5f) * (20.4f / 20.32f);
     s.u = readADC_Cal(analogRead(u)) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
