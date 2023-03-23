@@ -43,8 +43,7 @@ AIN2, AIN3. The differential capacitors must be of high quality. The best cerami
 
 */
 
-Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
-//Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
+
 
 constexpr int READY_PIN = 12;
 
@@ -55,19 +54,6 @@ constexpr int READY_PIN = 12;
 #define IRAM_ATTR
 #endif
 
-// minimize memory footprint
-// - use raw ADC samples
-// - remove p, e
-// - instead of timeval store dt to the prev sample (uint_16)
-struct Sample {
-  float u, i, e;
-  unsigned long long t;  // 8byte
-
-  inline float p() const {
-    return u * i;
-  }
-};
-
 
 volatile bool new_data = false;
 volatile unsigned long NumSamples = 0;
@@ -76,9 +62,8 @@ int readUICycle = 0;
 bool readingU = false;
 
 volatile unsigned long LastTime = 0;
-float LastVoltage = 0.0f;
-double Energy = 0;
 
+double Energy = 0;
 float LastP = 0.0f;
 
 
@@ -99,109 +84,10 @@ constexpr int sampleBufMaxSize = 200;
 std::queue<Sample> sampleBuf;
 uint32_t numDropped = 0;
 
-const std::array<adsGain_t, 6> gains = { GAIN_TWOTHIRDS, GAIN_ONE, GAIN_TWO, GAIN_FOUR, GAIN_EIGHT, GAIN_SIXTEEN };
-adsGain_t gainI = GAIN_EIGHT, gainU = GAIN_TWO;
 
-void startReading() {
-  if ((++readUICycle % 4) == 0) {
-    //if (random(0, 4) == 0) {  // random sampling better than cyclic
-    // occasionally sample U
-    startReadingU();
-  } else {
-    startReadingI();
-  }
-}
-
-const std::array<int16_t, 6> adcThres = { 0u, 17476u, 8738u, 4370u, 2185u, 1093u };
-
-adsGain_t chooseGain(int16_t adc) {
-  int16_t absAdc = abs(adc);
-  uint8_t newGain = 0;
-  for (uint8_t i = adcThres.size() - 1; i >= 0; --i) {
-    if (absAdc < adcThres[i]) {
-      newGain = i;
-      return gains[i];
-    }
-  }
-}
-
-float computeVolts(int16_t counts, adsGain_t gain) {
-  uint8_t m_bitShift = 0;  // ads1115
-  // see data sheet Table 3
-  float fsRange;
-  switch (gain) {
-    case GAIN_TWOTHIRDS:
-      fsRange = 6.144f;
-      break;
-    case GAIN_ONE:
-      fsRange = 4.096f;
-      break;
-    case GAIN_TWO:
-      fsRange = 2.048f;
-      break;
-    case GAIN_FOUR:
-      fsRange = 1.024f;
-      break;
-    case GAIN_EIGHT:
-      fsRange = 0.512f;
-      break;
-    case GAIN_SIXTEEN:
-      fsRange = 0.256f;
-      break;
-    default:
-      fsRange = 0.0f;
-  }
-  return counts * (fsRange / (32768 >> m_bitShift));
-}
-
-void processSampleFromADC(int16_t adc, bool readU) {
-
-  //auto &newGain(readU ? gainU : gainI);
-  //newGain = chooseGain(adc);
-
-  // TODO detect clipping
-
-  if (readU) {
-    LastVoltage = computeVolts(adc, gainU) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
-  } else {
-    Sample s;
-    struct timeval u_time;
-    gettimeofday(&u_time, NULL);
-    s.t = getTimeStamp(&u_time, 3);
-    s.i = computeVolts(adc, gainI) * (1000.0f / 12.5f) * (20.4f / 20.32f);
-    s.u = LastVoltage;
-
-    unsigned long nowTime = micros();
-    auto P = s.p();
-    if (LastTime != 0) {
-      // we use simple trapezoidal rule here
-      unsigned long dt_us = nowTime - LastTime;
-      Energy += (double)((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
-      s.e = Energy;
-    } else {
-      s.e = 0.0f;
-    }
-
-    while (sampleBuf.size() > sampleBufMaxSize) {
-      sampleBuf.pop();
-      ++numDropped;
-    }
-    sampleBuf.push(s);
-
-
-    ++NumSamples;
-    LastTime = nowTime;
-    LastP = P;
-  }
-}
-
-//void IRAM_ATTR
 void ICACHE_RAM_ATTR NewDataReadyISR() {
-  //getSampleFromADC();
-  new_data = true;
-  //startReading();
+  ads.alertNewDataFromISR();
 }
-
 
 InfluxDBClient client;
 
@@ -209,26 +95,15 @@ unsigned long StartTime = 0;
 unsigned long LastTimeOut = 0;
 unsigned long NSamplesLastTimeOut = 0;
 
-esp_adc_cal_characteristics_t adc_chars;
-uint32_t readADC_Cal(int ADC_Raw)
-{
-  return(esp_adc_cal_raw_to_voltage(ADC_Raw, &adc_chars));
-}
 
 void setup(void) {
   Serial.begin(9600);
 
   connect_wifi_async();
 
-  // RATE_ADS1115_128SPS (default)
-  // RATE_ADS1115_250SPS, RATE_ADS1115_475SPS
-
-  ads.setDataRate(RATE_ADS1115_860SPS);
-  //ads.setDataRate(RATE_ADS1115_250SPS);
-  //ads.setDataRate(RATE_ADS1115_475SPS);
   Wire.setClock(400000UL);
 
-  if (!ads.begin()) {
+  if (!ads.init()) {
     Serial.println("Failed to initialize ADS.");
     while (1) yield();
   }
@@ -246,223 +121,142 @@ void setup(void) {
                            .retryInterval(0)  // 0=disable retry
   );
 
-  adcAttachPin(36); // adc1ch0 SENSOR_VP
-  adcAttachPin(37); // adc1ch1 SENSOR_VP
-  adcAttachPin(38); // adc1ch2 SENSOR_VP
-  analogSetPinAttenuation(36, ADC_ATTEN_DB_6); // 150 mV ~ 1750 mV
-  analogSetPinAttenuation(37, ADC_ATTEN_DB_6); // 150 mV ~ 1750 mV
-  analogSetPinAttenuation(38, ADC_ATTEN_DB_6); // 150 mV ~ 1750 mV
-  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_6, ADC_WIDTH_BIT_12, 1100, &adc_chars);
-
   wait_for_wifi();
   timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
 
   StartTime = micros();
 
   // when multiplexing channels, TI recommnads single-shot mode
-  startReading();
+  ads.startReading();
 }
 
-void waiting_for_adc() {
-  //client.checkBuffer();
-}
-
-void startReadingI() {
-  readingU = false;
-  ads.setGain(gainI);
-  ads.startADCReading(ADS1X15_REG_CONFIG_MUX_DIFF_0_1, /*continuous=*/false);
-}
-
-void startReadingU() {
-  readingU = true;
-  ads.setGain(gainU);
-  ads.startADCReading(MUX_BY_CHANNEL[2], /*continuous=*/false);
-}
 
 std::vector<PointDefaultConstructor> pointFrame(10);
 uint16_t maxBufSize = 0;
 
-struct MeanWindow {
-  // TODO trapezoidal sum?
-  float sum;
-  uint32_t num;
 
-  float getMean() const {
-    return sum / num;
-  }
-  void clear() {
-    sum = 0.f;
-    num = 0.f;
-  }
-  void add(float x) {
-    sum += x;
-    ++num;
-  }
+struct EnergyCounter {
+  PowerSampler *sampler;
 
-  float pop() {
-    float m = getMean();
-    clear();
-    return m;
-  }
+  struct MeanWindow winI {};
+  struct MeanWindow winU {};
+  struct MeanWindow winP {};
 
-  MeanWindow() {
-    clear();
+  unsigned long long windowTimestamp = 0;
+
+  void update() {
+    unsigned long nowTime = micros();
+
+    PowerSampler &ps(*sampler);
+    if (ps.hasData()) {
+      Sample s = ps.getSample();
+
+      unsigned long nowTime = micros();
+      auto P = s.p();
+      if (lastTime != 0) {
+        // we use simple trapezoidal rule here
+        unsigned long dt_us = nowTime - lastTime;
+        Energy += (double)((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
+        s.e = Energy;
+      } else {
+        s.e = 0.0f;
+      }
+
+          ++NumSamples;
+    LastTime = nowTime;
+    LastP = P;
+
+      winI.add(s.i);
+      winU.add(s.u);
+      winP.add(s.p());
+      windowTimestamp = s.t;
+    } else {
+auto lastTime = LastTime;
+  if (nowTime > lastTime && (nowTime - lastTime) > 4e6) {
+    Serial.println("");
+    Serial.println("Timeout waiting for new sample!");
+    Serial.println((nowTime - lastTime) * 1e-6);
+    Serial.println(lastTime);
+    Serial.println(nowTime);
+    Serial.println("");
+    startReading();  // TODO this is for some reason not necessary
+  }
+    }
   }
 };
 
 
-void printTime() {
-  char buffer[26];
-  int millisec;
-  struct timeval tv;
 
-  gettimeofday(&tv, NULL);
-
-  millisec = lrint(tv.tv_usec / 1000.0);  // Round to nearest millisec
-  if (millisec >= 1000) {                 // Allow for rounding up to nearest second
-    millisec -= 1000;
-    tv.tv_sec++;
-  }
-
-  strftime(buffer, 26, "%H:%M:%S", localtime(&tv.tv_sec));
-  // printf("%s.%03d\n", buffer, millisec);
-  Serial.print(buffer);
-  Serial.print('.');
-  Serial.print(millisec);
-  Serial.print(' ');
-
-  /*
-  char buff[100];
-    time_t now = time (0);
-    strftime (buff, 100, "%H:%M:%S.000", localtime (&now));
-    printf ("%s\n", buff);
-    return 0;
-  */
-}
-
-struct MeanWindow MeanI {};
-struct MeanWindow MeanU {};
-struct MeanWindow MeanP {};
-unsigned long long windowTimestamp = 0;
 
 WiFiUDP udp;
 
-void samplePoint(Point &p, const Sample &s, const char *device) {
-  point.addTag("device", device);
-  point.addField("I", s.i, 3);
-  point.addField("U", s.u, 3);
-  point.addField("P", s.p(), 3);
-  point.addField("E", s.e, 3);
-  point.setTime(s.t);
-}
 
-void readEspAdc() {
-  auto i =  (readADC_Cal(analogRead(37)) - readADC_Cal(analogRead(36)))  * (1000.0f / 12.5f) * (20.4f / 20.32f);
-  auto u = readADC_Cal(analogRead(38)) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
-
-}
 
 void loop(void) {
-
   constexpr bool hfWrites = false;
 
   unsigned long nowTime = micros();
 
-  if (new_data) {
-    int16_t adc = ads.getLastConversionResults();
-    new_data = false;
-    bool readU = readingU;
-    startReading();
-    processSampleFromADC(adc, readU);
+  for (auto ec : energyCounters) {
+    ec.update();
+  }
 
-    uint16_t i = 0;
-
-
-    if (sampleBuf.size() > maxBufSize) maxBufSize = sampleBuf.size();
-    while (i < pointFrame.size() && !sampleBuf.empty()) {
-      const Sample &s(sampleBuf.front());
-      MeanI.add(s.i);
-      MeanU.add(s.u);
-      MeanP.add(s.p());
-      windowTimestamp = s.t;
-
-      if (hfWrites) {
+  
+  /*    if (hfWrites) {
         Point point("smart_shunt");
         samplePoint(point, s, "ESP8266_proto1");
         pointFrame[i] = point;
       }
 
-      sampleBuf.pop();
-      ++i;
-    }
+  if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
 
-    if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size());
+if (nowTime - LastTimeOut > 500e3) {
+  // capture
+  auto nSamples = NumSamples;
+  auto energy = Energy;
 
-  } else {
-    auto lastTime = LastTime;
-    if (nowTime > lastTime && (nowTime - lastTime) > 4e6) {
-      Serial.println("");
-      Serial.println("Timeout waiting for new sample!");
-      Serial.println((nowTime - lastTime) * 1e-6);
-      Serial.println(lastTime);
-      Serial.println(nowTime);
-      Serial.println("");
-      startReading();  // TODO this is for some reason not necessary
-    }
+  // compute
+  float sps = (nSamples - NSamplesLastTimeOut) / ((nowTime - LastTimeOut) * 1e-6);
+  float i_mean = MeanI.pop(), u_mean = MeanU.pop(), p_mean = MeanP.pop();
+
+
+  if (!hfWrites) {
+    Point point("smart_shunt");
+    point.addTag("device", "ESP8266_proto1");
+    point.addField("I", i_mean, 4);
+    point.addField("U", u_mean, 4);
+    point.addField("P", p_mean, 4);
+    point.addField("E", energy, 4);
+    point.setTime(windowTimestamp);
+    influxWritePointsUDP(&point, 1);
+    //client.writePoint(point);
   }
 
+  printTime();
+  Serial.print("U=");
+  Serial.print(u_mean, 4);
+  Serial.print("V, I=");
+  Serial.print(i_mean, 3);
+  Serial.print("A, P=");
+  Serial.print(p_mean, 3);
+  Serial.print("W, E=");
+  Serial.print(energy, 3);
+  Serial.print("Wh, N=");
+  Serial.print(NumSamples);
+  Serial.print(", SPS=");
+  Serial.print(sps, 1);
+  Serial.print(", T=");
+  Serial.print((nowTime - StartTime) * 1e-6, 1);
+  Serial.print("s");
+  Serial.print(", maxBufSize=");
+  Serial.print(maxBufSize);
+  Serial.print(", numDropped=");
+  Serial.print(numDropped);
+  //Serial.print(adc2, BIN);
+  Serial.println();
 
-
-  //if (hfWrites)
-  //  client.checkBuffer();
-
-  if (nowTime - LastTimeOut > 500e3) {
-    // capture
-    auto nSamples = NumSamples;
-    auto energy = Energy;
-
-    // compute
-    float sps = (nSamples - NSamplesLastTimeOut) / ((nowTime - LastTimeOut) * 1e-6);
-    float i_mean = MeanI.pop(), u_mean = MeanU.pop(), p_mean = MeanP.pop();
-
-
-    if (!hfWrites) {
-      Point point("smart_shunt");
-      point.addTag("device", "ESP8266_proto1");
-      point.addField("I", i_mean, 4);
-      point.addField("U", u_mean, 4);
-      point.addField("P", p_mean, 4);
-      point.addField("E", energy, 4);
-      point.setTime(windowTimestamp);
-      influxWritePointsUDP(&point, 1);
-      //client.writePoint(point);
-    }
-
-    printTime();
-    Serial.print("U=");
-    Serial.print(u_mean, 4);
-    Serial.print("V, I=");
-    Serial.print(i_mean, 3);
-    Serial.print("A, P=");
-    Serial.print(p_mean, 3);
-    Serial.print("W, E=");
-    Serial.print(energy, 3);
-    Serial.print("Wh, N=");
-    Serial.print(NumSamples);
-    Serial.print(", SPS=");
-    Serial.print(sps, 1);
-    Serial.print(", T=");
-    Serial.print((nowTime - StartTime) * 1e-6, 1);
-    Serial.print("s");
-    Serial.print(", maxBufSize=");
-    Serial.print(maxBufSize);
-    Serial.print(", numDropped=");
-    Serial.print(numDropped);
-    //Serial.print(adc2, BIN);
-    Serial.println();
-
-    NSamplesLastTimeOut = nSamples;
-    LastTimeOut = nowTime;
-  }
+  NSamplesLastTimeOut = nSamples;
+  LastTimeOut = nowTime;
+}
 }
