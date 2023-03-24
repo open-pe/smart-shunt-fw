@@ -12,31 +12,41 @@ struct Sample {
   }
 
   void setTimeNow() {
-      struct timeval u_time;
-      gettimeofday(&u_time, NULL);
-      t = getTimeStamp(&u_time, 3);    
+    struct timeval u_time;
+    gettimeofday(&u_time, NULL);
+    t = getTimeStamp(&u_time, 3);
   }
 };
 
 class PowerSampler {
-
+  virtual void startReading();
+  virtual bool hasData();
+  virtual void getSample();  
 };
 
 
 
-struct EnergyCounter {
+class EnergyCounter {
   PowerSampler *sampler;
 
   unsigned long NumSamples = 0;
   unsigned long NSamplesLastSummary = 0;
 
+  double Energy = 0;
+  float LastP = 0.0f;
+
+  unsigned long startTime = 0;
   unsigned long lastTime = 0;
+  unsigned long maxDt = 0;
 
   struct MeanWindow winI {};
   struct MeanWindow winU {};
   struct MeanWindow winP {};
 
   unsigned long long windowTimestamp = 0;
+
+public:
+EnergyCounter(PowerSampler *sampler) : sampler(sampler) {}
 
   void update() {
     unsigned long nowTime = micros();
@@ -52,8 +62,12 @@ struct EnergyCounter {
         unsigned long dt_us = nowTime - lastTime;
         Energy += (double)((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
         s.e = Energy;
+
+        if (dt_us > maxDt)
+          maxDt = dt_us;
       } else {
         s.e = 0.0f;
+        startTime = nowTime;
       }
 
       ++NumSamples;
@@ -73,21 +87,20 @@ struct EnergyCounter {
         Serial.println(lastTime);
         Serial.println(nowTime);
         Serial.println("");
-        startReading();  // TODO this is for some reason not necessary
+        ps.startReading(); 
       }
     }
   }
 
-  void summary(unsigned long dt) {
+  void summary(unsigned long dt_us) {
 
     // capture
     auto nSamples = NumSamples;
     auto energy = Energy;
-
-    // compute
-    float sps = (nSamples - NSamplesLastSummary) / (dt * 1e-6);
     float i_mean = MeanI.pop(), u_mean = MeanU.pop(), p_mean = MeanP.pop();
 
+    // compute
+    float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6);
 
     if (!hfWrites) {
       Point point("smart_shunt");
@@ -111,17 +124,16 @@ struct EnergyCounter {
     Serial.print("W, E=");
     Serial.print(energy, 3);
     Serial.print("Wh, N=");
-    Serial.print(NumSamples);
+    Serial.print(nSamples);
     Serial.print(", SPS=");
     Serial.print(sps, 1);
     Serial.print(", T=");
-    Serial.print((nowTime - StartTime) * 1e-6, 1);
+    Serial.print((nowTime - startTime) * 1e-6, 1);
     Serial.print("s");
-    Serial.print(", maxBufSize=");
-    Serial.print(maxBufSize);
-    Serial.print(", numDropped=");
-    Serial.print(numDropped);
-    //Serial.print(adc2, BIN);
+    Serial.print(", maxDt=");
+    Serial.print(maxDt);
+    //Serial.print(", numDropped=");
+    //Serial.print(numDropped);
     Serial.println();
 
     NSamplesLastSummary = nSamples;

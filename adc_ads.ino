@@ -1,15 +1,17 @@
+#include <Adafruit_ADS1X15.h>
+
 class PowerSampler_ADS : public PowerSampler {
 
   Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
   //Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
 
-volatile bool new_data = false;
+  volatile bool new_data = false;
 
 
-int readUICycle = 0;
-bool readingU = false;
+  int readUICycle = 0;
+  bool readingU = false;
 
-  float LastVoltage = 0.0f;
+  Sample lastSample;
 
   const std::array<adsGain_t, 6> gains = { GAIN_TWOTHIRDS, GAIN_ONE, GAIN_TWO, GAIN_FOUR, GAIN_EIGHT, GAIN_SIXTEEN };
   adsGain_t gainI = GAIN_EIGHT, gainU = GAIN_TWO;
@@ -96,19 +98,23 @@ bool readingU = false;
   }
 
   void alertNewDataFromIRS() {
-    new_data=true;
+    new_data = true;
   }
 
-bool hasData() {
-  return new_data;
-}
+  bool hasData() {
+    if (new_data) {
+      int16_t adc = ads.getLastConversionResults();
+      new_data = false;
+      bool readU = readingU;
+      ads.startReading();
+      processSampleFromADC(adc, readU);
+      return !readU;
+    }
+    return false;
+  }
 
   Sample getSample() {
-    int16_t adc = ads.getLastConversionResults();
-    new_data = false;
-    bool readU = readingU;
-    ads.startReading();
-    processSampleFromADC(adc, readU);
+    return lastSample;
   }
 
 
@@ -119,14 +125,10 @@ bool hasData() {
     // TODO detect clipping
 
     if (readU) {
-      lastVoltage = computeVolts(adc, gainU) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
+      lastSample.u = computeVolts(adc, gainU) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
     } else {
-      Sample s;
-      s.setTimeNow();
-      s.i = computeVolts(adc, gainI) * (1000.0f / 12.5f) * (20.4f / 20.32f);
-      s.u = lastVoltage;
-      return s;
-
+      lastSample.setTimeNow();
+      lastSample.i = computeVolts(adc, gainI) * (1000.0f / 12.5f) * (20.4f / 20.32f);
     }
   }
-}
+};

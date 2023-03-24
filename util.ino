@@ -36,3 +36,17 @@ void pointFromSample(Point &p, const Sample &s, const char *device) {
   point.addField("E", s.e, 3);
   point.setTime(s.t);
 }
+
+
+class PointDefaultConstructor : public Point {
+public:
+  PointDefaultConstructor()
+    : Point("smart_shut") {}
+  PointDefaultConstructor(const Point &p)
+    : Point(p) {}
+
+  PointDefaultConstructor &operator=(const PointDefaultConstructor &p) {
+    Point::operator=(p);
+    return *this;
+  }
+};

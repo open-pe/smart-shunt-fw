@@ -1,8 +1,6 @@
-#include <Adafruit_ADS1X15.h>
-#include <InfluxDbClient.h>
-//#include <RingBuf.h>
+//#include <queue>
 
-#include <queue>
+#include <InfluxDbClient.h>
 #include <WiFiUDP.h>
 
 
@@ -44,7 +42,6 @@ AIN2, AIN3. The differential capacitors must be of high quality. The best cerami
 */
 
 
-
 constexpr int READY_PIN = 12;
 
 // This is required on ESP32 to put the ISR in IRAM. Define as
@@ -54,54 +51,50 @@ constexpr int READY_PIN = 12;
 #define IRAM_ATTR
 #endif
 
-void ICACHE_RAM_ATTR NewDataReadyISR() {
-  ads.alertNewDataFromISR();
-}
 
 
-double Energy = 0;
-float LastP = 0.0f;
 
+//constexpr int sampleBufMaxSize = 200;
+//std::queue<Sample> sampleBuf;
+//uint32_t numDropped = 0;
 
-class PointDefaultConstructor : public Point {
-public:
-  PointDefaultConstructor()
-    : Point("smart_shut") {}
-  PointDefaultConstructor(const Point &p)
-    : Point(p) {}
-
-  PointDefaultConstructor &operator=(const PointDefaultConstructor &p) {
-    Point::operator=(p);
-    return *this;
-  }
-};
-
-constexpr int sampleBufMaxSize = 200;
-std::queue<Sample> sampleBuf;
-uint32_t numDropped = 0;
-
+WiFiUDP udp;
 
 InfluxDBClient client;
 
 unsigned long StartTime = 0;
 unsigned long LastTimeOut = 0;
 
+PowerSampler_ADS ads;
+PowerSampler_ESP32 esp_adc;
+
+std::vector<EnergyCounter> energyCounters;
+
+void ICACHE_RAM_ATTR NewDataReadyISR() {
+  ads.alertNewDataFromISR();
+}
 
 void setup(void) {
-  Serial.begin(9600);
-
   connect_wifi_async();
 
+  Serial.begin(9600);
   Wire.setClock(400000UL);
 
-  if (!ads.init()) {
-    Serial.println("Failed to initialize ADS.");
-    while (1) yield();
+  energyCounters.emplace_back({ads})
+  energyCounters.emplace_back({esp_adc})
+
+  for(auto ec : energyCounters) {
+    if(!ec.power_sampler->init()) {
+          Serial.println("Failed to initialize ADC.");
+          while (1) yield();
+    }
   }
 
   // listen to the ADC's ALERT pin
   pinMode(READY_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(READY_PIN), NewDataReadyISR, FALLING);
+
+
 
   client.setConnectionParamsV1("http://homeassistant.local:8086", /*db*/ "open_pe", "home_assistant", "h0me");
   client.setWriteOptions(WriteOptions()
@@ -115,17 +108,11 @@ void setup(void) {
   wait_for_wifi();
   timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
 
-  StartTime = micros();
-
   // when multiplexing channels, TI recommnads single-shot mode
   ads.startReading();
 }
 
 
-//std::vector<PointDefaultConstructor> pointFrame(10);
-
-
-WiFiUDP udp;
 
 void loop(void) {
   constexpr bool hfWrites = false;
