@@ -1,3 +1,5 @@
+#include <SPI.h> // not sure why this is needed
+
 #include <Adafruit_ADS1X15.h>
 
 #include "sampling.h"
@@ -34,6 +36,7 @@ class PowerSampler_ADS : public PowerSampler {
     }
   }
 
+public:
   bool init() {
     // RATE_ADS1115_128SPS (default)
     // RATE_ADS1115_250SPS, RATE_ADS1115_475SPS
@@ -42,7 +45,7 @@ class PowerSampler_ADS : public PowerSampler {
     //ads.setDataRate(RATE_ADS1115_475SPS);
 
     ads.setDataRate(RATE_ADS1115_860SPS);
-    return ads.begin()
+    return ads.begin();
   }
 
 
@@ -99,7 +102,7 @@ class PowerSampler_ADS : public PowerSampler {
     return counts * (fsRange / (32768 >> m_bitShift));
   }
 
-  void alertNewDataFromIRS() {
+  void alertNewDataFromISR() {
     new_data = true;
   }
 
@@ -108,7 +111,7 @@ class PowerSampler_ADS : public PowerSampler {
       int16_t adc = ads.getLastConversionResults();
       new_data = false;
       bool readU = readingU;
-      ads.startReading();
+      startReading();
       processSampleFromADC(adc, readU);
       return !readU;
     }

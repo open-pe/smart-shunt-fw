@@ -1,10 +1,13 @@
+#include <Arduino.h>
 
-
-
-
+#include "adc/sampling.h"
+#include "math.h"
+#include "util.h"
 
 class EnergyCounter {
+public:
   PowerSampler *sampler;
+  std::string name;
 
   unsigned long NumSamples = 0;
   unsigned long NSamplesLastSummary = 0;
@@ -22,8 +25,10 @@ class EnergyCounter {
 
   unsigned long long windowTimestamp = 0;
 
+  bool hfWrites = false;
+
 public:
-EnergyCounter(PowerSampler *sampler) : sampler(sampler) {}
+EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler), name(name) {}
 
   void update() {
     unsigned long nowTime = micros();
@@ -56,12 +61,12 @@ EnergyCounter(PowerSampler *sampler) : sampler(sampler) {}
       winP.add(s.p());
       windowTimestamp = s.t;
     } else {
-      auto lastTime = lastTime;
-      if (nowTime > lastTime && (nowTime - lastTime) > 4e6) {
+      auto lt = lastTime; // capture
+      if (nowTime > lt && (nowTime - lt) > 4e6) {
         Serial.println("");
         Serial.println("Timeout waiting for new sample!");
-        Serial.println((nowTime - lastTime) * 1e-6);
-        Serial.println(lastTime);
+        Serial.println((nowTime - lt) * 1e-6);
+        Serial.println(lt);
         Serial.println(nowTime);
         Serial.println("");
         ps.startReading(); 
@@ -74,14 +79,14 @@ EnergyCounter(PowerSampler *sampler) : sampler(sampler) {}
     // capture
     auto nSamples = NumSamples;
     auto energy = Energy;
-    float i_mean = MeanI.pop(), u_mean = MeanU.pop(), p_mean = MeanP.pop();
+    float i_mean = winI.pop(), u_mean = winU.pop(), p_mean = winP.pop();
 
     // compute
     float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6);
 
     if (!hfWrites) {
       Point point("smart_shunt");
-      point.addTag("device", "ESP8266_proto1");
+      point.addTag("device", name.c_str());
       point.addField("I", i_mean, 4);
       point.addField("U", u_mean, 4);
       point.addField("P", p_mean, 4);
@@ -104,8 +109,8 @@ EnergyCounter(PowerSampler *sampler) : sampler(sampler) {}
     Serial.print(nSamples);
     Serial.print(", SPS=");
     Serial.print(sps, 1);
-    Serial.print(", T=");
-    Serial.print((nowTime - startTime) * 1e-6, 1);
+    //Serial.print(", T=");
+    //Serial.print((nowTime - startTime) * 1e-6, 1);
     Serial.print("s");
     Serial.print(", maxDt=");
     Serial.print(maxDt);

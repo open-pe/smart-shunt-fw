@@ -1,3 +1,5 @@
+#pragma once
+
 struct MeanWindow {
   // TODO trapezoidal sum?
   float sum;
