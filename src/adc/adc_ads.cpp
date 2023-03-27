@@ -1,5 +1,7 @@
 #include <Adafruit_ADS1X15.h>
 
+#include "sampling.h"
+
 class PowerSampler_ADS : public PowerSampler {
 
   Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
