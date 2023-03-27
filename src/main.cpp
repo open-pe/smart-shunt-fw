@@ -136,7 +136,8 @@ void loop(void)
   {
     if (Serial.readString().indexOf("r") != -1)
     {
-      Serial.println("Reset");
+      Serial.println("Reset, delay 1s");
+      delay(1000);
       for (auto &ec : energyCounters)
       {
         ec.reset();
