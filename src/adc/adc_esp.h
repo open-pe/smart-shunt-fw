@@ -20,8 +20,9 @@ class PowerSampler_ESP32 : public PowerSampler {
 
   // https://docs.espressif.com/projects/esp-idf/en/v4.4/esp32s3/api-reference/peripherals/adc.html#adc-attenuation
   float raw2V(int raw) {
-    constexpr float Vmax = 1.750f; // 6db
-    return raw * Vmax / 4095.0f;
+    //constexpr float Vmax = 1.750f; // 6db
+    //return raw * Vmax / 4095.0f;
+    return esp_adc_cal_raw_to_voltage(raw, &adc_chars) * 1e-3f;
   }
 
 public:
@@ -53,8 +54,8 @@ public:
     auto u = adc1_get_raw(ADC1_CHANNEL_5);
     // TODO detect clipping
     s.setTimeNow();
-    s.i = (raw2V(i1) - raw2V(i0)) * (1000.0f / 12.5f) * (20.4f / 20.32f);
-    s.u = raw2V(u) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f));
+    s.i = (raw2V(i0) - raw2V(i1)) * (1000.0f / 12.5f) * (20.4f / 20.32f) * ( 23.855f / 23.911f);
+    s.u = raw2V(u) * ((222.0f + 10.13f) / 10.13f * (10.0f / 9.9681f) * (30999.f/30751.f) * (16043.f/15662.f));
     return s;
   }
 };

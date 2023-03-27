@@ -22,10 +22,11 @@ PowerSampler_ADS ads;
 PowerSampler_ESP32 esp_adc;
 
 unsigned long LastTimeOut = 0;
+unsigned long LastTimePrint = 0;
 
 std::array<EnergyCounter, 2> energyCounters{
-  EnergyCounter{&esp_adc, "ESP32_int"},
-  EnergyCounter{&ads, "ESP32_ADS"},
+    EnergyCounter{&esp_adc, "ESP32_int"},
+    EnergyCounter{&ads, "ESP32_ADS"},
 };
 
 void ICACHE_RAM_ATTR NewDataReadyISR()
@@ -44,8 +45,8 @@ void setup(void)
   connect_wifi_async();
 
   // "ESP8266_proto1"
-  //energyCounters.emplace_back(EnergyCounter{&ads, "ESP32_ADS"});
-  //energyCounters.emplace_back({&esp_adc, "ESP32_internalADC"});
+  // energyCounters.emplace_back(EnergyCounter{&ads, "ESP32_ADS"});
+  // energyCounters.emplace_back({&esp_adc, "ESP32_internalADC"});
 
   for (auto &ec : energyCounters)
   {
@@ -79,8 +80,9 @@ void setup(void)
   {
     ec.sampler->startReading();
   }
-
 }
+
+std::vector<Point> points_frame;
 
 void loop(void)
 {
@@ -101,22 +103,46 @@ void loop(void)
 
   if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-  if (nowTime - LastTimeOut > 250e3)
+  if (nowTime - LastTimeOut > 20e3)
   {
-    std::vector<Point> points;
+    auto print = nowTime - LastTimePrint > 500e3;
+
     for (auto &ec : energyCounters)
     {
-      auto p = ec.summary((nowTime - LastTimeOut));
-      points.push_back(p);
+      if (ec.newSamplesSinceLastSummary())
+      {
+        auto p = ec.summary((nowTime - LastTimeOut), print);
+        points_frame.push_back(p);
+      }
     }
 
-    if(energyCounters.size() > 1)
-      Serial.println("");
+    if (print)
+    {
+      if (energyCounters.size() > 1)
+        Serial.println("");
+      LastTimePrint = nowTime;
+    }
 
-    influxWritePointsUDP(&points[0], points.size());
-    
+    if (points_frame.size() >= 18)
+    {
+      influxWritePointsUDP(&points_frame[0], points_frame.size());
+      points_frame.clear();
+    }
+
     LastTimeOut = nowTime;
   }
 
-  //delay(100);
+  if (Serial.available() > 0)
+  {
+    if (Serial.readString().indexOf("r") != -1)
+    {
+      Serial.println("Reset");
+      for (auto &ec : energyCounters)
+      {
+        ec.reset();
+      }
+    }
+  }
+
+  // delay(100);
 }
