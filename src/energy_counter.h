@@ -4,7 +4,8 @@
 #include "math.h"
 #include "util.h"
 
-class EnergyCounter {
+class EnergyCounter
+{
 public:
   PowerSampler *sampler;
   std::string name;
@@ -18,28 +19,40 @@ public:
   unsigned long startTime = 0;
   unsigned long lastTime = 0;
   unsigned long maxDt = 0;
+  unsigned long numTimeouts = 0;
 
-  struct MeanWindow winI {};
-  struct MeanWindow winU {};
-  struct MeanWindow winP {};
+  struct MeanWindow winI
+  {
+  };
+  struct MeanWindow winU
+  {
+  };
+  struct MeanWindow winP
+  {
+  };
 
   unsigned long long windowTimestamp = 0;
 
   bool hfWrites = false;
 
 public:
-EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler), name(name) {}
+  EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler), name(name) {}
+  EnergyCounter(const EnergyCounter &) = delete; // no copy
+  EnergyCounter(EnergyCounter &&) = default;
 
-  void update() {
+  void update()
+  {
     unsigned long nowTime = micros();
 
     PowerSampler &ps(*sampler);
-    if (ps.hasData()) {
+    if (ps.hasData())
+    {
       Sample s = ps.getSample();
 
       unsigned long nowTime = micros();
       auto P = s.p();
-      if (lastTime != 0) {
+      if (lastTime != 0)
+      {
         // we use simple trapezoidal rule here
         unsigned long dt_us = nowTime - lastTime;
         Energy += (double)((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
@@ -47,7 +60,9 @@ EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler)
 
         if (dt_us > maxDt)
           maxDt = dt_us;
-      } else {
+      }
+      else
+      {
         s.e = 0.0f;
         startTime = nowTime;
       }
@@ -60,21 +75,26 @@ EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler)
       winU.add(s.u);
       winP.add(s.p());
       windowTimestamp = s.t;
-    } else {
+    }
+    else
+    {
       auto lt = lastTime; // capture
-      if (nowTime > lt && (nowTime - lt) > 4e6) {
+      if (nowTime > lt && (nowTime - lt) > 4e6)
+      {
+        ++numTimeouts;
         Serial.println("");
         Serial.println("Timeout waiting for new sample!");
         Serial.println((nowTime - lt) * 1e-6);
         Serial.println(lt);
         Serial.println(nowTime);
         Serial.println("");
-        ps.startReading(); 
+        ps.startReading();
       }
     }
   }
 
-  void summary(unsigned long dt_us) {
+  void summary(unsigned long dt_us)
+  {
 
     // capture
     auto nSamples = NumSamples;
@@ -84,7 +104,8 @@ EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler)
     // compute
     float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6);
 
-    if (!hfWrites) {
+    if (!hfWrites)
+    {
       Point point("smart_shunt");
       point.addTag("device", name.c_str());
       point.addField("I", i_mean, 4);
@@ -93,11 +114,12 @@ EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler)
       point.addField("E", energy, 4);
       point.setTime(windowTimestamp);
       influxWritePointsUDP(&point, 1);
-      //client.writePoint(point);
+      // client.writePoint(point);
     }
 
     printTime();
-    Serial.print("U=");
+    Serial.print(name.c_str());
+    Serial.print(": U=");
     Serial.print(u_mean, 4);
     Serial.print("V, I=");
     Serial.print(i_mean, 3);
@@ -109,13 +131,13 @@ EnergyCounter(PowerSampler *sampler, const std::string &name) : sampler(sampler)
     Serial.print(nSamples);
     Serial.print(", SPS=");
     Serial.print(sps, 1);
-    //Serial.print(", T=");
-    //Serial.print((nowTime - startTime) * 1e-6, 1);
-    Serial.print("s");
+    // Serial.print(", T=");
+    // Serial.print((nowTime - startTime) * 1e-6, 1);
+    // Serial.print("s");
     Serial.print(", maxDt=");
     Serial.print(maxDt);
-    //Serial.print(", numDropped=");
-    //Serial.print(numDropped);
+    // Serial.print(", numDropped=");
+    // Serial.print(numDropped);
     Serial.println();
 
     NSamplesLastSummary = nSamples;
