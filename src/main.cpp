@@ -101,14 +101,20 @@ void loop(void)
 
   if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-  if (nowTime - LastTimeOut > 500e3)
+  if (nowTime - LastTimeOut > 250e3)
   {
+    std::vector<Point> points;
     for (auto &ec : energyCounters)
     {
-      ec.summary((nowTime - LastTimeOut));
+      auto p = ec.summary((nowTime - LastTimeOut));
+      points.push_back(p);
     }
+
     if(energyCounters.size() > 1)
       Serial.println("");
+
+    influxWritePointsUDP(&points[0], points.size());
+    
     LastTimeOut = nowTime;
   }
 

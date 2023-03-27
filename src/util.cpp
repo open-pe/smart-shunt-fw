@@ -60,9 +60,6 @@ void influxWritePointsUDP(const Point *p, uint8_t len) {
 
 
 
-
-
-
 void printTime() {
   char buffer[26];
   int millisec;

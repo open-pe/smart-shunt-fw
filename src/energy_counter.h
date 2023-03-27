@@ -93,7 +93,7 @@ public:
     }
   }
 
-  void summary(unsigned long dt_us)
+  Point summary(unsigned long dt_us)
   {
 
     // capture
@@ -104,8 +104,7 @@ public:
     // compute
     float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6);
 
-    if (!hfWrites)
-    {
+
       Point point("smart_shunt");
       point.addTag("device", name.c_str());
       point.addField("I", i_mean, 4);
@@ -113,9 +112,9 @@ public:
       point.addField("P", p_mean, 4);
       point.addField("E", energy, 4);
       point.setTime(windowTimestamp);
-      influxWritePointsUDP(&point, 1);
+     
       // client.writePoint(point);
-    }
+    
 
     printTime();
     Serial.print(name.c_str());
@@ -141,5 +140,7 @@ public:
     Serial.println();
 
     NSamplesLastSummary = nSamples;
+
+    return point;
   }
 };
