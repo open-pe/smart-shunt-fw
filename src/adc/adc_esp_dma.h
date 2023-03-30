@@ -1,7 +1,10 @@
 #include <driver/adc.h>
 #include <esp_adc_cal.h>
+#include "esp_adc/adc_continuous.h"
 
-class PowerSampler_ESP32 : public PowerSampler {
+constexpr int ESP32_ADC_DMA_READ_LEN        =            256;
+
+class PowerSampler_ESP32_DMA : public PowerSampler {
     static const uint8_t PIN_I0 = 4;
     static const uint8_t PIN_I1 = 5;
     static const uint8_t PIN_U = 6;
@@ -22,6 +25,13 @@ class PowerSampler_ESP32 : public PowerSampler {
 public:
 
     bool init() {
+        adc_continuous_handle_t handle = NULL;
+        adc_continuous_handle_cfg_t adc_config = {
+                .max_store_buf_size = 1024,
+                .conv_frame_size = ESP32_ADC_DMA_READ_LEN,
+        };
+
+        adc_continuous_new_handle(&adc_config, &handle);
 
         adc1_config_width(ADC_WIDTH_BIT_12);
 
