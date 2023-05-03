@@ -6,8 +6,8 @@
 
 class PowerSampler_ADS : public PowerSampler {
 
-  Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
-  //Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
+  //Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
+  Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
 
   volatile bool new_data = false;
 
@@ -44,15 +44,22 @@ public:
     //ads.setDataRate(RATE_ADS1115_250SPS);
     //ads.setDataRate(RATE_ADS1115_475SPS);
 
-    ads.setDataRate(RATE_ADS1115_860SPS);
+    if(std::is_same<decltype(ads), Adafruit_ADS1115>::value) {
+        ads.setDataRate(RATE_ADS1115_860SPS);
+    } else {
+        //ads.setDataRate(RATE_ADS1015_3300SPS);
+        // for some reason RATE_ADS1115_860SPS gives higher sampling rate (105 power samples)
+        // fake hardware?
+        ads.setDataRate(RATE_ADS1115_860SPS);
+    }
+
+
     return ads.begin();
   }
 
-
-
-
   void startReading() {
     if ((++readUICycle % 4) == 0) {
+        // 1.25 ADC_Sample/Power_Sample
       //if (random(0, 4) == 0) {  // random sampling better than cyclic
       // occasionally sample U
       startReadingU();
@@ -74,7 +81,7 @@ public:
   }
 
   float computeVolts(int16_t counts, adsGain_t gain) {
-    uint8_t m_bitShift = 0;  // ads1115
+    uint8_t m_bitShift = std::is_same<decltype(ads), Adafruit_ADS1115>::value ? 0 : 4;
     // see data sheet Table 3
     float fsRange;
     switch (gain) {

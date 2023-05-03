@@ -1,7 +1,12 @@
 #include <driver/adc.h>
 #include <esp_adc_cal.h>
-#include "esp_adc/adc_continuous.h"
+#include <esp_adc/adc_continuous.h>
 
+
+/**
+ * Docs
+ * - https://docs.espressif.com/projects/esp-idf/zh_CN/latest/esp32/api-reference/peripherals/adc_continuous.html
+ */
 constexpr int ESP32_ADC_DMA_READ_LEN        =            256;
 
 class PowerSampler_ESP32_DMA : public PowerSampler {

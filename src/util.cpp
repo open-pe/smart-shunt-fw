@@ -48,8 +48,8 @@ void wait_for_wifi() {
 
 void influxWritePointsUDP(const Point *p, uint8_t len) {
 
-    byte host[] = {192, 168, 178, 23};
-    udp.beginPacket(host, 8001);
+    byte host[] = {192, 168, 178, 28};
+    udp.beginPacket(host, 8086);
     String msg;
     for(uint8_t i = 0; i < len; ++i) {
       msg += p[i].toLineProtocol() + '\n';

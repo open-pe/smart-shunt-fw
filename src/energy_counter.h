@@ -3,7 +3,7 @@
 #include <utility>
 
 #include "adc/sampling.h"
-#include "math.h"
+#include <cmath>
 #include "util.h"
 
 class EnergyCounter {
@@ -21,6 +21,7 @@ public:
     unsigned long lastTime = 0;
     unsigned long maxDt = 0;
     unsigned long numTimeouts = 0;
+    uint32_t numTimeoutsStreak = 0;
 
     struct MeanWindow winI{};
     struct MeanWindow winU{};
@@ -62,18 +63,22 @@ public:
             winU.add(s.u);
             winP.add(s.p());
             windowTimestamp = s.t;
+            if(numTimeoutsStreak > 0) numTimeoutsStreak = 0;
         } else {
             unsigned long nowTime = micros();
             auto lt = lastTime; // capture
             if (nowTime > lt && (nowTime - lt) > 4e6) {
                 ++numTimeouts;
+                ++numTimeoutsStreak;
                 Serial.println("");
-                Serial.println("Timeout waiting for new sample!");
+                Serial.printf("Timeout waiting for new sample! %u", numTimeoutsStreak);
                 Serial.println((nowTime - lt) * 1e-6);
                 Serial.println(lt);
                 Serial.println(nowTime);
                 Serial.println("");
                 ps.startReading();
+                auto sl = min(100U, numTimeoutsStreak);
+                delay(sl*sl);
             }
         }
     }
