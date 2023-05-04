@@ -12,34 +12,23 @@
 #include "energy_counter.h"
 #include "util.h"
 
-constexpr int READY_PIN = 7;
-
-// This is required on ESP32 to put the ISR in IRAM. Define as
-// empty for other platforms. Be careful - other platforms may have
-// other requirements.
-#ifndef IRAM_ATTR
-#define IRAM_ATTR
-#endif
 
 InfluxDBClient client;
 
-// PowerSampler_ADS ads;
-// PowerSampler_ESP32 esp_adc;
+PowerSampler_ADS ads;
 PowerSampler_INA226 ina226;
+// PowerSampler_ESP32 esp_adc;
 
 
 unsigned long LastTimeOut = 0;
 unsigned long LastTimePrint = 0;
 
-std::array<EnergyCounter, 1> energyCounters{
-        //EnergyCounter{&esp_adc, "ESP32_int"},
-        //EnergyCounter{&ads, "ESP32_ADS"},
-        EnergyCounter{&ina226, "ESP32_INA226"},
+std::array<std::pair<std::string, PowerSampler *>, 2> samplers{
+        std::pair<std::string, PowerSampler *>{"ESP32_ADS", &ads},
+        {"ESP32_INA226", &ina226},
 };
 
-void ICACHE_RAM_ATTR NewDataReadyISR() {
-    //ads.alertNewDataFromISR();
-}
+std::vector<EnergyCounter> energyCounters;
 
 void i2c_scan() {
     byte error, address;
@@ -79,38 +68,35 @@ void i2c_scan() {
     //delay (2000);           // wait 5 seconds for next scan
 }
 
-
 bool disableWifi = false;
 
 void setup(void) {
-    Wire.begin();
 
     Serial.begin(115200);
     Serial.println("Serial begin");
 
-    Wire.setClock(800000UL);
-#if CONFIG_IDF_TARGET_ESP32
-    // Wire.setPins(21, 22);
-#elif CONFIG_IDF_TARGET_ESP32S3
+
+#if CONFIG_IDF_TARGET_ESP32S3
     Wire.setPins(15, 16);
+#elif CONFIG_IDF_TARGET_ESP32
+    // Wire.setPins(21, 22);
 #else
 #error "unknown target"
 #endif
 
+    Wire.begin();
+    Wire.setClock(400000UL);
+
     if (!disableWifi)
         connect_wifi_async();
 
-    // "ESP8266_proto1"
-    // energyCounters.emplace_back(EnergyCounter{&ads, "ESP32_ADS"});
-    // energyCounters.emplace_back({&esp_adc, "ESP32_internalADC"});
-
-    for (auto &ec: energyCounters) {
-        if (!ec.sampler->init()) {
-            Serial.print(ec.name.c_str());
-            Serial.println(": Failed to initialize ADC.");
-            i2c_scan();
-            while (1)
-                yield();
+    for (auto p: samplers) {
+        if (!p.second->init()) {
+            Serial.print(p.first.c_str());
+            Serial.println(": Failed to initialize sampler.");
+        } else {
+            energyCounters.emplace_back(EnergyCounter{p.second, p.first});
+            ESP_LOGI("main", "Initialized energy counter for %s", p.first.c_str());
         }
     }
 
@@ -118,9 +104,6 @@ void setup(void) {
         i2c_scan();
     }
 
-    // listen to the ADC's ALERT pin
-    //pinMode(READY_PIN, INPUT_PULLUP);
-    //attachInterrupt(digitalPinToInterrupt(READY_PIN), NewDataReadyISR, FALLING);
 
     if (!disableWifi) {
         client.setConnectionParamsV1("http://homeassistant.local:8086", /*db*/ "open_pe", "home_assistant", "h0me");
@@ -197,7 +180,4 @@ void loop(void) {
             }
         }
     }
-
-    //delay(100);
-    //yield();
 }
