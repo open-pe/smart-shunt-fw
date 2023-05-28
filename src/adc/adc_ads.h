@@ -5,9 +5,9 @@
 #include "sampling.h"
 
 #if CONFIG_IDF_TARGET_ESP32S3
-constexpr int READY_PIN = 7;
+constexpr int ADS_READY_PIN = 7;
 #else
-constexpr int READY_PIN = 12;
+constexpr int ADS_READY_PIN = 12;
 #endif
 
 #ifndef IRAM_ATTR
@@ -52,6 +52,9 @@ class PowerSampler_ADS : public PowerSampler {
     }
 
 public:
+    const uint8_t storageId = 0;
+    uint8_t getStorageId() const override  { return storageId; };
+
     bool init() {
         // RATE_ADS1115_128SPS (default)
         // RATE_ADS1115_250SPS, RATE_ADS1115_475SPS
@@ -78,8 +81,8 @@ public:
             return false;
 
         // listen to the ADC's ALERT pin
-        pinMode(READY_PIN, INPUT_PULLUP);
-        attachInterrupt(digitalPinToInterrupt(READY_PIN), ads_alert, FALLING);
+        pinMode(ADS_READY_PIN, INPUT_PULLUP);
+        attachInterrupt(digitalPinToInterrupt(ADS_READY_PIN), ads_alert, FALLING);
 
         return true;
     }

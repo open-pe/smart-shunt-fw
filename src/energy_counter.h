@@ -6,6 +6,18 @@
 #include <cmath>
 #include "util.h"
 
+template<typename T>
+struct UIP {
+    T U{}, I{}, P{};
+
+    template<typename = void>
+    void clear() {
+        U.clear();
+        I.clear();
+        P.clear();
+    }
+};
+
 class EnergyCounter {
 public:
     PowerSampler *sampler;
@@ -23,17 +35,33 @@ public:
     unsigned long numTimeouts = 0;
     uint32_t numTimeoutsStreak = 0;
 
-    struct MeanWindow winI{};
-    struct MeanWindow winU{};
-    struct MeanWindow winP{};
+    UIP<MeanWindow> winPoint{};
+    UIP<MeanWindow> winPrint{};
 
     unsigned long long windowTimestamp = 0;
 
+    float calibFactorU = 1, calibFactorI = 1;
+
+    const uint8_t eePromIndex;
+
 public:
-    EnergyCounter(PowerSampler *sampler, std::string name) : sampler(sampler), name(std::move(name)) {}
+    EnergyCounter(PowerSampler *sampler, std::string name_, size_t eePromIndex_) : sampler(sampler),
+                                                                                   name(std::move(name_)),
+                                                                                   eePromIndex(eePromIndex_) {
+        if (readCalibrationFactors(eePromIndex_, calibFactorU, calibFactorI)) {
+            UART_LOG("%s read calibration factors U/I = (%.8f/%.8f)", name.c_str(), calibFactorU, calibFactorI);
+        }
+    }
 
     EnergyCounter(const EnergyCounter &) = delete; // no copy
     EnergyCounter(EnergyCounter &&) = default;
+
+    void setCalibrationFactors(float u, float i, bool multiply) {
+        if (!std::isnan(u))calibFactorU = (multiply ? calibFactorU : 1) * u;
+        if (!std::isnan(i)) calibFactorI = (multiply ? calibFactorI : 1) * i;
+
+        storeCalibrationFactors(eePromIndex, calibFactorU, calibFactorI);
+    }
 
     void update() {
         PowerSampler &ps(*sampler);
@@ -41,12 +69,15 @@ public:
             Sample s = ps.getSample();
             unsigned long nowTime = micros(); // capture timestamp after value capture
 
+            s.u *= calibFactorU;
+            s.i *= calibFactorI;
+
             auto P = s.p();
             if (lastTime != 0) {
                 // we use simple trapezoidal rule here
                 unsigned long dt_us = nowTime - lastTime;
                 Energy += (double) ((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
-                s.e = (float)Energy;
+                s.e = (float) Energy;
 
                 if (dt_us > maxDt)
                     maxDt = dt_us;
@@ -59,26 +90,27 @@ public:
             lastTime = nowTime;
             LastP = P;
 
-            winI.add(s.i);
-            winU.add(s.u);
-            winP.add(s.p());
+            winPoint.I.add(s.i);
+            winPoint.U.add(s.u);
+            winPoint.P.add(P);
+
+            winPrint.I.add(s.i);
+            winPrint.U.add(s.u);
+            winPrint.P.add(P);
+
             windowTimestamp = s.t;
-            if(numTimeoutsStreak > 0) numTimeoutsStreak = 0;
+            if (numTimeoutsStreak > 0) numTimeoutsStreak = 0;
         } else {
             unsigned long nowTime = micros();
             auto lt = lastTime; // capture
             if (nowTime > lt && (nowTime - lt) > 4e6) {
                 ++numTimeouts;
                 ++numTimeoutsStreak;
-                Serial.println("");
-                Serial.printf("Timeout waiting for new sample! %u", numTimeoutsStreak);
-                Serial.println((nowTime - lt) * 1e-6);
-                Serial.println(lt);
-                Serial.println(nowTime);
-                Serial.println("");
+                ESP_LOGW("ec", "\nTimeout waiting for new sample! %u %f %u %u \n", numTimeoutsStreak,
+                         (nowTime - lt) * 1e-6, lt, nowTime);
                 ps.startReading();
                 auto sl = min(100U, numTimeoutsStreak);
-                delay(sl*sl);
+                delay(sl * sl);
             }
         }
     }
@@ -87,12 +119,15 @@ public:
         return NumSamples > NSamplesLastSummary;
     }
 
+    Sample printSample;
+
     Point summary(unsigned long dt_us, bool print) {
 
         // capture
         auto nSamples = NumSamples;
         auto energy = Energy;
-        float i_mean = winI.pop(), u_mean = winU.pop(), p_mean = winP.pop();
+        float i_max = winPoint.I.getMax(), u_max = winPoint.U.getMax();
+        float i_mean = winPoint.I.pop(), u_mean = winPoint.U.pop(), p_mean = winPoint.P.pop();
 
         // compute
         float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6f);
@@ -101,6 +136,8 @@ public:
         point.addTag("device", name.c_str());
         point.addField("I", i_mean, 4);
         point.addField("U", u_mean, 3);
+        point.addField("I_max", i_max, 4);
+        point.addField("U_max", u_max, 3);
         point.addField("P", p_mean, 3);
         point.addField("E", energy, 3);
         point.setTime(windowTimestamp);
@@ -108,28 +145,19 @@ public:
         // client.writePoint(point);
 
         if (print) {
-            printTime();
-            Serial.print(name.c_str());
-            Serial.print(": U=");
-            Serial.print(u_mean, 4);
-            Serial.print("V, I=");
-            Serial.print(i_mean, 3);
-            Serial.print("A, P=");
-            Serial.print(p_mean, 3);
-            Serial.print("W, E=");
-            Serial.print(energy, 3);
-            Serial.print("Wh, N=");
-            Serial.print(nSamples);
-            Serial.print(", SPS=");
-            Serial.print(sps, 1);
-            // Serial.print(", T=");
-            // Serial.print((nowTime - startTime) * 1e-6, 1);
-            // Serial.print("s");
-            Serial.print(", maxDt/ms=");
-            Serial.print(maxDt * 1e-3f, 2);
-            // Serial.print(", numDropped=");
-            // Serial.print(numDropped);
-            Serial.println();
+            printSample.u = winPrint.U.pop();
+            printSample.i = winPrint.I.pop();
+            printSample.e = (float) energy;
+            UART_LOG("%s %s U=%7.4fV I=%7.4fA P=%6.3fW, E=%6.3fWh, N=%ul, sps=%.1f, maxDt=%.2fms",
+                     timeStr().c_str(), name.c_str(), printSample.u, printSample.i, winPrint.P.pop(), energy,
+                     nSamples, sps, maxDt * 1e-3f);
+
+            // Serial0.print(", T=");
+            // Serial0.print((nowTime - startTime) * 1e-6, 1);
+            // Serial0.print("s");
+            // Serial0.print(", numDropped=");
+            // Serial0.print(numDropped);
+            // Serial0.println();
         }
 
         NSamplesLastSummary = nSamples;
@@ -149,8 +177,7 @@ public:
         maxDt = 0;
         numTimeouts = 0;
 
-        winI.clear();
-        winU.clear();
-        winP.clear();
+        winPoint.clear();
+        winPrint.clear();
     }
 };
