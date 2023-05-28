@@ -2,11 +2,16 @@
 #include <Wire.h>
 
 #include <InfluxDbClient.h>
+#include <map>
 
 #include "adc/adc_ads.h"
 #include "adc/adc_esp.h"
 #include "adc/ina226.h"
+#include "adc/ina228.h"
 
+#include "lcd.h"
+
+#include "driver/uart.h"
 //#include "adc/adc_esp_dma.h"
 
 #include "energy_counter.h"
@@ -17,91 +22,69 @@ InfluxDBClient client;
 
 PowerSampler_ADS ads;
 PowerSampler_INA226 ina226;
+PowerSampler_INA228 ina228;
 // PowerSampler_ESP32 esp_adc;
 
 
 unsigned long LastTimeOut = 0;
 unsigned long LastTimePrint = 0;
 
-std::array<std::pair<std::string, PowerSampler *>, 2> samplers{
-        std::pair<std::string, PowerSampler *>{"ESP32_ADS", &ads},
-        {"ESP32_INA226", &ina226},
+//std::map
+//std::array<std::pair<std::string, PowerSampler *>, 2> samplers{
+//        std::pair<std::string, PowerSampler *>{"ESP32_ADS", &ads},
+//        {"ESP32_INA226", &ina226},
+//};
+
+std::map<std::string, PowerSampler *> samplers{
+        {"ESP32_ADS",    &ads},
+        //{"ESP32_INA226", &ina226},
+        {"ESP32_INA228", &ina228},
 };
 
 std::vector<EnergyCounter> energyCounters;
 
-void i2c_scan() {
-    byte error, address;
-    int nDevices;
-
-    Serial.println("Scanning...");
-
-    nDevices = 0;
-    for (address = 1; address < 127; address++) {
-        // The i2c_scanner uses the return value of
-        // the Write.endTransmisstion to see if
-        // a device did acknowledge to the address.
-        Wire.beginTransmission(address);
-        error = Wire.endTransmission();
-
-        if (error == 0) {
-            Serial.print("I2C device found at address 0x");
-            if (address < 16)
-                Serial.print("0");
-            Serial.print(address, HEX);
-            Serial.println("  !");
-
-            nDevices++;
-        } else if (error == 4) {
-            Serial.print("Unknown error at address 0x");
-            if (address < 16)
-                Serial.print("0");
-            Serial.println(address, HEX);
-        }
-    }
-    if (nDevices == 0)
-        Serial.println("No I2C devices found\n");
-    else
-        Serial.println("done\n");
-
-    //delay (2000);           // wait 5 seconds for next scan
-    //delay (2000);           // wait 5 seconds for next scan
-}
 
 bool disableWifi = false;
 
+LCD lcd;
+
+
 void setup(void) {
 
-    Serial.begin(115200);
-    Serial.println("Serial begin");
-
-
+    //Serial.begin(115200);
 #if CONFIG_IDF_TARGET_ESP32S3
-    Wire.setPins(15, 16);
-#elif CONFIG_IDF_TARGET_ESP32
-    // Wire.setPins(21, 22);
-#else
-#error "unknown target"
+    // for unknown reason need to initialize uart0 for serial reading (see loop below)
+    // Serial.available() works under Arduino IDE (for both ESP32,ESP32S3), but always returns 0 under platformio
+    // so we access the uart port directly. on ESP32 the Serial.begin() is sufficient (since it uses the uart0)
+    uartInit(0);
 #endif
 
-    Wire.begin();
-    Wire.setClock(400000UL);
+
+    ESP_LOGI("main", "SmartShunt started");
+
+
+    Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, 400000UL);
+
+    if (!lcd.init()) {
+        ESP_LOGW("main", "Failed to initialize LCD");
+        scan_i2c();
+    }
+
 
     if (!disableWifi)
         connect_wifi_async();
 
     for (auto p: samplers) {
         if (!p.second->init()) {
-            Serial.print(p.first.c_str());
-            Serial.println(": Failed to initialize sampler.");
+            ESP_LOGI("main", "%s: Failed to initialize sampler.", p.first.c_str());
         } else {
-            energyCounters.emplace_back(EnergyCounter{p.second, p.first});
+            energyCounters.emplace_back(EnergyCounter{p.second, p.first, p.second->getStorageId()});
             ESP_LOGI("main", "Initialized energy counter for %s", p.first.c_str());
         }
     }
 
     if (energyCounters.empty()) {
-        i2c_scan();
+        scan_i2c();
     }
 
 
@@ -124,10 +107,11 @@ void setup(void) {
         ec.sampler->startReading();
     }
 
-    Serial.println("setup done.");
+
 }
 
 std::vector<Point> points_frame;
+
 
 void loop(void) {
     constexpr bool hfWrites = false;
@@ -147,18 +131,22 @@ void loop(void) {
     if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
     if (nowTime - LastTimeOut > 50e3) {
-        auto print = nowTime - LastTimePrint > 1000e3;
+        auto print = nowTime - LastTimePrint > 2000e3;
 
         for (auto &ec: energyCounters) {
             if (ec.newSamplesSinceLastSummary()) {
                 auto p = ec.summary((nowTime - LastTimeOut), print);
                 points_frame.push_back(p);
+
+                if (print) {
+                    lcd.updateValues(ec.printSample);
+                }
             }
         }
 
         if (print) {
             if (energyCounters.size() > 1)
-                Serial.println("");
+                ESP_LOGI("main", "");
             LastTimePrint = nowTime;
         }
 
@@ -171,13 +159,126 @@ void loop(void) {
         LastTimeOut = nowTime;
     }
 
-    if (Serial.available() > 0) {
-        if (Serial.readString().indexOf("r") != -1) {
-            Serial.println("Reset, delay 1s");
+
+    // for some reason Serial.available() doesn't work under platformio
+    // so access the uart port directly
+
+    const uart_port_t uart_num = UART_NUM_0; // Arduino Serial is on port 0
+    char data[128];
+    int length = 0;
+    ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *) &length));
+    length = uart_read_bytes(uart_num, data, min(length, 127), 100);
+    while (length) {
+        data[length] = 0;
+        String inp(data);
+        inp.trim();
+
+        if (inp == "reset") {
+            //Serial0.println("Reset, delay 1s");
+            ESP_LOGW("main", "Reset in 1s!");
             delay(1000);
             for (auto &ec: energyCounters) {
                 ec.reset();
             }
+        } else if (inp.startsWith("calibrate ")) {
+            std::string samplerName = inp.substring(10, inp.indexOf(' ', 10)).c_str();
+            size_t i = 10 + samplerName.size() + 1;
+
+            EnergyCounter *ec = nullptr;
+            for (auto &ec_: energyCounters) {
+                if (ec_.name == samplerName) {
+                    ec = &ec_;
+                    break;
+                }
+            }
+
+            if (!ec) {
+                ESP_LOGW("main", "Sampler with name %s not found", samplerName.c_str());
+                break;
+            }
+
+            auto dim = inp.substring(i, i + 1);
+            dim.toUpperCase();
+            i += 2;
+            bool multiply = (inp.charAt(i) == '*');
+            if (multiply)++i;
+
+            auto factor = inp.substring(i).toFloat();
+
+            if (!checkCalibrationFactorBounds(factor)) {
+                ESP_LOGW("main", "Calibration factor %.9f out of bounds, rejected", factor);
+                break;
+            }
+
+            UART_LOG("%s: set calibration factor for [%s] = %.8f", samplerName.c_str(), dim.c_str(), factor);
+            if (dim == "U") {
+                ec->setCalibrationFactors(factor, NAN, multiply);
+            } else if (dim == "I") {
+                ec->setCalibrationFactors(NAN, factor, multiply);
+            } else {
+                ESP_LOGW("main", "unknown dim %s", dim.c_str());
+            }
+        } else if (inp.startsWith("ina22x-resistor-range")) {
+            size_t i = strlen("ina22x-resistor-range");
+            auto resStr = inp.substring(i + 1, inp.indexOf(' ', i + 1));
+            i += resStr.length() + 1;
+            auto range = inp.substring(i).toFloat();
+            auto res = resStr.toFloat();
+
+            if (ina226_instance) {
+                UART_LOG("INA226 setResistorRange(%.6f, %.6f)", res, range);
+                ina226_instance->setResistorRange(res, range);
+            } else if (ina228_instance) {
+                UART_LOG("INA228 setResistorRange(%.6f, %.6f)", res, range);
+                ina228_instance->setResistorRange(res, range);
+            } else {
+                ESP_LOGW("main", "No INA22x instance!");
+            }
+
+        } else {
+            UART_LOG("Unknown command.");
         }
+        break;
     }
+
+}
+
+const int BUF_SIZE = 1024;
+QueueHandle_t uart_queue;
+
+void uartInit(int port_num) {
+
+    uart_config_t uart_config = {
+            .baud_rate = 115200,
+            .data_bits = UART_DATA_8_BITS,
+            .parity    = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // UART_HW_FLOWCTRL_CTS_RTS
+            .source_clk = UART_SCLK_APB,
+    };
+    int intr_alloc_flags = 0;
+
+// tx=34, rx=33, stack=2048
+
+
+#if CONFIG_IDF_TARGET_ESP32S3
+    //const int PIN_TX = 34, PIN_RX = 33;
+    const int PIN_TX = 43, PIN_RX = 44;
+#else
+    const int PIN_TX = 1, PIN_RX = 3;
+#endif
+
+    ESP_ERROR_CHECK(uart_set_pin(port_num, PIN_TX, PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_param_config(port_num, &uart_config));
+    ESP_ERROR_CHECK(uart_driver_install(port_num, BUF_SIZE * 2, BUF_SIZE * 2, 10, &uart_queue, intr_alloc_flags));
+
+
+/* uart_intr_config_t uart_intr = {
+     .intr_enable_mask = (0x1 << 0) | (0x8 << 0),  // UART_INTR_RXFIFO_FULL | UART_INTR_RXFIFO_TOUT,
+     .rx_timeout_thresh = 1,
+     .txfifo_empty_intr_thresh = 10,
+     .rxfifo_full_thresh = 112,
+};
+uart_intr_config((uart_port_t) 0, &uart_intr);  // Zero is the UART number for Arduino Serial
+*/
 }

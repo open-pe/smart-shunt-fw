@@ -29,7 +29,8 @@ class PowerSampler {
   virtual bool init() = 0;
   virtual void startReading() = 0;
   virtual bool hasData() = 0;
-  virtual Sample getSample() = 0;  
+  virtual Sample getSample() = 0;
+  virtual uint8_t getStorageId() const = 0;
 };
 
 

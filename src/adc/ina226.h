@@ -2,6 +2,7 @@
 
 #include <INA226_WE.h>
 
+#include "settings.h"
 #include "sampling.h"
 
 class PowerSampler_INA226;
@@ -9,6 +10,7 @@ class PowerSampler_INA226;
 #ifndef IRAM_ATTR
 #define IRAM_ATTR
 #endif
+
 void IRAM_ATTR ina225_alert();
 
 PowerSampler_INA226 *ina226_instance = nullptr;
@@ -28,6 +30,9 @@ class PowerSampler_INA226 : public PowerSampler {
 
 
 public:
+    const uint8_t storageId = 1;
+    uint8_t getStorageId() const override  { return storageId; };
+
     bool init() {
         if (ina226_instance) {
             return false;
@@ -50,16 +55,29 @@ public:
 
         //ina226.setResistorRange(50e-3f / 100, 20.0f);
         //ina226.setResistorRange(75e-3f / 20, 20.0f); // 20 A shunt
-        ina226.setResistorRange(75e-3f / 40, 20.0f); // 20 A shunt
+        // ina226.setResistorRange(75e-3f / 40, 40.0f); // 20 A shunt
+
+        float resistor = 2e-3f, range = 38.0f;// default: vishay 2mOhm, .1%, 3W
+        if (readCalibrationFactors(4, resistor, range)) {
+            ESP_LOGI("ina226", "Restore resistor/range settings: %.6f/%.6f", resistor, range);
+        } else {
+            ESP_LOGI("ina226", "Default resistor/range settings: %.6f/%.6f", resistor, range);
+        }
+        ina226.setResistorRange(resistor, range);
 
 
-        uint8_t READY_PIN = 19;
+        uint8_t READY_PIN = settings.Pin_INA226_ALERT;
         pinMode(READY_PIN, INPUT_PULLUP);
         attachInterrupt(digitalPinToInterrupt(READY_PIN), ina225_alert, FALLING);
 
         ina226.enableConvReadyAlert();
 
         return true;
+    }
+
+    void setResistorRange(float res, float range) {
+        ina226.setResistorRange(res, range);
+        storeCalibrationFactors(4, res, range);
     }
 
     void startReading() {
@@ -71,7 +89,7 @@ public:
     }
 
     bool hasData() {
-        if(!new_data)
+        if (!new_data)
             return false;
 
         ina226.readAndClearFlags();
@@ -89,11 +107,12 @@ public:
 
         lastSample.setTimeNow();
 
-        float shuntCorr = 0.99619f; // 40A radiomag
+        // float shuntCorr = 0.99947179931f; // 40A radiomag
         // float shuntCorr = 1.000867f; // resistor today 0.5mOhm
 
-        lastSample.i = ina226.getCurrent_A() * shuntCorr; //
-        lastSample.u = ina226.getBusVoltage_V() * (44.604f / 18.321f * 31.018f / 31.011f * 1.0006088f);
+        lastSample.i = ina226.getCurrent_A(); //
+        //lastSample.u = ina226.getBusVoltage_V() * (44.604f / 18.321f * 1.0137095f / 26217.f * 26269.f);
+        lastSample.u = ina226.getBusVoltage_V();
 
         float busP = ina226.getBusPower();
         float pErr = std::abs(lastSample.p() - busP) / busP;
