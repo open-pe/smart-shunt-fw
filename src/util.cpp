@@ -47,17 +47,54 @@ void wait_for_wifi() {
   ESP_LOGI("util", "Connected to WiFi, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
 }
 
-
-void influxWritePointsUDP(const Point *p, uint8_t len) {
-
-    byte host[] = {192, 168, 178, 28};
-    udp.beginPacket(host, 8086);
-    String msg;
-    for(uint8_t i = 0; i < len; ++i) {
-      msg += p[i].toLineProtocol() + '\n';
+void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
+    if (msg.length() > CONFIG_TCP_MSS) {
+        ESP_LOGW("tele", "Payload len %d > TCP_MSS: %s", msg.length(), msg.substring(0, 200).c_str());
+        msg.clear();
+        return;
     }
+
+   // bytesSent += asyncUdp.writeTo((uint8_t *) msg.c_str(), msg.length(), host, port);
+
+    udp.beginPacket(host, port);
     udp.print(msg);
     udp.endPacket();
+
+    msg.clear();
+}
+
+
+void influxWritePointsUDP(const Point *p, uint8_t len) {
+    constexpr int MTU = CONFIG_TCP_MSS;
+
+    /*
+    static IPAddress host{};
+    if(uint32_t(host) == 0) {
+        ESP_LOGI("tele", "resolving hostname");
+        host = MDNS.queryHost("homeassistant.local");
+        ESP_LOGI("tele", "resolved to %s",host.toString());
+    }
+     */
+
+    // byte host[] = {192, 168, 0, 185};
+    byte host[] = {192, 168, 178, 28};
+
+    auto port = 8086;
+
+
+    String msg;
+
+    for (uint8_t i = 0; i < len; ++i) {
+        auto lp = p[i].toLineProtocol();
+        if (msg.length() + lp.length() >= MTU) {
+            udpFlushString(host, port, msg);
+        }
+        msg += lp + '\n';
+    }
+
+    if (msg.length() > 0) {
+        udpFlushString(host, port, msg);
+    }
 }
 
 

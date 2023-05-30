@@ -5,9 +5,9 @@
 #include "sampling.h"
 
 #if CONFIG_IDF_TARGET_ESP32S3
-constexpr int ADS_READY_PIN = 7;
+constexpr int ADS_READY_PIN = 7; //fugu=6;
 #else
-constexpr int ADS_READY_PIN = 12;
+constexpr int ADS_READY_PIN = 12; // fugu=34
 #endif
 
 #ifndef IRAM_ATTR

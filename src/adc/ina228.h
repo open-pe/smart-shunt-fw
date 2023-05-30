@@ -97,7 +97,7 @@ public:
         adc_config |= 0xB << 12; // MODE   = Continuous shunt and bus voltage
         adc_config |= 0x5 << 9; // VBUSCT  = 1052 µs (bus voltage conversion time)
         adc_config |= 0x5 << 6; // VSHCT   = 540 µs (shunt voltage conversion time)
-        adc_config |= 0x1 << 0; // AVG = 4
+        adc_config |= 0x0 << 0; // AVG     = (0x0:1, 0x1:4)
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_ADC_CONFIG, adc_config));
 
 
