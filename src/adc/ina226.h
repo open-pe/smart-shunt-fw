@@ -55,9 +55,9 @@ public:
 
         //ina226.setResistorRange(50e-3f / 100, 20.0f);
         //ina226.setResistorRange(75e-3f / 20, 20.0f); // 20 A shunt
-        // ina226.setResistorRange(75e-3f / 40, 40.0f); // 20 A shunt
+        // ina226.setResistorRange(75e-3f / 40, 40.0f); // radiomag 40 A shunt
 
-        float resistor = 2e-3f, range = 38.0f;// default: vishay 2mOhm, .1%, 3W
+        float resistor = 1e-3f, range = 80.0f;// default: 1mOhm, 80A (ina226 shunt voltage range is 81.92mV)
         if (readCalibrationFactors(4, resistor, range)) {
             ESP_LOGI("ina226", "Restore resistor/range settings: %.6f/%.6f", resistor, range);
         } else {

@@ -44,6 +44,8 @@ public:
 
     const uint8_t eePromIndex;
 
+    unsigned long maxDtReported = 0;
+
 public:
     EnergyCounter(PowerSampler *sampler, std::string name_, size_t eePromIndex_) : sampler(sampler),
                                                                                    name(std::move(name_)),
@@ -140,6 +142,14 @@ public:
         point.addField("U_max", u_max, 3);
         point.addField("P", p_mean, 3);
         point.addField("E", energy, 3);
+        if (maxDt > maxDtReported) {
+            point.addField("dt_max", (float) maxDt * 1e-3f, 2);
+            maxDtReported = maxDt;
+        }
+
+        if (numTimeouts)
+            point.addField("timeouts", numTimeouts);
+
         point.setTime(windowTimestamp);
 
         // client.writePoint(point);
