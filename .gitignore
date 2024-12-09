@@ -13,3 +13,7 @@ CMakeListsPrivate.txt
 *.kicad_sch-bak
 
 *.zip
+
+hw/fp-info-cache
+
+*.kicad_prl
