@@ -9,3 +9,7 @@ cmake-build-*
 CMakeLists.txt
 
 CMakeListsPrivate.txt
+
+*.kicad_sch-bak
+
+*.zip

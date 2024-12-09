@@ -1,3 +1,5 @@
+#pragma once
+
 #include <SPI.h> // not sure why this is needed
 
 #include <INA226_WE.h>
@@ -45,7 +47,6 @@ class PowerSampler_INA228 : public PowerSampler {
 
     volatile bool new_data = false;
 
-
     int readUICycle = 0;
     bool readingU = false;
 
@@ -55,25 +56,29 @@ class PowerSampler_INA228 : public PowerSampler {
 
 public:
     const uint8_t storageId = 2;
-    uint8_t getStorageId() const override  { return storageId; };
+
+    uint8_t getStorageId() const override { return storageId; };
 
     bool init() {
         if (ina228_instance) {
             return false;
         }
 
-        ina228_instance = this;
+
+        ESP_LOGI("ina228", "Manufacturer ID:    0x%04X",
+                 i2c_read_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_MANUFACTURER_ID));
+        auto deviceId = i2c_read_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_DEVICE_ID);
+        ESP_LOGI("ina228", "Device ID:          0x%04X", deviceId);
+
+        if (deviceId != 0x2280 && deviceId != 0x2281) {
+            ESP_LOGW("ina228", "This is not an INA228 device!");
+            return false;
+        }
 
         // reset
         if (i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_CONFIG, 0x8000) != ESP_OK) {
             return false;
         }
-
-        ESP_LOGI("ina228", "Manufacturer ID:    0x%04X",
-                 i2c_read_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_MANUFACTURER_ID));
-        ESP_LOGI("ina228", "Device ID:          0x%04X",
-                 i2c_read_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_DEVICE_ID));
-
 
         float resistor = 2e-3f, range = 38.0f;// default: vishay 2mOhm, .1%, 3W
         if (readCalibrationFactors(4, resistor, range)) {
@@ -84,13 +89,9 @@ public:
         setResistorRange(resistor, range, false);
 
 
-        uint8_t readyPin = settings.Pin_INA226_ALERT;
+        uint8_t readyPin = settings.Pin_INA22x_ALERT;
         pinMode(readyPin, INPUT_PULLUP);
         attachInterrupt(digitalPinToInterrupt(readyPin), ina228_alert, FALLING);
-
-        uint16_t config = 0;
-        config |= 0x1 << 4; // ADC shunt voltage range: 0h = ±163.84 mV, 1h = ± 40.96 mV
-        ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_CONFIG, config));
 
 
         uint16_t adc_config = 0;
@@ -105,7 +106,19 @@ public:
         diagAlrt |= 0x1 << 14; // CNVR: enable conversion ready flag on ALERT pin
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_DIAG_ALRT, diagAlrt));
 
+        ina228_instance = this;
+
         return true;
+    }
+
+    bool shuntLv = false;
+
+    void setShuntLowVoltageRange(bool _40_96_mV) {
+        uint16_t config = 0;
+        config |= (_40_96_mV ? 0x1 : 0x0) << 4; // ADC shunt voltage range: 0h = ±163.84 mV, 1h = ± 40.96 mV
+        ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_CONFIG, config));
+        shuntLv = _40_96_mV;
+        ESP_LOGI("ina228", "Set shunt %s mV range", shuntLv ? "40.96" : "163.84");
     }
 
     float current_LSB;
@@ -113,16 +126,24 @@ public:
     void setResistorRange(float resistor, float range, bool store = true) {
         // https://www.ti.com/lit/ds/symlink/ina228.pdf#page=31
 
+        float maxExpectedVoltage = resistor * range;
+
+        assert(maxExpectedVoltage > 1e-3f);
+        assert(maxExpectedVoltage < 163.84e-3f);
+
+        setShuntLowVoltageRange((maxExpectedVoltage < 40.96e-3f));
+
         current_LSB = (float) range / (float) (2 << (19 - 1));
 
         //currentDivider_mA = 0.001/current_LSB;
         // pwrMultiplier_mW = 1000.0*25.0*current_LSB;
         auto shuntCal = 13107.2e6 * current_LSB * resistor;
-        auto shuntCalShort = (uint16_t) shuntCal;
+        auto shuntCalShort = (uint16_t) std::lround(shuntCal);
 
-        ESP_LOGI("ina228", "Set shuntCal %hu (from %f)", shuntCalShort, shuntCal);
+        ESP_LOGI("ina228", "Set shuntCal %hu (from %f), Vmax_exp=%.1fmV", shuntCalShort, shuntCal,
+                 maxExpectedVoltage * 1e3f);
 
-        i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_SHUNT_CAL, shuntCalShort);
+        ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_SHUNT_CAL, shuntCalShort));
 
         if (store)
             storeCalibrationFactors(4, resistor, range);
@@ -135,6 +156,8 @@ public:
     void alertNewDataFromISR() {
         new_data = true;
     }
+
+    bool inOverflow = false;
 
     bool hasData() {
         if (!new_data)
@@ -153,7 +176,12 @@ public:
             ESP_LOGW("ina228", "Shunt-Voltage over-load!");
         }
         if (MATHOF) {
-            ESP_LOGW("ina228", "Math over-flow!");
+            if (!inOverflow)
+                ESP_LOGW("ina228", "Math over-flow!");
+            inOverflow = true;
+        } else if (inOverflow) {
+            ESP_LOGW("ina228", "Math over-flow resolved!");
+            inOverflow = false;
         }
         return CNVRF;
     }
@@ -163,7 +191,7 @@ public:
         float fBusVoltage;
         bool sign;
 
-        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_VBUS, (uint8_t *) &iBusVoltage, 3);
+        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_VBUS, (uint8_t * ) & iBusVoltage, 3);
         sign = iBusVoltage & 0x80;
         iBusVoltage = __bswap32(iBusVoltage & 0xFFFFFF) >> 12;
         if (sign) iBusVoltage += 0xFFF00000;
@@ -177,10 +205,13 @@ public:
         float fCurrent;
         bool sign;
 
-        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_CURRENT, (uint8_t *) &iCurrent, 3);
+        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_CURRENT, (uint8_t * ) & iCurrent, 3);
         sign = iCurrent & 0x80;
         iCurrent = __bswap32(iCurrent & 0xFFFFFF) >> 12;
         if (sign) iCurrent += 0xFFF00000;
+        if (shuntLv)
+            iCurrent = iCurrent / 4;
+
         fCurrent = (float) (iCurrent) * current_LSB;
 
         return (fCurrent);

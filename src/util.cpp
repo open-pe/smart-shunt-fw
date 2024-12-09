@@ -10,20 +10,14 @@
 #include <InfluxDbClient.h>
 #include <WiFiUDP.h>
 
-#define WIFI_SSID "^__^"
-#define WIFI_PASSWORD "modellbau"
-
-#define MY_NTP_SERVER "de.pool.ntp.org"
-#define MY_TZ "CET-1CEST,M3.5.0/02,M10.5.0/03"
-
-
 
 #if defined(ESP32)
+
 #include <WiFiMulti.h>
 #include <driver/uart.h>
 
 WiFiMulti wifiMulti;
-#define DEVICE "ESP32"
+//#define DEVICE "ESP32"
 #elif defined(ESP8266)
 #include <ESP8266WiFiMulti.h>
 ESP8266WiFiMulti wifiMulti;
@@ -34,17 +28,16 @@ ESP8266WiFiMulti wifiMulti;
 WiFiUDP udp;
 
 
-
 void connect_wifi_async() {
-  WiFi.mode(WIFI_STA);
+    WiFi.mode(WIFI_STA);
   wifiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
 }
 
 void wait_for_wifi() {
-  while (wifiMulti.run() != WL_CONNECTED) {
-    delay(50);
-  }
-  ESP_LOGI("util", "Connected to WiFi, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
+    while (wifiMulti.run() != WL_CONNECTED) {
+        delay(50);
+    }
+    ESP_LOGI("util", "Connected to WiFi, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
 }
 
 void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
@@ -54,7 +47,7 @@ void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
         return;
     }
 
-   // bytesSent += asyncUdp.writeTo((uint8_t *) msg.c_str(), msg.length(), host, port);
+    // bytesSent += asyncUdp.writeTo((uint8_t *) msg.c_str(), msg.length(), host, port);
 
     udp.beginPacket(host, port);
     udp.print(msg);
@@ -98,59 +91,59 @@ void influxWritePointsUDP(const Point *p, uint8_t len) {
 }
 
 
-
 std::string timeStr() {
-  char buffer[26];
-  int millisec;
-  struct timeval tv;
+    char buffer[26];
+    int millisec;
+    struct timeval tv;
 
-  gettimeofday(&tv, NULL);
+    gettimeofday(&tv, NULL);
 
-  millisec = lrint(tv.tv_usec / 1000.0);  // Round to nearest millisec
-  if (millisec >= 1000) {                 // Allow for rounding up to nearest second
-    millisec -= 1000;
-    tv.tv_sec++;
-  }
+    millisec = lrint(tv.tv_usec / 1000.0);  // Round to nearest millisec
+    if (millisec >= 1000) {                 // Allow for rounding up to nearest second
+        millisec -= 1000;
+        tv.tv_sec++;
+    }
 
-  strftime(buffer, 26, "%H:%M:%S", localtime(&tv.tv_sec));
-  return std::string(buffer);
-  // printf("%s.%03d\n", buffer, millisec);
-  //Serial0.print(buffer);
-  //Serial0.print('.');
-  //Serial0.print(millisec);
-  //Serial0.print(' ');
+    strftime(buffer, 26, "%H:%M:%S", localtime(&tv.tv_sec));
+    return std::string(buffer);
+    // printf("%s.%03d\n", buffer, millisec);
+    //Serial0.print(buffer);
+    //Serial0.print('.');
+    //Serial0.print(millisec);
+    //Serial0.print(' ');
 
-  /*
-  char buff[100];
-    time_t now = time (0);
-    strftime (buff, 100, "%H:%M:%S.000", localtime (&now));
-    printf ("%s\n", buff);
-    return 0;
-  */
+    /*
+    char buff[100];
+      time_t now = time (0);
+      strftime (buff, 100, "%H:%M:%S.000", localtime (&now));
+      printf ("%s\n", buff);
+      return 0;
+    */
 }
 
 
 void pointFromSample(Point &p, const Sample &s, const char *device) {
-  p.addTag("device", device);
-  p.addField("I", s.i, 3);
-  p.addField("U", s.u, 3);
-  p.addField("P", s.p(), 3);
-  p.addField("E", s.e, 3);
-  p.setTime(s.t);
+    p.addTag("device", device);
+    p.addField("I", s.i, 3);
+    p.addField("U", s.u, 3);
+    p.addField("P", s.p(), 3);
+    p.addField("E", s.e, 3);
+    p.setTime(s.t);
 }
 
 
 class PointDefaultConstructor : public Point {
 public:
-  PointDefaultConstructor()
-    : Point("smart_shut") {}
-  PointDefaultConstructor(const Point &p)
-    : Point(p) {}
+    PointDefaultConstructor()
+            : Point("smart_shunt") {}
 
-  PointDefaultConstructor &operator=(const PointDefaultConstructor &p) {
-    Point::operator=(p);
-    return *this;
-  }
+    PointDefaultConstructor(const Point &p)
+            : Point(p) {}
+
+    PointDefaultConstructor &operator=(const PointDefaultConstructor &p) {
+        Point::operator=(p);
+        return *this;
+    }
 };
 
 
@@ -231,9 +224,10 @@ void scan_i2c() {
     delay(5000);
 }
 
-static char UART_LOG_buf[384];
 
 void UART_LOG(const char *fmt, ...) {
+    static char UART_LOG_buf[384];
+
     va_list args;
     va_start(args, fmt);
     vsnprintf(UART_LOG_buf, 380, fmt, args);

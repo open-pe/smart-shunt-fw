@@ -1,0 +1,25 @@
+
+# Shunts
+
+Milliohm HoFL2-300A-75mV-0.2%-YS HoF00246 ($7,5)
+0.25mOhm
+With INA229 40mV range can measure up to 160A.
+chinese brand
+https://datasheet.lcsc.com/lcsc/2206271801_Milliohm-HoFL2-300A-75mV-0-2--YS_C3033850.pdf
+https://www.lcsc.com/product-detail/Current-Sense-Resistors-Shunt-Resistors_Milliohm-HoFL2-300A-75mV-0-2-YS_C3033850.html
+
+
+https://www.lcsc.com/product-detail/Current-Sense-Resistors-Shunt-Resistors_Resistor-Today-RTCS0100B050Z00_C2979390.html
+
+
+https://www.rohm.com/electronics-basics/resistors/shunt-resistors
+
+
+
+# Ti selection guide
+https://www.ti.com/content/dam/videos/external-videos/9/3816841626001/6314459715112.mp4/subassets/2022.10.27_npu_industrys_most_accurate_110v.pdf
+Use  INA241 & INA296
+- 16bit ADC 3k SPS (min) Ads114
+
+
+TPS2492PWR ?

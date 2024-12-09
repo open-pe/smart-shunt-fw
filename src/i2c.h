@@ -27,7 +27,7 @@ esp_err_t i2c_write_short(uint8_t i2c_master_port, uint8_t address, uint8_t comm
     if (ret == ESP_OK) {
         //printf("i2c_write successful\r\n");
     } else {
-        printf("i2c_write_short failed\r\n");
+        ESP_LOGE("i2c", "i2c_write_short(addr=0x%02hhX,cmd=0x%02hhX) failed", address, command);
     }
 
     return(ret);
@@ -109,4 +109,9 @@ esp_err_t i2c_read_buf(uint8_t i2c_master_port, uint8_t address, uint8_t command
         //ESP_LOGW(TAG, "Read failed");
     }
     return(ret);
+}
+
+bool i2c_test_address(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    return Wire.endTransmission() == 0;
 }

@@ -5,9 +5,9 @@
 #include "sampling.h"
 
 #if CONFIG_IDF_TARGET_ESP32S3
-constexpr int ADS_READY_PIN = 7; //fugu=6;
+constexpr int ADS_READY_PIN = 6; // ESP32-S3: fugu=6;
 #else
-constexpr int ADS_READY_PIN = 12; // fugu=34
+constexpr int ADS_READY_PIN = 34; // ESP32: default=12, fugu=34
 #endif
 
 #ifndef IRAM_ATTR
@@ -23,8 +23,8 @@ PowerSampler_ADS *ads_instance = nullptr;
 
 class PowerSampler_ADS : public PowerSampler {
 
-    //Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
-    Adafruit_ADS1115 ads; /* Use this for the 12-bit version */
+    Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
+    //Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
 
     volatile bool new_data = false;
 
@@ -53,7 +53,8 @@ class PowerSampler_ADS : public PowerSampler {
 
 public:
     const uint8_t storageId = 0;
-    uint8_t getStorageId() const override  { return storageId; };
+
+    uint8_t getStorageId() const override { return storageId; };
 
     bool init() {
         // RATE_ADS1115_128SPS (default)
@@ -69,11 +70,14 @@ public:
 
         if (std::is_same<decltype(ads), Adafruit_ADS1115>::value) {
             ads.setDataRate(RATE_ADS1115_860SPS);
+            ESP_LOGI("ads", "ADS1115");
         } else {
+
+            //ads.setDataRate(RATE_ADS1015_1600SPS); // -> sps=1050 (1+1/40 s/ps) i2c sdc @800khz
+            //ads.setDataRate(RATE_ADS1015_3300SPS); // -> sps=1650 (1+1/40 s/ps)
             //ads.setDataRate(RATE_ADS1015_3300SPS);
             // for some reason RATE_ADS1115_860SPS gives higher sampling rate (105 power samples)
-            // fake hardware?
-            ads.setDataRate(RATE_ADS1115_860SPS);
+            ESP_LOGI("ads", "ADS1015");
         }
 
 
@@ -84,11 +88,15 @@ public:
         pinMode(ADS_READY_PIN, INPUT_PULLUP);
         attachInterrupt(digitalPinToInterrupt(ADS_READY_PIN), ads_alert, FALLING);
 
+        ESP_LOGI("ads", "Interrupt attached to pin %d", ADS_READY_PIN);
+
         return true;
     }
 
     void startReading() {
-        if ((++readUICycle % 4) == 0) {
+        //if ((++readUICycle % 4) == 0) {
+        //if(++readUICycle > 3) {
+        if ((++readUICycle % 40) == 0) {
             // 1.25 ADC_Sample/Power_Sample
             //if (random(0, 4) == 0) {  // random sampling better than cyclic
             // occasionally sample U
@@ -167,12 +175,14 @@ public:
         // TODO detect clipping
 
         if (readU) {
-            lastSample.u = computeVolts(adc, gainU) * ((222.0f + 10.13f) / 10.13f) * 1.001689f * 29.244f / 29.212f
-                           * 26834.f / 26847.f * 43027.f / 28715.f;
+            constexpr auto adsImpedance = 6e6f; // see datasheet https://www.ti.com/lit/ds/symlink/ads1115.pdf#page=7
+            constexpr auto ladderRLow = 5e3f;
+            constexpr auto ladderRHigh = 200e3f;
+            constexpr auto rLow = 1 / (1 / ladderRLow + 1 / adsImpedance);
+            lastSample.u = computeVolts(adc, gainU) * ((ladderRHigh + rLow) / rLow);
         } else {
             lastSample.setTimeNow();
-            lastSample.i = computeVolts(adc, gainI) * (1000.0f / 12.5f) * 1.00822f * 2091.f / 2114.f
-                           * 3662.f / 3641.f * 3425.f / 3435.f;
+            lastSample.i = computeVolts(adc, gainI) * (1000.0f / 12.5f);
         }
     }
 };

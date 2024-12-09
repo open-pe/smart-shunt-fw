@@ -4,6 +4,7 @@
 
 #include "settings.h"
 #include "sampling.h"
+#include "ina228.h"
 
 class PowerSampler_INA226;
 
@@ -11,7 +12,7 @@ class PowerSampler_INA226;
 #define IRAM_ATTR
 #endif
 
-void IRAM_ATTR ina225_alert();
+void ina226_alert();
 
 PowerSampler_INA226 *ina226_instance = nullptr;
 
@@ -19,39 +20,56 @@ PowerSampler_INA226 *ina226_instance = nullptr;
 class PowerSampler_INA226 : public PowerSampler {
 
     INA226_WE ina226;
-
     volatile bool new_data = false;
-
-
-    int readUICycle = 0;
-    bool readingU = false;
-
-    Sample lastSample;
+    Sample lastSample{};
 
 
 public:
     const uint8_t storageId = 1;
-    uint8_t getStorageId() const override  { return storageId; };
 
-    bool init() {
+    uint8_t getStorageId() const override { return storageId; };
+
+    bool init() override {
         if (ina226_instance) {
             return false;
         }
 
-        ina226_instance = this;
+        auto addr = INA226_WE::INA226_ADDRESS;
+
+        if(!i2c_test_address(addr))
+            return false;
+
+        auto mfrId = i2c_read_short(0, addr, INA228_MANUFACTURER_ID);
+        auto deviceId = i2c_read_short(0, addr, INA228_DEVICE_ID);
+
+        ESP_LOGI("ina228", "MfrID: 0x%04X, DeviceID: 0x%04X", mfrId, deviceId);
+
+        if (deviceId != 0x2260) {
+            ESP_LOGW("ina226", "This is not an INA226 device!");
+            return false;
+        }
 
         if (!ina226.init())
             return false;
 
-        ina226.setAverage(AVERAGE_1);
-        ina226.setConversionTime(CONV_TIME_1100);
+        ina226.setAverage(AVERAGE_4);
+        //ina226.setConversionTime(CONV_TIME_204);
+        //ina226.setConversionTime(CONV_TIME_588, CONV_TIME_588);
+        ina226.setConversionTime(CONV_TIME_588);
+
+        // analog filters:
+        // use RC with cutoff at sampling rate
+        // with conversion time 588, sampling rate is about 1700 Hz.
+        // 2x10ohm and 4,7uF. => 1693 cutoff
+
+        //ina226.setAverage(AVERAGE_16);
+        //ina226.setConversionTime(CONV_TIME_1100, CONV_TIME_204);
 
         //ina226.setAverage(AVERAGE_1024);
         //ina226.setConversionTime(CONV_TIME_8244);
 
         // ^^^ Conversion ready after conversion time x number of averages x 2
 
-        ina226.setMeasureMode(CONTINUOUS);
 
         //ina226.setResistorRange(50e-3f / 100, 20.0f);
         //ina226.setResistorRange(75e-3f / 20, 20.0f); // 20 A shunt
@@ -63,14 +81,18 @@ public:
         } else {
             ESP_LOGI("ina226", "Default resistor/range settings: %.6f/%.6f", resistor, range);
         }
+        delay(10);
+
         ina226.setResistorRange(resistor, range);
 
-
-        uint8_t READY_PIN = settings.Pin_INA226_ALERT;
-        pinMode(READY_PIN, INPUT_PULLUP);
-        attachInterrupt(digitalPinToInterrupt(READY_PIN), ina225_alert, FALLING);
-
         ina226.enableConvReadyAlert();
+
+        ina226_instance = this;
+
+        uint8_t READY_PIN = settings.Pin_INA22x_ALERT;
+        pinMode(READY_PIN, INPUT_PULLUP);
+        attachInterrupt(digitalPinToInterrupt(READY_PIN), ina226_alert, FALLING);
+        ESP_LOGI("ina226", "Setup ALERT interrupt pin %hhu", READY_PIN);
 
         return true;
     }
@@ -80,15 +102,17 @@ public:
         storeCalibrationFactors(4, res, range);
     }
 
-    void startReading() {
-        // pass
+    void startReading() override {
+        ina226.setMeasureMode(CONTINUOUS);
     }
 
     void alertNewDataFromISR() {
         new_data = true;
     }
 
-    bool hasData() {
+    bool hasData() override{
+        //return true;
+
         if (!new_data)
             return false;
 
@@ -103,7 +127,7 @@ public:
         return ina226.convAlert;
     }
 
-    Sample getSample() {
+    Sample getSample() override {
 
         lastSample.setTimeNow();
 
@@ -124,7 +148,7 @@ public:
     }
 };
 
-void IRAM_ATTR ina225_alert() {
+void IRAM_ATTR ina226_alert() {
     if (ina226_instance)
         ina226_instance->alertNewDataFromISR();
 }

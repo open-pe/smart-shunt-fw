@@ -108,7 +108,9 @@ public:
             if (nowTime > lt && (nowTime - lt) > 4e6) {
                 ++numTimeouts;
                 ++numTimeoutsStreak;
-                ESP_LOGW("ec", "\nTimeout waiting for new sample! %u %f %u %u \n", numTimeoutsStreak,
+                ESP_LOGW("ec", "\n%s Timeout waiting for new sample! %u %f %u %u \n",
+                         name.c_str(),
+                         numTimeoutsStreak,
                          (nowTime - lt) * 1e-6, lt, nowTime);
                 ps.startReading();
                 auto sl = min(100U, numTimeoutsStreak);
@@ -137,8 +139,8 @@ public:
         Point point("smart_shunt");
         point.addTag("device", name.c_str());
         point.addField("I", i_mean, 4);
-        point.addField("U", u_mean, 3);
-        point.addField("I_max", i_max, 4);
+        point.addField("U", u_mean, 4);
+        point.addField("I_max", i_max, 3);
         point.addField("U_max", u_max, 3);
         point.addField("P", p_mean, 3);
         point.addField("E", energy, 3);
@@ -158,7 +160,7 @@ public:
             printSample.u = winPrint.U.pop();
             printSample.i = winPrint.I.pop();
             printSample.e = (float) energy;
-            UART_LOG("%s %s U=%7.4fV I=%7.4fA P=%6.3fW, E=%6.3fWh, N=%ul, sps=%.1f, maxDt=%.2fms",
+            UART_LOG("%s %s U=%7.4fV I=%7.4fA P=%6.3fW, E=%6.3fWh, N=%lu, sps=%.1f, maxDt=%.2fms",
                      timeStr().c_str(), name.c_str(), printSample.u, printSample.i, winPrint.P.pop(), energy,
                      nSamples, sps, maxDt * 1e-3f);
 

@@ -37,7 +37,7 @@ unsigned long LastTimePrint = 0;
 
 std::map<std::string, PowerSampler *> samplers{
         {"ESP32_ADS",    &ads},
-        //{"ESP32_INA226", &ina226},
+        {"ESP32_INA226", &ina226},
         {"ESP32_INA228", &ina228},
 };
 
@@ -48,31 +48,39 @@ bool disableWifi = false;
 
 LCD lcd;
 
+unsigned long timeLastWakeEvent = 0;
 
 void setup(void) {
 
     //Serial.begin(115200);
-#if CONFIG_IDF_TARGET_ESP32S3
+//#if CONFIG_IDF_TARGET_ESP32S3
     // for unknown reason need to initialize uart0 for serial reading (see loop below)
     // Serial.available() works under Arduino IDE (for both ESP32,ESP32S3), but always returns 0 under platformio
     // so we access the uart port directly. on ESP32 the Serial.begin() is sufficient (since it uses the uart0)
     uartInit(0);
-#endif
+//#endif
 
 
     ESP_LOGI("main", "SmartShunt started");
 
 
-    Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, 400000UL);
+    Wire.begin(
+            settings.Pin_I2C_SDA,
+            settings.Pin_I2C_SCL,
+            800000UL
+    );
 
     if (!lcd.init()) {
         ESP_LOGW("main", "Failed to initialize LCD");
-        scan_i2c();
+        //scan_i2c();
     }
 
 
-    if (!disableWifi)
+    if (!disableWifi) {
         connect_wifi_async();
+        wait_for_wifi();
+        timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
+    }
 
     for (auto p: samplers) {
         if (!p.second->init()) {
@@ -99,8 +107,6 @@ void setup(void) {
         );
 
 
-        wait_for_wifi();
-        timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
     }
     // when multiplexing channels, TI recommnads single-shot mode
     for (auto &ec: energyCounters) {
@@ -113,7 +119,7 @@ void setup(void) {
 std::vector<Point> points_frame;
 
 
-void loop(void) {
+void loop() {
     constexpr bool hfWrites = false;
 
     unsigned long nowTime = micros();
@@ -135,6 +141,10 @@ void loop(void) {
 
         for (auto &ec: energyCounters) {
             if (ec.newSamplesSinceLastSummary()) {
+                if (std::abs(ec.winPrint.P.getMean()) >= 0.0005f) {
+                    timeLastWakeEvent = nowTime;
+                }
+
                 auto p = ec.summary((nowTime - LastTimeOut), print);
                 points_frame.push_back(p);
 
@@ -146,7 +156,7 @@ void loop(void) {
 
         if (print) {
             if (energyCounters.size() > 1)
-                ESP_LOGI("main", "");
+                UART_LOG("");
             LastTimePrint = nowTime;
         }
 
@@ -172,6 +182,8 @@ void loop(void) {
         data[length] = 0;
         String inp(data);
         inp.trim();
+
+        timeLastWakeEvent = nowTime;
 
         if (inp == "reset") {
             //Serial0.println("Reset, delay 1s");
@@ -210,7 +222,10 @@ void loop(void) {
                 break;
             }
 
-            UART_LOG("%s: set calibration factor for [%s] = %.8f", samplerName.c_str(), dim.c_str(), factor);
+            // TODO send factors to influxDB
+
+            UART_LOG("%s: set calibration factor for [%s] = %.8f (was %.8f)", samplerName.c_str(), dim.c_str(), factor,
+                     dim == "U" ? ec->calibFactorU : ec->calibFactorI);
             if (dim == "U") {
                 ec->setCalibrationFactors(factor, NAN, multiply);
             } else if (dim == "I") {
@@ -235,13 +250,25 @@ void loop(void) {
                 ESP_LOGW("main", "No INA22x instance!");
             }
 
+        } else if (inp == "wifi on") {
+            connect_wifi_async();
+        } else if (inp == "wifi off") {
+            WiFi.disconnect(true);
+        } else if (inp == "help") {
+            UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
         } else {
-            UART_LOG("Unknown command.");
+            UART_LOG("Unknown command. enter 'help' for help");
         }
         break;
     }
 
+    if (nowTime - timeLastWakeEvent > (1e6 * 3600)) {
+        UART_LOG("Zero power for 1h, going to sleep");
+        ESP.deepSleep(0);
+        // TODO setup alarm here to wake up
+    }
 }
+
 
 const int BUF_SIZE = 1024;
 QueueHandle_t uart_queue;

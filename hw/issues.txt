@@ -1,0 +1,5 @@
+- fuse voltage sense ground
+- add jumper connect IN(-) with ground (using 50ohm resistor or 0?)
+	- or capacitor as in ADS1013 dat sheet?
+- add 3pin voltage divider/filter pin
+- add jumper for ground bypass for HV measurements (common mode >80V)
