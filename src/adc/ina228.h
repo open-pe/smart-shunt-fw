@@ -99,9 +99,12 @@ public:
 
         uint16_t adc_config = 0;
         adc_config |= 0xB << 12; // MODE   = Continuous shunt and bus voltage
-        adc_config |= 0x5 << 9; // VBUSCT  = 1052 µs (bus voltage conversion time)
-        adc_config |= 0x5 << 6; // VSHCT   = 540 µs (shunt voltage conversion time)
+        // conversion times see https://www.ti.com/lit/ds/symlink/ina229.pdf#page=22
+        // 4h = 540 µs, 0x5: 1052µs,
+        adc_config |= 0x5 << 9; // VBUSCT  = 1052 µs (bus voltage conversion time) // << 9 => 1052
+        adc_config |= 0x5 << 6; // VSHCT   = 1052 µs (shunt voltage conversion time)
         adc_config |= 0x0 << 0; // AVG     = (0x0:1, 0x1:4)
+        // total 1/((1052-6+1052-6) * 1)
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_ADC_CONFIG, adc_config));
 
 
@@ -118,7 +121,8 @@ public:
 
     void setShuntLowVoltageRange(bool _40_96_mV) {
         uint16_t config = 0;
-        config |= (_40_96_mV ? 0x1 : 0x0) << 4; // ADC shunt voltage range: 0h = ±163.84 mV, 1h = ± 40.96 mV
+        auto adc_range = (_40_96_mV ? 0x1 : 0x0);
+        config |= adc_range << 4; // ADC shunt voltage range: 0h = ±163.84 mV, 1h = ± 40.96 mV
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_CONFIG, config));
         shuntLv = _40_96_mV;
         ESP_LOGI("ina228", "Set shunt %s mV range", shuntLv ? "40.96" : "163.84");
@@ -136,15 +140,24 @@ public:
 
         setShuntLowVoltageRange((maxExpectedVoltage < 40.96e-3f));
 
-        current_LSB = (float) range / (float) (2 << (19 - 1));
+        current_LSB = range / std::pow(2.f, 19.f);
+        //auto lsbRound =  std::pow(2.f, std::ceil(std::log2(current_LSB))); // round
+        //ESP_LOGI("ina228", "round current_LSB %.7f to %.7f", current_LSB, lsbRound);
 
+        //current_LSB = (float) range / (float) (2 << (19 - 1));
         //currentDivider_mA = 0.001/current_LSB;
         // pwrMultiplier_mW = 1000.0*25.0*current_LSB;
-        auto shuntCal = 13107.2e6 * current_LSB * resistor;
+
+        auto shuntCal = 13107.2e6f * current_LSB * resistor;
+        if (shuntLv) // adc_range = 1
+            shuntCal *= 4;
+        // auto shuntCalShort = (uint16_t) std::lround(shuntCal);
         auto shuntCalShort = (uint16_t) std::lround(shuntCal);
 
-        ESP_LOGI("ina228", "Set shuntCal %hu (from %f), Vmax_exp=%.1fmV", shuntCalShort, shuntCal,
-                 maxExpectedVoltage * 1e3f);
+        current_LSB = (float) shuntCalShort / 13107.2e6f / resistor;
+
+        ESP_LOGI("ina228", "Set shuntCal %hu (from %f), Vmax_exp=%.1fmV, current_LSB=%.7f", shuntCalShort, shuntCal,
+                 maxExpectedVoltage * 1e3f, current_LSB);
 
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_SHUNT_CAL, shuntCalShort));
 
