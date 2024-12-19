@@ -7,6 +7,7 @@
 
 #include "settings.h"
 #include "sampling.h"
+#include "util.h"
 
 
 class PowerSampler_INA228;
@@ -53,6 +54,8 @@ class PowerSampler_INA228 : public PowerSampler {
     Sample lastSample;
 
     uint8_t i2c_port = 0;
+
+    TaskNotification notification;
 
 public:
     const uint8_t storageId = 2;
@@ -155,13 +158,17 @@ public:
 
     void alertNewDataFromISR() {
         new_data = true;
+        notification.notifyFromIsr();
     }
 
     bool inOverflow = false;
 
-    bool hasData() {
-        if (!new_data)
-            return false;
+    bool hasData() override {
+        if (!new_data) {
+            notification.subscribe();
+            if (!notification.wait(1) || !new_data)
+                return false;
+        }
 
         auto diagAlrt = i2c_read_short(i2c_port, INA228_SLAVE_ADDRESS, INA228_DIAG_ALRT);
         bool CNVRF = (diagAlrt >> 1) & 0x1;
@@ -191,7 +198,7 @@ public:
         float fBusVoltage;
         bool sign;
 
-        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_VBUS, (uint8_t * ) & iBusVoltage, 3);
+        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_VBUS, (uint8_t *) &iBusVoltage, 3);
         sign = iBusVoltage & 0x80;
         iBusVoltage = __bswap32(iBusVoltage & 0xFFFFFF) >> 12;
         if (sign) iBusVoltage += 0xFFF00000;
@@ -205,11 +212,11 @@ public:
         float fCurrent;
         bool sign;
 
-        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_CURRENT, (uint8_t * ) & iCurrent, 3);
+        i2c_read_buf(i2c_port, INA228_SLAVE_ADDRESS, INA228_CURRENT, (uint8_t *) &iCurrent, 3);
         sign = iCurrent & 0x80;
         iCurrent = __bswap32(iCurrent & 0xFFFFFF) >> 12;
         if (sign) iCurrent += 0xFFF00000;
-        if (shuntLv)
+        if (shuntLv) // adc_range = 1?
             iCurrent = iCurrent / 4;
 
         fCurrent = (float) (iCurrent) * current_LSB;

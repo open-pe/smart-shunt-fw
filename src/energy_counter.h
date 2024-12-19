@@ -5,6 +5,9 @@
 #include "adc/sampling.h"
 #include <cmath>
 #include "util.h"
+#include "math.h"
+
+#include "readerwriterqueue.h"
 
 template<typename T>
 struct UIP {
@@ -19,15 +22,20 @@ struct UIP {
 };
 
 class EnergyCounter {
+    moodycamel::ReaderWriterQueue<Sample> sampleQueue{};
 public:
     PowerSampler *sampler;
     std::string name;
 
+private:
     unsigned long NumSamples = 0;
     unsigned long NSamplesLastSummary = 0;
 
-    double Energy = 0;
+    double Energy = 0;//Wh
     float LastP = 0.0f;
+
+    float TotalCharge = 0; //Ah
+    float LastI = 0.0f;
 
     unsigned long startTime = 0;
     unsigned long lastTime = 0;
@@ -35,13 +43,15 @@ public:
     unsigned long numTimeouts = 0;
     uint32_t numTimeoutsStreak = 0;
 
+public:
     UIP<MeanWindow> winPoint{};
     UIP<MeanWindow> winPrint{};
+
 
     unsigned long long windowTimestamp = 0;
 
     float calibFactorU = 1, calibFactorI = 1;
-
+private:
     const uint8_t eePromIndex;
 
     unsigned long maxDtReported = 0;
@@ -56,7 +66,7 @@ public:
     }
 
     EnergyCounter(const EnergyCounter &) = delete; // no copy
-    EnergyCounter(EnergyCounter &&) = default;
+    EnergyCounter(EnergyCounter &&)  = default;
 
     void setCalibrationFactors(float u, float i, bool multiply) {
         if (!std::isnan(u))calibFactorU = (multiply ? calibFactorU : 1) * u;
@@ -81,6 +91,10 @@ public:
                 Energy += (double) ((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
                 s.e = (float) Energy;
 
+
+                TotalCharge += (double) ((LastI + s.i) * 0.5f * (dt_us * (1e-6f / 3600.f)));
+                //s.c = (float) TotalCharge;
+
                 if (dt_us > maxDt)
                     maxDt = dt_us;
             } else {
@@ -88,19 +102,16 @@ public:
                 startTime = nowTime;
             }
 
-            ++NumSamples;
             lastTime = nowTime;
             LastP = P;
+            LastI = s.i;
 
-            winPoint.I.add(s.i);
-            winPoint.U.add(s.u);
-            winPoint.P.add(P);
+            sampleQueue.emplace(s);
+            auto qs = sampleQueue.size_approx();
+            if(qs > 200 && qs < 300) {
+                ESP_LOGW("ec", "Sample queue is growing beyond 200: %u", qs);
+            }
 
-            winPrint.I.add(s.i);
-            winPrint.U.add(s.u);
-            winPrint.P.add(P);
-
-            windowTimestamp = s.t;
             if (numTimeoutsStreak > 0) numTimeoutsStreak = 0;
         } else {
             unsigned long nowTime = micros();
@@ -119,11 +130,33 @@ public:
         }
     }
 
+    void consumeQueue() {
+        // TODO this is a bit inefficient
+        // better to create the window summary inside the RT task and publish this
+        Sample s{};
+        while(sampleQueue.try_dequeue(s)) {
+            //ESP_LOGD("ec", "DEQ!");
+            auto P = s.p();
+
+            winPoint.I.add(s.i);
+            winPoint.U.add(s.u);
+            winPoint.P.add(P);
+
+            winPrint.I.add(s.i);
+            winPrint.U.add(s.u);
+            winPrint.P.add(P);
+
+            windowTimestamp = s.t;
+
+            ++NumSamples;
+        }
+    }
+
     bool newSamplesSinceLastSummary() const {
         return NumSamples > NSamplesLastSummary;
     }
 
-    Sample printSample;
+    Sample printSample{};
 
     Point summary(unsigned long dt_us, bool print) {
 

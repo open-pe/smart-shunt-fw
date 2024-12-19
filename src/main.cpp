@@ -50,6 +50,15 @@ LCD lcd;
 
 unsigned long timeLastWakeEvent = 0;
 
+[[noreturn]] void realTimeTask(void *arg);
+
+[[noreturn]] void nonRealTimeTask(void *arg);
+
+constexpr auto RT_CORE = 1;
+constexpr auto RT_PRIO = 20;  // highest priority is 24
+
+void vTaskGetRunTimeStats();
+
 void setup(void) {
 
     //Serial.begin(115200);
@@ -113,19 +122,42 @@ void setup(void) {
         ec.sampler->startReading();
     }
 
+    xTaskCreatePinnedToCore(realTimeTask, "loopRt", 4096 * 4, NULL, RT_PRIO, NULL, RT_CORE);
+    xTaskCreatePinnedToCore(nonRealTimeTask, "loopy", 4096 * 4, NULL, 1, NULL, RT_CORE-1);
 
+    //TaskStatus_t *pxTaskStatusArray[20];
+    //uxTaskGetSystemState(pxTaskStatusArray, 20);
+    //vTaskGetRunTimeStats();
 }
 
 std::vector<Point> points_frame;
 
+[[noreturn]] void realTimeTask(void *arg) {
+    assert(xPortGetCoreID() == RT_CORE);
+    vTaskPrioritySet(nullptr, RT_PRIO);
+
+    while (true) {
+        for (auto &ec: energyCounters) {
+            ec.update();
+        }
+    }
+}
 
 void loop() {
+    vTaskDelay(1000);
+}
+
+void update() {
     constexpr bool hfWrites = false;
 
     unsigned long nowTime = micros();
 
+    assert(xPortGetCoreID() != RT_CORE);
+
+    //ESP_LOGI("main", "Loop!");
+
     for (auto &ec: energyCounters) {
-        ec.update();
+        ec.consumeQueue();
     }
 
     /*    if (hfWrites) {
@@ -136,7 +168,7 @@ void loop() {
 
     if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-    if (nowTime - LastTimeOut > 50e3) {
+    if (nowTime - LastTimeOut > 100e3) {
         auto print = nowTime - LastTimePrint > 2000e3;
 
         for (auto &ec: energyCounters) {
@@ -174,16 +206,27 @@ void loop() {
     // so access the uart port directly
 
     const uart_port_t uart_num = UART_NUM_0; // Arduino Serial is on port 0
-    char data[128];
+    static char buf[128];
+    static int buf_pos = 0;
     int length = 0;
     ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *) &length));
-    length = uart_read_bytes(uart_num, data, min(length, 127), 100);
-    while (length) {
-        data[length] = 0;
-        String inp(data);
+    if(length > 0) {
+        length = uart_read_bytes(uart_num, buf + buf_pos, min(length, 127 - buf_pos), 20);
+        uart_write_bytes(uart_num, buf + buf_pos, length); // echo
+        buf_pos += length;
+    }
+
+    auto eol = strchr(buf, '\n');
+    while (eol) { // enable using break below
+        *eol = 0; // terminate string at line break
+        buf_pos = 0; // reset buf
+
+        String inp(buf);
         inp.trim();
 
         timeLastWakeEvent = nowTime;
+
+        if(inp.isEmpty()) break;
 
         if (inp == "reset") {
             //Serial0.println("Reset, delay 1s");
@@ -193,6 +236,11 @@ void loop() {
                 ec.reset();
             }
         } else if (inp.startsWith("calibrate ")) {
+            // calibrate ESP32_INA228 I 1.0028870
+            // calibrate ESP32_INA228 I *0.9997247927345282
+            // calibrate ESP32_INA228 U *1.000983433436737
+            // calibrate ESP32_ADS U *1.0003957914179227
+            // calibrate ESP32_ADS I *1.0017
             std::string samplerName = inp.substring(10, inp.indexOf(' ', 10)).c_str();
             size_t i = 10 + samplerName.size() + 1;
 
@@ -269,6 +317,14 @@ void loop() {
     }
 }
 
+void nonRealTimeTask(void *arg) {
+    while(1) {
+        update();
+        vTaskDelay(5);
+    }
+}
+
+
 
 const int BUF_SIZE = 1024;
 QueueHandle_t uart_queue;
@@ -308,4 +364,60 @@ void uartInit(int port_num) {
 };
 uart_intr_config((uart_port_t) 0, &uart_intr);  // Zero is the UART number for Arduino Serial
 */
+}
+
+
+// This example demonstrates how a human readable table of run time stats
+// information is generated from raw data provided by uxTaskGetSystemState().
+// The human readable table is written to pcWriteBuffer
+void vTaskGetRunTimeStats() {
+    TaskStatus_t *pxTaskStatusArray;
+    volatile UBaseType_t uxArraySize, x;
+    uint32_t ulTotalRunTime, ulStatsAsPercentage;
+
+    // Make sure the write buffer does not contain a string.
+    //*pcWriteBuffer = 0x00;
+
+    // Take a snapshot of the number of tasks in case it changes while this
+    // function is executing.
+    uxArraySize = uxTaskGetNumberOfTasks();
+
+    // Allocate a TaskStatus_t structure for each task.  An array could be
+    // allocated statically at compile time.
+    pxTaskStatusArray = (TaskStatus_t *) pvPortMalloc(uxArraySize * sizeof(TaskStatus_t));
+
+    if (pxTaskStatusArray != NULL) {
+        // Generate raw status information about each task.
+        uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
+// For percentage calculations.
+        ulTotalRunTime /= 100UL;
+
+// Avoid divide by zero errors.
+        if (ulTotalRunTime > 0) {
+// For each populated position in the pxTaskStatusArray array,
+// format the raw data as human readable ASCII data
+            for (x = 0; x < uxArraySize; x++)
+// What percentage of the total run time has the task used?
+// This will always be rounded down to the nearest integer.
+// ulTotalRunTimeDiv100 has already been divided by 100.
+                ulStatsAsPercentage = pxTaskStatusArray[x].ulRunTimeCounter / ulTotalRunTime;
+
+            auto aff = xTaskGetAffinity(pxTaskStatusArray[x].xHandle);
+
+            if (ulStatsAsPercentage > 0UL) {
+                printf("%s (core#%i)\t\t%lu\t\t%lu%%\r\n", pxTaskStatusArray[x].pcTaskName, aff,
+                        pxTaskStatusArray[x].ulRunTimeCounter, ulStatsAsPercentage);
+            } else {
+// If the percentage is zero here then the task has
+// consumed less than 1% of the total run time.
+                printf("%s (core#%i)\t\t%lu\t\t1%%\r\n", pxTaskStatusArray[x].pcTaskName, aff,
+                        pxTaskStatusArray[x].ulRunTimeCounter);
+            }
+
+            //pcWriteBuffer += strlen((char *) pcWriteBuffer);
+        }
+    }
+
+// The array is no longer needed, free the memory it consumes.
+    vPortFree(pxTaskStatusArray);
 }

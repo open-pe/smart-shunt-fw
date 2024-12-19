@@ -23,6 +23,24 @@ It integrates power for energy measurement using the trapezoidal rule.
 * Serial (human friendly logs)
 * UDP messages using InfluxDB line protocol
 
+# Current Sense Resistors
+
+|                |                    | mΩ | P   | tol | temp          | padW/mm | padH/mm | KelvinCon | px100 |
+|----------------|--------------------|----|-----|-----|---------------|---------|---------|-----------|-------|
+| isabellenhütte | BVR-Z-R0003-1.0    | .3 | 11W | 1%  | 20ppm         | 5.5     | 1.6     | y         | $1.9  |
+| bourns         | CSS2H-2512R-L300F  | .3 | 6W  |     | 150ppm(50ppm) | 3.4     | 1.8     | n         | $     |
+| Milliohm (CN)  | HoLRS5930-0.3mR-1% | .3 | 7W  | 1%  | 50ppm         | 7.6     | 4.2     | n         | $.24  |
+| vishay         | WSLP5931L3000FEA   | .3 | 10W | 1%  | 175ppm        | 7.75    | 5.2     | n         | $1.7  |
+| RESI (CN)      | SEWF3951DL300P9    | .3 | 15W | .5% | 25ppm         | 13      | 2       | n         | $2.2  |
+
+# applications
+
+* bms/battery current sennsor
+* smart shunt / lab shunt
+* solar crowbar
+* efuse
+* mppt sensor
+
 # set conversion time and averaging
 
 * consder aliasing
