@@ -17,3 +17,5 @@ CMakeListsPrivate.txt
 hw/fp-info-cache
 
 *.kicad_prl
+
+build/

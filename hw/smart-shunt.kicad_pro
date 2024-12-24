@@ -59,17 +59,23 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [],
+      "drc_exclusions": [
+        "courtyards_overlap|103208001|80048001|9f318ce2-822a-4f10-8120-f8b8049e2ccc|fef1dc80-82f0-4cd9-8636-f5f7e4eb63ee",
+        "courtyards_overlap|125365493|106817147|5008b721-c62e-4210-888c-e3516687c26e|8b0b1b99-5e5f-4391-889c-2da8b77ff4c7",
+        "courtyards_overlap|127873026|104869820|8b0b1b99-5e5f-4391-889c-2da8b77ff4c7|bcd54d99-cdbe-4970-8587-7aaf9003fbc1",
+        "courtyards_overlap|86116412|91589751|28f1ee15-7d6f-4d46-9285-9e24e1d0513d|d3bb2a3c-0f45-4cea-8b64-e745f83f1fef",
+        "courtyards_overlap|88275412|91589751|475e2417-61f6-49aa-a874-8f1202f0143b|ddd504ce-f3f9-4abf-93ce-5998d50de601"
+      ],
       "meta": {
         "version": 2
       },
       "rule_severities": {
         "annular_width": "error",
         "clearance": "error",
-        "connection_width": "warning",
+        "connection_width": "error",
         "copper_edge_clearance": "error",
         "copper_sliver": "warning",
-        "courtyards_overlap": "warning",
+        "courtyards_overlap": "error",
         "diff_pair_gap_out_of_range": "error",
         "diff_pair_uncoupled_length_too_long": "error",
         "drill_out_of_range": "error",
@@ -90,7 +96,7 @@
         "lib_footprint_mismatch": "warning",
         "malformed_courtyard": "error",
         "microvia_drill_out_of_range": "error",
-        "missing_courtyard": "ignore",
+        "missing_courtyard": "warning",
         "missing_footprint": "warning",
         "net_conflict": "warning",
         "npth_inside_courtyard": "ignore",
@@ -107,7 +113,7 @@
         "text_thickness": "warning",
         "through_hole_pad_without_hole": "error",
         "too_many_vias": "error",
-        "track_dangling": "warning",
+        "track_dangling": "error",
         "track_width": "error",
         "tracks_crossing": "error",
         "unconnected_items": "error",
@@ -127,7 +133,7 @@
         "min_hole_to_hole": 0.25,
         "min_microvia_diameter": 0.2,
         "min_microvia_drill": 0.1,
-        "min_resolved_spokes": 2,
+        "min_resolved_spokes": 1,
         "min_silk_clearance": 0.0,
         "min_text_height": 0.8,
         "min_text_thickness": 0.08,
@@ -554,11 +560,59 @@
           "label": "DNP",
           "name": "${DNP}",
           "show": true
+        },
+        {
+          "group_by": false,
+          "label": "#",
+          "name": "${ITEM_NUMBER}",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Field5",
+          "name": "Field5",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MANUFACTURER",
+          "name": "MANUFACTURER",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MAXIMUM_PACKAGE_HEIGHT",
+          "name": "MAXIMUM_PACKAGE_HEIGHT",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MPN",
+          "name": "MPN",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "PARTREV",
+          "name": "PARTREV",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "STANDARD",
+          "name": "STANDARD",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Description",
+          "name": "Description",
+          "show": false
         }
       ],
       "filter_string": "",
       "group_symbols": true,
-      "name": "Grouped By Value",
+      "name": "",
       "sort_asc": true,
       "sort_field": "Reference"
     },
@@ -615,6 +669,10 @@
     [
       "e49c1926-e484-4828-8d1f-6a0105e108a3",
       "Root"
+    ],
+    [
+      "f866e06b-60f2-4dbf-8a85-0ffe7f984f4a",
+      "MCU"
     ]
   ],
   "text_variables": {}
