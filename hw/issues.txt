@@ -3,3 +3,28 @@
 	- or capacitor as in ADS1013 dat sheet?
 - add 3pin voltage divider/filter pin
 - add jumper for ground bypass for HV measurements (common mode >80V)
+
+
+TODO
+- use THT voltage divider resistors (precision)
+- isolated I2c bus?
+	- or: stackable ina228 (isolated)
+- high-speed ADC via spi for ssa-100?
+	- 16bit - 20bi
+
+ADS124S08
+
+	- not well documented?
+	https://github.com/jenschr/ADS124S08
+
+ADS1220
+	2ksps
+
+ADS1252
+	40khz?
+
+
+ADS9212
+
+gain drift
+gain error

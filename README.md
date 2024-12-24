@@ -1,5 +1,35 @@
+<img src="hw/pcb-3d-render.webp" width="500">
+
 A versatile lab power monitor.
 I wrote this for precision power metering and testing DCDC converters.
+
+
+# Building
+
+## Platformio Setup
+* [install script](https://docs.platformio.org/en/latest/core/installation/methods/installer-script.html)
+* [setup shell commands](https://docs.platformio.org/en/latest/core/installation/shell-commands.html)
+* [clion](https://docs.platformio.org/en/latest/integration/ide/clion.html)
+
+select the board:
+
+`pio run -e esp32`
+or 
+`pio run -e esp32s3`
+
+
+
+
+
+# TODO
+
+- add ssa-100 plug?
+- add ntc
+- add pin header for chassis mount resistor
+- jumper to disconnect on-board shunt?
+- add RSN-50-50 footprint (no available)
+- add external alert (for OC shutdown)
+- add external IO pins?
 
 Supported ADC:
 
@@ -32,6 +62,42 @@ It integrates power for energy measurement using the trapezoidal rule.
 | Milliohm (CN)  | HoLRS5930-0.3mR-1% | .3 | 7W  | 1%  | 50ppm         | 7.6     | 4.2     | n         | $.24  |
 | vishay         | WSLP5931L3000FEA   | .3 | 10W | 1%  | 175ppm        | 7.75    | 5.2     | n         | $1.7  |
 | RESI (CN)      | SEWF3951DL300P9    | .3 | 15W | .5% | 25ppm         | 13      | 2       | n         | $2.2  |
+| VPG            | Y14880R00100D0R    | 1  | 3W  |     |               |         |         |           |       |
+| isabellenhütte | BVR-Z-R0005-1.0    |    |     |     |               |         |         |           |       |
+|                | BVR-M-R0007-1.0    | .7 | 8W  | 1%  | 20ppm         |         |         |           |       |
+
+Chip Mount Resistors 40ppm 1mΩ https://www.digikey.de/short/8dbrqrp4
+
+Chip Mounts with >=1mΩ usually have 50ppm/K temp drift.
+Choose Chassis Mount resistor, suchs as the 1mOhm RSN-100-100B with 15ppm/k
+
+# Chassis Mount Resistors
+
+These commonly have lower tolerance and lower temp drift as compared to chip mount.
+The larger surface of the resistive material decreases thermal resistance to ambient.
+
+| ![img_3.webp](riedon-rsn-temp.webp) |
+|:-----------------------:|
+|       Riedon RSN        |
+
+With a tolerance constraint of 0.1% measuring temperature is not necessary.
+
+Riedon RSW
+![img.webp](riedon-rsw.webp)
+
+![img_1.webp](riedon-rs.webp)
+
+![img_2.webp](riedon-rsn.webp)
+
+|                  |   |       |       |
+|------------------|---|-------|-------|
+| Riedon RSW-50-50 | 1 | 0.25% | 15ppm |
+|                  |   |       |       |
+
+# 30A
+
+ina228 has a shunt voltage range of 40.96 and 163.84 mV.
+at a voltage drop of 40mV and 30A, we have 1.2 W of heat dissipation.
 
 # applications
 
@@ -56,15 +122,17 @@ It integrates power for energy measurement using the trapezoidal rule.
 * keep temperature stable
 * when measurement DCDC converter efficiency use 2x identical hardware. same chips and same resistors
 * INA228 temp coefficient is 20ppm/°C, so choose resistor in that class
-  * Ina228 features a temperature sensor
+    * Ina228 features a temperature sensor
 
 # AC Metrology
 
 * Ti Design TIDU455A (MSP430AFE253, 24 Bit DeltaSigma ADC), class 0.2% accuracy
 * Ti Eval Board EVM430-I2040S (MSP430I2040, 24bit, 8Khz or 80th harmonic of 50 Hz), <0.2% accuracy
-  * AC, DC, 380V, 15 Amps  
-* Gossen Metrawatt Metrahit Energy (Starline Series) and Open-Source [IrDA USB](http://lemmini.de/IrDA%20USB/IrDA%20USB.html) (the Gossen USB X-Tra needs proprietary drivers, for windows only)
-  * ESP32 has `UART_MODE_IRDA`, you only need the TFDU4101 [forum1](https://esp32.com/viewtopic.php?t=2766)
+    * AC, DC, 380V, 15 Amps
+* Gossen Metrawatt Metrahit Energy (Starline Series) and
+  Open-Source [IrDA USB](http://lemmini.de/IrDA%20USB/IrDA%20USB.html) (the Gossen USB X-Tra needs proprietary drivers,
+  for windows only)
+    * ESP32 has `UART_MODE_IRDA`, you only need the TFDU4101 [forum1](https://esp32.com/viewtopic.php?t=2766)
 
 # EVM430
 
@@ -80,3 +148,9 @@ It integrates power for energy measurement using the trapezoidal rule.
     - Could not get the online version to open the project (https://dev.ti.com/ide/)
     - the download IDE based on eclipse succeeded to build the generated project, but need MSP-FET programmer. not sure
       if an ordinary USB2UART addapter works?
+
+
+# Isolated Current Sensor
+
+DC-DC: MIE1W0505BGLVH-3R-Z (monolithic) 
+i2c: TPT72616-SO1R (3peak)

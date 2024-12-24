@@ -23,3 +23,18 @@ Use  INA241 & INA296
 
 
 TPS2492PWR ?
+
+
+# Isolators
+
+i2c needs 2 fwd and 1 rev channel
+ina228 alert needs 1 rev
+
+TPT72616-SO1R is made for i2c, needs to external components (px $1.5)
+ 
+TPT7742F-SO3R has 2 fwd, 2 rev (px 0,78)
+
+
+opto:
+
+TLP2361(TPL,E (10mA if, totem pole)

@@ -21,6 +21,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="9cad725f-c6ea-4f63-9fa4-aadeb01e928f" name="Changes" comment="workspace">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/smart-shunt-fw.iml" beforeDir="false" />
@@ -127,9 +128,9 @@
     </key>
   </component>
   <component name="RunManager">
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
     <configuration name="PlatformIO" type="platformio" factoryName="PlatformIO Debug" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="smart-shunt-fw" TARGET_NAME="PlatformIO" CONFIG_NAME="PlatformIO">
@@ -169,7 +170,8 @@
       <workItem from="1734476174203" duration="17000" />
       <workItem from="1734476201868" duration="5666000" />
       <workItem from="1734548191382" duration="18881000" />
-      <workItem from="1734701060293" duration="13238000" />
+      <workItem from="1734701060293" duration="13897000" />
+      <workItem from="1735035143121" duration="203000" />
     </task>
     <task id="LOCAL-00001" summary="workspace">
       <created>1680174103248</created>
