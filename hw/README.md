@@ -51,17 +51,18 @@ INA296A
 TPA6271:
 110V 16bit power monitor
 
-|                | Vbus   | CMRR(min) | BW      | OffsetErr | Gain Err(max) | NonLinErr | TempDrift | BiDir? | ShuntVRange | Outp       |                                                                  |
-|----------------|--------|-----------|---------|-----------|---------------|-----------|-----------|--------|-------------|------------|------------------------------------------------------------------|
-| 3peak TPA6271  | 102.4V | 120 dB    | 140µs   | ±10µV     | 0.15%         |           | 10ppm/C   | y      | 81.92mV     | i2c, 16bit | [pdf](https://static.3peak.com/res/doc/ds/Datasheet_TPA6271.pdf) |
-| TI INA226      |        |           |         |           |               |           |           |        |             |            |                                                                  |
-| TI INA228      |        | 154 dB    |         |           | ±0.05%        | ±0.002%   | ±20 ppm/C | y      |             |            |                                                                  |
-| TI INA229      |        |           |         |           |               |           |           |        |             |            |                                                                  |
-| TI INA241      |        |           |         |           |               |           |           |        |             |            | enhanced PWM-suppr.                                              |
-| TI **INA296A** | 110V   | 150 dB    | 1.1MHz  | ±10µV     | ±0.01%        | ±0.001%   | ±1ppm/°C  | y      |             |            |                                                                  |
-| TI INA310A     | 110V   | 140 dB    | 1.3 MHz | ±20 µV    | ±0.15%        | ±0.01%    | 10ppm/C   |        |             |            |                                                                  |
-| LMV93x-N       | n/a    | 60 dB     | 1.4 MHz | 4 mV      |               |           |           |        |             |            |                                                                  |
-| THS4551        |        |           | 150 MHz | ±175 µV   |               |           |           |        |             |            |                                                                  |
+|                | Vbus   | CMRR(min) | BW      | OffsetErr | Gain Err(max) | NonLinErr | TempDrift  | BiDir? | ShuntVRange | Outp       |                                                                  |
+|----------------|--------|-----------|---------|-----------|---------------|-----------|------------|--------|-------------|------------|------------------------------------------------------------------|
+| 3peak TPA6271  | 102.4V | 120 dB    | 140µs   | ±10µV     | 0.15%         |           | 10ppm/C    | y      | 81.92mV     | i2c, 16bit | [pdf](https://static.3peak.com/res/doc/ds/Datasheet_TPA6271.pdf) |
+| TI INA226      |        |           |         |           |               |           |            |        |             |            |                                                                  |
+| TI INA228      |        | 154 dB    |         |           | ±0.05%        | ±0.002%   | ±20 ppm/C  | y      |             |            |                                                                  |
+| TI INA229      |        |           |         |           |               |           |            |        |             |            |                                                                  |
+| TI INA241      |        |           |         |           |               |           |            |        |             |            | enhanced PWM-suppr.                                              |
+| TI **INA296A** | 110V   | 150 dB    | 1.1MHz  | ±10µV     | ±0.01%        | ±0.001%   | ±1ppm/°C   | y      |             |            |                                                                  |
+| TI INA310A     | 110V   | 140 dB    | 1.3 MHz | ±20 µV    | ±0.15%        | ±0.01%    | 10ppm/C    |        |             |            |                                                                  |
+| LMV93x-N       | n/a    | 60 dB     | 1.4 MHz | 4 mV      |               |           |            |        |             |            |                                                                  |
+| THS4551        |        |           | 150 MHz | ±175 µV   |               |           |            |        |             |            |                                                                  |
+| AMC1300        |        |           |         |           | ±0.3%         | 0.03%     | ±30 ppm/°C |        |             |            | isolated amp                                                     |
 
 We can calibrate Gain Err/ Gain Offset with 2 point calibration.
 Non-linearity can be reduced by multi-point calibration (LUT).
@@ -90,6 +91,5 @@ ADC
 - THS4551 (amp) +
 
 https://www.ti.com/solution/power-analyzer?variantid=34826&subsystemid=23445
-
 
 PwrTool 500

@@ -1,12 +1,19 @@
 <img src="hw/pcb-3d-render.webp" width="500">
 
-A versatile lab power monitor.
-I wrote this for precision power metering and testing DCDC converters.
+A versatile isolated power monitor based on INA228.
+I made this for precision power metering and testing DCDC converters.
 
+* Digital Signal isolators for i2c and alert
+* Isolated power supply
+* battery connector
+* optional Vbus voltage divider for dc bus voltages above 85V
+* programmable i2c address
+* NTC for shunt temperature measurement (in addition to the INA228 internal temperature sensor)
 
 # Building
 
 ## Platformio Setup
+
 * [install script](https://docs.platformio.org/en/latest/core/installation/methods/installer-script.html)
 * [setup shell commands](https://docs.platformio.org/en/latest/core/installation/shell-commands.html)
 * [clion](https://docs.platformio.org/en/latest/integration/ide/clion.html)
@@ -14,12 +21,8 @@ I wrote this for precision power metering and testing DCDC converters.
 select the board:
 
 `pio run -e esp32`
-or 
+or
 `pio run -e esp32s3`
-
-
-
-
 
 # TODO
 
@@ -77,8 +80,8 @@ These commonly have lower tolerance and lower temp drift as compared to chip mou
 The larger surface of the resistive material decreases thermal resistance to ambient.
 
 | ![img_3.webp](riedon-rsn-temp.webp) |
-|:-----------------------:|
-|       Riedon RSN        |
+|:-----------------------------------:|
+|             Riedon RSN              |
 
 With a tolerance constraint of 0.1% measuring temperature is not necessary.
 
@@ -149,8 +152,7 @@ at a voltage drop of 40mV and 30A, we have 1.2 W of heat dissipation.
     - the download IDE based on eclipse succeeded to build the generated project, but need MSP-FET programmer. not sure
       if an ordinary USB2UART addapter works?
 
-
 # Isolated Current Sensor
 
-DC-DC: MIE1W0505BGLVH-3R-Z (monolithic) 
+DC-DC: MIE1W0505BGLVH-3R-Z (monolithic)
 i2c: TPT72616-SO1R (3peak)
