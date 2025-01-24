@@ -22,7 +22,8 @@ InfluxDBClient client;
 
 PowerSampler_ADS ads;
 PowerSampler_INA226 ina226;
-PowerSampler_INA228 ina228;
+PowerSampler_INA228 ina228_40{0x40};
+PowerSampler_INA228 ina228_41{0x41};
 // PowerSampler_ESP32 esp_adc;
 
 
@@ -38,7 +39,8 @@ unsigned long LastTimePrint = 0;
 std::map<std::string, PowerSampler *> samplers{
         {"ESP32_ADS",    &ads},
         {"ESP32_INA226", &ina226},
-        {"ESP32_INA228", &ina228},
+        {"ESP32_INA228", &ina228_40},
+        {"ESP32_INA228_2", &ina228_41},
 };
 
 std::vector<EnergyCounter> energyCounters;
@@ -282,7 +284,12 @@ void update() {
                 ESP_LOGW("main", "unknown dim %s", dim.c_str());
             }
         } else if (inp.startsWith("ina22x-resistor-range")) {
+            int devIdx = 0;
             size_t i = strlen("ina22x-resistor-range");
+            if(inp.length() > i && inp[i] == '2') {
+                devIdx = 1;
+                ++i;
+            }
             auto resStr = inp.substring(i + 1, inp.indexOf(' ', i + 1));
             i += resStr.length() + 1;
             auto range = inp.substring(i).toFloat();
@@ -291,9 +298,9 @@ void update() {
             if (ina226_instance) {
                 UART_LOG("INA226 setResistorRange(%.6f, %.6f)", res, range);
                 ina226_instance->setResistorRange(res, range);
-            } else if (ina228_instance) {
-                UART_LOG("INA228 setResistorRange(%.6f, %.6f)", res, range);
-                ina228_instance->setResistorRange(res, range);
+            } else if (ina228_instance[devIdx]) {
+                UART_LOG("INA228[%i] setResistorRange(%.3fmΩ, %.3fA)", devIdx, res*1e3f, range);
+                ina228_instance[devIdx]->setResistorRange(res, range);
             } else {
                 ESP_LOGW("main", "No INA22x instance!");
             }
