@@ -58,16 +58,20 @@ It integrates power for energy measurement using the trapezoidal rule.
 
 # Current Sense Resistors
 
-|                |                    | mΩ | P   | tol | temp          | padW/mm | padH/mm | KelvinCon | px100 |
-|----------------|--------------------|----|-----|-----|---------------|---------|---------|-----------|-------|
-| isabellenhütte | BVR-Z-R0003-1.0    | .3 | 11W | 1%  | 20ppm         | 5.5     | 1.6     | y         | $1.9  |
-| bourns         | CSS2H-2512R-L300F  | .3 | 6W  |     | 150ppm(50ppm) | 3.4     | 1.8     | n         | $     |
-| Milliohm (CN)  | HoLRS5930-0.3mR-1% | .3 | 7W  | 1%  | 50ppm         | 7.6     | 4.2     | n         | $.24  |
-| vishay         | WSLP5931L3000FEA   | .3 | 10W | 1%  | 175ppm        | 7.75    | 5.2     | n         | $1.7  |
-| RESI (CN)      | SEWF3951DL300P9    | .3 | 15W | .5% | 25ppm         | 13      | 2       | n         | $2.2  |
-| VPG            | Y14880R00100D0R    | 1  | 3W  |     |               |         |         |           |       |
-| isabellenhütte | BVR-Z-R0005-1.0    |    |     |     |               |         |         |           |       |
-|                | BVR-M-R0007-1.0    | .7 | 8W  | 1%  | 20ppm         |         |         |           |       |
+| MFR            | MPN                | mΩ  | P   | tol | temp          | padW/mm | padH/mm | 4wire | px100 |
+|----------------|--------------------|-----|-----|-----|---------------|---------|---------|-------|-------|
+| isabellenhütte | BVR-Z-R0003-1.0    | .3  | 11W | 1%  | 20ppm         | 5.5     | 1.6     | y     | $1.9  |
+| bourns         | CSS2H-2512R-L300F  | .3  | 6W  |     | 150ppm(50ppm) | 3.4     | 1.8     | n     | $     |
+| Milliohm (CN)  | HoLRS5930-0.3mR-1% | .3  | 7W  | 1%  | 50ppm         | 7.6     | 4.2     | n     | $.24  |
+| vishay         | WSLP5931L3000FEA   | .3  | 10W | 1%  | 175ppm        | 7.75    | 5.2     | n     | $1.7  |
+| RESI (CN)      | SEWF3951DL300P9    | .3  | 15W | .5% | 25ppm         | 13      | 2       | n     | $2.2  |
+| isabellenhütte | BVR-Z-R0005-1.0    | .5  |     | 1%  | 20ppm         |         |         |       |       |
+|                | BVR-M-R0007-1.0    | .7  | 8W  | 1%  | 20ppm         |         |         |       |       |
+|                | BVR-M-R001         | 1   | 7W  |     | 50ppm         |         |         |       |       |
+| vishay         | Y14880R00100D0R    | 1   | 3W  | .5% | 15ppm         |         |         | y     |       |
+|                | WSK12161L000FEA/B  | 1   | 3W  | .1% | 20ppm         |         |         |       |       |
+|                | Y14880R00200B9R    | 2   | 3W  | .1% | 15ppm         |         |         | y     |       |
+|                | Y14750R10000B9R    | 100 |     | .1% | 10ppm         |         |         |       |       |
 
 Chip Mount Resistors 40ppm 1mΩ https://www.digikey.de/short/8dbrqrp4
 

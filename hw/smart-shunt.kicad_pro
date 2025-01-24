@@ -41,11 +41,11 @@
           "height": 1.524,
           "width": 1.524
         },
-        "silk_line_width": 0.15,
+        "silk_line_width": 0.07,
         "silk_text_italic": false,
-        "silk_text_size_h": 1.0,
-        "silk_text_size_v": 1.0,
-        "silk_text_thickness": 0.15,
+        "silk_text_size_h": 0.6,
+        "silk_text_size_v": 0.6,
+        "silk_text_thickness": 0.07,
         "silk_text_upright": false,
         "zones": {
           "45_degree_only": false,
@@ -60,11 +60,12 @@
         }
       ],
       "drc_exclusions": [
-        "courtyards_overlap|103208001|80048001|9f318ce2-822a-4f10-8120-f8b8049e2ccc|fef1dc80-82f0-4cd9-8636-f5f7e4eb63ee",
-        "courtyards_overlap|125365493|106817147|5008b721-c62e-4210-888c-e3516687c26e|8b0b1b99-5e5f-4391-889c-2da8b77ff4c7",
-        "courtyards_overlap|127873026|104869820|8b0b1b99-5e5f-4391-889c-2da8b77ff4c7|bcd54d99-cdbe-4970-8587-7aaf9003fbc1",
-        "courtyards_overlap|86116412|91589751|28f1ee15-7d6f-4d46-9285-9e24e1d0513d|d3bb2a3c-0f45-4cea-8b64-e745f83f1fef",
-        "courtyards_overlap|88275412|91589751|475e2417-61f6-49aa-a874-8f1202f0143b|ddd504ce-f3f9-4abf-93ce-5998d50de601"
+        "courtyards_overlap|102369864|78968200|02888008-3b66-496e-8d8b-6072f0a9cc5b|9f318ce2-822a-4f10-8120-f8b8049e2ccc",
+        "courtyards_overlap|103780300|78968200|c425424b-9ecb-466b-bbc7-f84147cec0d2|02888008-3b66-496e-8d8b-6072f0a9cc5b",
+        "courtyards_overlap|105085000|74141000|c425424b-9ecb-466b-bbc7-f84147cec0d2|977db5d7-5c72-4bc5-9f32-c77a64a10a35",
+        "courtyards_overlap|109629400|76344000|c425424b-9ecb-466b-bbc7-f84147cec0d2|9f318ce2-822a-4f10-8120-f8b8049e2ccc",
+        "courtyards_overlap|86118887|91594750|28f1ee15-7d6f-4d46-9285-9e24e1d0513d|d3bb2a3c-0f45-4cea-8b64-e745f83f1fef",
+        "courtyards_overlap|98717400|84133200|c425424b-9ecb-466b-bbc7-f84147cec0d2|44f6e86d-2b9b-4a5e-8132-a7956be1c294"
       ],
       "meta": {
         "version": 2
@@ -510,7 +511,7 @@
   },
   "schematic": {
     "annotate_start_num": 0,
-    "bom_export_filename": "",
+    "bom_export_filename": "bom.csv",
     "bom_fmt_presets": [],
     "bom_fmt_settings": {
       "field_delimiter": ",",

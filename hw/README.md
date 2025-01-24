@@ -1,4 +1,4 @@
-![img_2.png](img_2.png)
+![img_2.png](img_2.webp)
 
 This is a energy monitor based on the INA228.
 It comes with a Würth PowerPlus M5 terminals and a 4026 shunt resistor slot for resistors from e.g.
@@ -16,11 +16,11 @@ For high voltages higher than 85V the `IN-` pin must be pulled to ground. There 
 
 # isolators
 
-![img.png](img.png)
+![img.png](img.webp)
 
 TPT774x:
 
-![img_1.png](img_1.png)
+![img_1.png](img_1.webp)
 
 TPT7721-SO1R:
 2 ch
@@ -33,7 +33,7 @@ INA241
 * motor drives
   https://www.ti.com/de-de/video/6314459715112
 
-![img_3.png](img_3.png)
+![img_3.png](img_3.webp)
 
 INA296A
 
@@ -42,11 +42,11 @@ INA296A
 * https://github.com/CrabLabsLLC/OpenMD/blob/develop/docs/Schematic.pdf
 *
 
-![img_4.png](img_4.png)
+![img_4.png](img_4.webp)
 
-![img_5.png](img_5.png)
+![img_5.png](img_5.webp)
 
-![img_6.png](img_6.png)
+![img_6.png](img_6.webp)
 
 TPA6271:
 110V 16bit power monitor
@@ -84,7 +84,7 @@ ADC
 - INA296A + ADS1220 (or ADS127L21B)
 - SPI need 3 up, and 2 down ch. (or only 1 down?)
 - analog level translation for oscilloscope connection. using high-side current sense circuit?
-  ![img_7.png](img_7.png) ( LMV93x-N datasheet)
+  ![img_7.png](img_7.webp) ( LMV93x-N datasheet)
     - unfortunately the INA296 does not give access to (-) inp of
 
 
@@ -93,3 +93,7 @@ ADC
 https://www.ti.com/solution/power-analyzer?variantid=34826&subsystemid=23445
 
 PwrTool 500
+
+
+# Thermal
+20A with Y14880R00200B9R 2mΩ temp-rise 18 => 38°C  ∆20°C (ina229 package: 25°C)

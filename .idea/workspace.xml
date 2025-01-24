@@ -21,18 +21,16 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="9cad725f-c6ea-4f63-9fa4-aadeb01e928f" name="Changes" comment="workspace">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/smart-shunt-fw.iml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/smart-shunt.iml" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/hw/issues.txt" beforeDir="false" afterPath="$PROJECT_DIR$/hw/issues.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/hw/notes.txt" beforeDir="false" afterPath="$PROJECT_DIR$/hw/notes.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/hw/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/hw/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/hw/smart-shunt.kicad_pcb" beforeDir="false" afterPath="$PROJECT_DIR$/hw/smart-shunt.kicad_pcb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/hw/smart-shunt.kicad_pro" beforeDir="false" afterPath="$PROJECT_DIR$/hw/smart-shunt.kicad_pro" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/hw/smart-shunt.kicad_sch" beforeDir="false" afterPath="$PROJECT_DIR$/hw/smart-shunt.kicad_sch" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/platformio.ini" beforeDir="false" afterPath="$PROJECT_DIR$/platformio.ini" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/adc/ina228.h" beforeDir="false" afterPath="$PROJECT_DIR$/src/adc/ina228.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/settings.h" beforeDir="false" afterPath="$PROJECT_DIR$/src/settings.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/util.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/util.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -43,7 +41,7 @@
   <component name="ClangdSettings">
     <option name="formatViaClangd" value="false" />
   </component>
-  <component name="ExecutionTargetManager" SELECTED_TARGET="esp32" />
+  <component name="ExecutionTargetManager" SELECTED_TARGET="adafruit_feather_esp32s3" />
   <component name="ExternalProjectsData">
     <projectState path="$PROJECT_DIR$">
       <ProjectState />
@@ -128,10 +126,13 @@
     </key>
   </component>
   <component name="RunManager">
-    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
       </method>
+    </configuration>
+    <configuration name="PlatformIO" type="platformio" factoryName="PlatformIO Debug" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="smart-shunt-fw" TARGET_NAME="PlatformIO" CONFIG_NAME="PlatformIO">
+      <method v="2" />
     </configuration>
     <configuration name="PlatformIO" type="platformio" factoryName="PlatformIO Debug" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="smart-shunt-fw" TARGET_NAME="PlatformIO" CONFIG_NAME="PlatformIO">
       <method v="2" />
@@ -171,7 +172,12 @@
       <workItem from="1734476201868" duration="5666000" />
       <workItem from="1734548191382" duration="18881000" />
       <workItem from="1734701060293" duration="13897000" />
-      <workItem from="1735035143121" duration="203000" />
+      <workItem from="1735035143121" duration="5770000" />
+      <workItem from="1736178002791" duration="3223000" />
+      <workItem from="1737474358808" duration="13522000" />
+      <workItem from="1737644389826" duration="2225000" />
+      <workItem from="1737668867677" duration="4180000" />
+      <workItem from="1737715210029" duration="5320000" />
     </task>
     <task id="LOCAL-00001" summary="workspace">
       <created>1680174103248</created>
