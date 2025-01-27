@@ -8,6 +8,7 @@
 #include "adc/adc_esp.h"
 #include "adc/ina226.h"
 #include "adc/ina228.h"
+#include "adc/ads1220.h"
 
 #include "lcd.h"
 
@@ -21,9 +22,11 @@
 InfluxDBClient client;
 
 PowerSampler_ADS ads;
+PowerSampler_ADS1220 ads1220;
 PowerSampler_INA226 ina226;
 PowerSampler_INA228 ina228_40{0x40};
 PowerSampler_INA228 ina228_41{0x41};
+PowerSampler_INA228 ina228_42{0x42};
 // PowerSampler_ESP32 esp_adc;
 
 
@@ -37,10 +40,12 @@ unsigned long LastTimePrint = 0;
 //};
 
 std::map<std::string, PowerSampler *> samplers{
-        {"ESP32_ADS",    &ads},
-        {"ESP32_INA226", &ina226},
-        {"ESP32_INA228", &ina228_40},
+        {"ESP32_ADS",      &ads},
+        {"ESP32_ADS1220",  &ads1220},
+        {"ESP32_INA226",   &ina226},
+        {"ESP32_INA228",   &ina228_40},
         {"ESP32_INA228_2", &ina228_41},
+        {"ESP32_INA228_3", &ina228_42},
 };
 
 std::vector<EnergyCounter> energyCounters;
@@ -125,7 +130,7 @@ void setup(void) {
     }
 
     xTaskCreatePinnedToCore(realTimeTask, "loopRt", 4096 * 4, NULL, RT_PRIO, NULL, RT_CORE);
-    xTaskCreatePinnedToCore(nonRealTimeTask, "loopy", 4096 * 4, NULL, 1, NULL, RT_CORE-1);
+    xTaskCreatePinnedToCore(nonRealTimeTask, "loopy", 4096 * 4, NULL, 1, NULL, RT_CORE - 1);
 
     //TaskStatus_t *pxTaskStatusArray[20];
     //uxTaskGetSystemState(pxTaskStatusArray, 20);
@@ -212,7 +217,7 @@ void update() {
     static int buf_pos = 0;
     int length = 0;
     ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *) &length));
-    if(length > 0) {
+    if (length > 0) {
         length = uart_read_bytes(uart_num, buf + buf_pos, min(length, 127 - buf_pos), 20);
         uart_write_bytes(uart_num, buf + buf_pos, length); // echo
         buf_pos += length;
@@ -228,7 +233,7 @@ void update() {
 
         timeLastWakeEvent = nowTime;
 
-        if(inp.isEmpty()) break;
+        if (inp.isEmpty()) break;
 
         if (inp == "reset") {
             //Serial0.println("Reset, delay 1s");
@@ -274,8 +279,9 @@ void update() {
 
             // TODO send factors to influxDB
 
-            UART_LOG("%s: set calibration factor for [%s] = %.8f (was %.8f)", samplerName.c_str(), dim.c_str(), factor,
-                     dim == "U" ? ec->calibFactorU : ec->calibFactorI);
+            float was = dim == "U" ? ec->calibFactorU : ec->calibFactorI;
+            UART_LOG("%s: set calibration factor for [%s] = %.8f (was %.8f)", samplerName.c_str(), dim.c_str(),
+                     multiply ? (was * factor) : factor, was);
             if (dim == "U") {
                 ec->setCalibrationFactors(factor, NAN, multiply);
             } else if (dim == "I") {
@@ -286,8 +292,8 @@ void update() {
         } else if (inp.startsWith("ina22x-resistor-range")) {
             int devIdx = 0;
             size_t i = strlen("ina22x-resistor-range");
-            if(inp.length() > i && inp[i] == '2') {
-                devIdx = 1;
+            if (inp.length() > i && (inp[i] >= '2' and inp[i] <= '3')) {
+                devIdx = 1 + (inp[i] - '2');
                 ++i;
             }
             auto resStr = inp.substring(i + 1, inp.indexOf(' ', i + 1));
@@ -299,15 +305,17 @@ void update() {
                 UART_LOG("INA226 setResistorRange(%.6f, %.6f)", res, range);
                 ina226_instance->setResistorRange(res, range);
             } else if (ina228_instance[devIdx]) {
-                UART_LOG("INA228[%i] setResistorRange(%.3fmΩ, %.3fA)", devIdx, res*1e3f, range);
+                UART_LOG("INA228[%i] setResistorRange(%.3fmΩ, %.3fA)", devIdx, res * 1e3f, range);
                 ina228_instance[devIdx]->setResistorRange(res, range);
             } else {
                 ESP_LOGW("main", "No INA22x instance!");
             }
 
         } else if (inp == "wifi on") {
+            disableWifi = false;
             connect_wifi_async();
         } else if (inp == "wifi off") {
+            disableWifi = true;
             WiFi.disconnect(true);
         } else if (inp == "help") {
             UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
@@ -325,12 +333,11 @@ void update() {
 }
 
 void nonRealTimeTask(void *arg) {
-    while(1) {
+    while (1) {
         update();
         vTaskDelay(5);
     }
 }
-
 
 
 const int BUF_SIZE = 1024;
@@ -413,12 +420,12 @@ void vTaskGetRunTimeStats() {
 
             if (ulStatsAsPercentage > 0UL) {
                 printf("%s (core#%i)\t\t%lu\t\t%lu%%\r\n", pxTaskStatusArray[x].pcTaskName, aff,
-                        pxTaskStatusArray[x].ulRunTimeCounter, ulStatsAsPercentage);
+                       pxTaskStatusArray[x].ulRunTimeCounter, ulStatsAsPercentage);
             } else {
 // If the percentage is zero here then the task has
 // consumed less than 1% of the total run time.
                 printf("%s (core#%i)\t\t%lu\t\t1%%\r\n", pxTaskStatusArray[x].pcTaskName, aff,
-                        pxTaskStatusArray[x].ulRunTimeCounter);
+                       pxTaskStatusArray[x].ulRunTimeCounter);
             }
 
             //pcWriteBuffer += strlen((char *) pcWriteBuffer);

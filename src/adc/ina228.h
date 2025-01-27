@@ -20,7 +20,10 @@ void IRAM_ATTR ina228_alert0();
 
 void IRAM_ATTR ina228_alert1();
 
-PowerSampler_INA228 *ina228_instance[2] = {nullptr, nullptr};
+void IRAM_ATTR ina228_alert2();
+
+PowerSampler_INA228 *ina228_instance[3] = {nullptr, nullptr, nullptr};
+
 
 //#define INA228_SLAVE_ADDRESS        0x40
 
@@ -47,7 +50,7 @@ PowerSampler_INA228 *ina228_instance[2] = {nullptr, nullptr};
 
 
 class PowerSampler_INA228 : public PowerSampler {
-     static constexpr auto I2C_A0 = 0x40;
+    static constexpr auto I2C_A0 = 0x40;
 
     volatile bool new_data = false;
 
@@ -63,12 +66,12 @@ class PowerSampler_INA228 : public PowerSampler {
     float current_LSB{};
 
 public:
-    const uint8_t storageId ;
+    const uint8_t storageId;
     const uint8_t i2c_addr;
 
     uint8_t getStorageId() const override { return storageId; };
 
-    explicit PowerSampler_INA228(uint8_t i2c_addr) : storageId{(uint8_t)(2 + i2c_addr- I2C_A0)}, i2c_addr(i2c_addr) {}
+    explicit PowerSampler_INA228(uint8_t i2c_addr) : storageId{(uint8_t) (2 + i2c_addr - I2C_A0)}, i2c_addr(i2c_addr) {}
 
     bool init() {
 
@@ -93,19 +96,26 @@ public:
         }
 
         float resistor = 2e-3f, range = 38.0f;// default: vishay 2mOhm, .1%, 3W
-        if (readCalibrationFactors(4, resistor, range)) {
+        if (readCalibrationFactors(6, resistor, range)) {
             ESP_LOGI("ina228", "Restore resistor/range settings: %.6f/%.6f", resistor, range);
         } else {
             ESP_LOGI("ina228", "Default resistor/range settings: %.6f/%.6f", resistor, range);
         }
         setResistorRange(resistor, range, false);
 
-        std::array<uint8_t , 2> alertPins = {settings.Pin_INA22x_ALERT, settings.Pin_INA22x_ALERT2};
+        int inaAddrIdx = i2c_addr - I2C_A0;
 
-        uint8_t readyPin = alertPins[i2c_addr - I2C_A0];
+        std::array<uint8_t, 3> alertPins = {
+                settings.Pin_INA22x_ALERT,
+                settings.Pin_INA22x_ALERT2,
+                settings.Pin_INA22x_ALERT3
+        };
+        std::array<void (*)(void), 3> alerts = {&ina228_alert0, &ina228_alert1, &ina228_alert2};
+
+        assert(inaAddrIdx < alertPins.size());
+        uint8_t readyPin = alertPins[inaAddrIdx];
         pinMode(readyPin, INPUT_PULLUP);
-        std::array<void (*)(void), 2> alerts = {&ina228_alert0, &ina228_alert1};
-        attachInterrupt(digitalPinToInterrupt(readyPin), alerts[i2c_addr - I2C_A0], FALLING);
+        attachInterrupt(digitalPinToInterrupt(readyPin), alerts[inaAddrIdx], FALLING);
 
 
         uint16_t adc_config = 0;
@@ -138,7 +148,6 @@ public:
         shuntLv = _40_96_mV;
         ESP_LOGI("ina228", "Set shunt %s mV range", shuntLv ? "40.96" : "163.84");
     }
-
 
 
     void setResistorRange(float resistor, float range, bool store = true) {
@@ -193,6 +202,8 @@ public:
             if (!notification.wait(1) || !new_data)
                 return false;
         }
+
+        new_data = false;
 
         auto diagAlrt = i2c_read_short(i2c_port, i2c_addr, INA228_DIAG_ALRT);
         bool CNVRF = (diagAlrt >> 1) & 0x1;
@@ -271,5 +282,9 @@ void IRAM_ATTR ina228_alert0() {
 
 void IRAM_ATTR ina228_alert1() {
     if (ina228_instance[1])ina228_instance[1]->alertNewDataFromISR();
+}
+
+void IRAM_ATTR ina228_alert2() {
+    if (ina228_instance[2])ina228_instance[2]->alertNewDataFromISR();
 }
 

@@ -3,19 +3,26 @@
 #include <EEPROM.h>
 
 #if CONFIG_IDF_TARGET_ESP32S3
-struct settings_t02 {
+struct settings_t_01 {
     // uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2; // fugu
     //uint8_t Pin_INA22x_ALERT = 40;
     //uint8_t Pin_INA22x_ALERT = 41; // fugu2
 
     uint8_t Pin_I2C_SDA = 15, Pin_I2C_SCL = 16;
     uint8_t Pin_INA22x_ALERT = 7;
+    uint8_t Pin_INA22x_ALERT2 = 6;
+    uint8_t Pin_INA22x_ALERT3 = 5;
 };
 
 struct settings_t {
     uint8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
     uint8_t Pin_INA22x_ALERT = 1;
     uint8_t Pin_INA22x_ALERT2 = 4;
+    uint8_t Pin_INA22x_ALERT3 = 5;
+
+    uint8_t Pin_ADS1220_CS = 7;
+    uint8_t Pin_ADS1220_DRDY = 6;
+
 
 };
 #else
@@ -47,7 +54,7 @@ void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
 }
 
 bool checkCalibrationFactorBounds(float f) {
-    if(!std::isnormal(f))
+    if (!std::isnormal(f))
         return false;
 
     if (std::abs(f) < (1 / 10e4)) {
@@ -57,7 +64,7 @@ bool checkCalibrationFactorBounds(float f) {
 }
 
 bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
-    assert(ecIndex <= 4);
+    assert(ecIndex <= 6);
     EEPROM.begin(256);
     // 16 bytes name
     // 32 bytes calibration data (4*2*4)
