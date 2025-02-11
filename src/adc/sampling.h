@@ -10,8 +10,9 @@ unsigned long long getTimeStamp(struct timeval *tv, int secFracDigits);
 // - remove p, e
 // - instead of timeval store dt to the prev sample (uint_16)
 struct Sample {
-  float u, i, e;
-  unsigned long long t;  // 8byte
+  float u{NAN}, i{NAN}, e{NAN};
+  unsigned long long t{0};  // 8byte
+  float temp{NAN}; // adc die temperature
 
   inline float p() const {
     return u * i;

@@ -259,12 +259,20 @@ public:
         return (fCurrent);
     }
 
+    float read_dietemp() {
+        int16_t regVal;
+        i2c_read_buf(i2c_port, i2c_addr, INA228_DIETEMP, (uint8_t *) &regVal, 2);
+        regVal = __bswap16(regVal);
+        return regVal * 7.8125e-3f;
+    }
+
     Sample getSample() {
 
         lastSample.setTimeNow();
 
         lastSample.u = read_voltage();
         lastSample.i = read_current();
+        lastSample.temp = read_dietemp();
 
         //float busP = ina226.getBusPower();
         //float pErr = std::abs(lastSample.p() - busP) / busP;

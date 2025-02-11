@@ -11,13 +11,14 @@
 
 template<typename T>
 struct UIP {
-    T U{}, I{}, P{};
+    T U{}, I{}, P{}, Temp{};
 
     template<typename = void>
     void clear() {
         U.clear();
         I.clear();
         P.clear();
+        Temp.clear();
     }
 };
 
@@ -108,8 +109,8 @@ public:
 
             sampleQueue.emplace(s);
             auto qs = sampleQueue.size_approx();
-            if(qs > 200 && qs < 300) {
-                ESP_LOGW("ec", "Sample queue is growing beyond 200: %u", qs);
+            if(qs > 250 && qs < 300) {
+                ESP_LOGW("ec", "Sample queue is growing beyond 250: %u", qs);
             }
 
             if (numTimeoutsStreak > 0) numTimeoutsStreak = 0;
@@ -141,10 +142,12 @@ public:
             winPoint.I.add(s.i);
             winPoint.U.add(s.u);
             winPoint.P.add(P);
+            winPoint.Temp.add(s.temp);
 
             winPrint.I.add(s.i);
             winPrint.U.add(s.u);
             winPrint.P.add(P);
+            winPrint.Temp.add(s.temp);
 
             windowTimestamp = s.t;
 
@@ -165,25 +168,29 @@ public:
         auto energy = Energy;
         float i_max = winPoint.I.getMax(), u_max = winPoint.U.getMax();
         float i_mean = winPoint.I.pop(), u_mean = winPoint.U.pop(), p_mean = winPoint.P.pop();
+        float temp_mean = winPoint.Temp.pop();
 
         // compute
         float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6f);
 
         Point point("smart_shunt");
         point.addTag("device", name.c_str());
-        point.addField("I", i_mean, 4);
-        point.addField("U", u_mean, 4);
-        point.addField("I_max", i_max, 3);
-        point.addField("U_max", u_max, 3);
-        point.addField("P", p_mean, 3);
-        point.addField("E", energy, 3);
-        if (maxDt > maxDtReported) {
-            point.addField("dt_max", (float) maxDt * 1e-3f, 2);
-            maxDtReported = maxDt;
-        }
+        if(nSamples != NSamplesLastSummary) {
+            point.addField("I", i_mean, 6);
+            point.addField("U", u_mean, 6);
+            point.addField("I_max", i_max, 3);
+            point.addField("U_max", u_max, 3);
+            point.addField("P", p_mean, 6);
+            point.addField("E", energy, 4);
+            point.addField("T", temp_mean, 2);
+            if (maxDt > maxDtReported) {
+                point.addField("dt_max", (float) maxDt * 1e-3f, 2);
+                maxDtReported = maxDt;
+            }
 
-        if (numTimeouts)
-            point.addField("timeouts", numTimeouts);
+            if (numTimeouts)
+                point.addField("timeouts", numTimeouts);
+        }
 
         point.setTime(windowTimestamp);
 
@@ -193,9 +200,9 @@ public:
             printSample.u = winPrint.U.pop();
             printSample.i = winPrint.I.pop();
             printSample.e = (float) energy;
-            UART_LOG("%s %s U=%7.4fV I=%7.4fA P=%6.3fW, E=%6.3fWh, N=%lu, sps=%.1f, maxDt=%.2fms",
+            UART_LOG("%s %s U=%7.4fV I=%7.4fA P=%6.3fW, E=%6.3fWh, T=%2.1f° N=%lu, sps=%.1f, maxDt=%.2fms",
                      timeStr().c_str(), name.c_str(), printSample.u, printSample.i, winPrint.P.pop(), energy,
-                     nSamples, sps, maxDt * 1e-3f);
+                     winPrint.Temp.pop(), nSamples, sps, maxDt * 1e-3f);
 
             // Serial0.print(", T=");
             // Serial0.print((nowTime - startTime) * 1e-6, 1);
