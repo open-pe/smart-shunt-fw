@@ -32,16 +32,16 @@ struct settings_t_01 {
 
 };
 #endif
-settings_t settings;
+static settings_t settings;
 
-bool readCalibrationFactors(size_t ecIndex, float &u, float &i);
+static bool readCalibrationFactors(size_t ecIndex, float &u, float &i);
 
-void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
-    assert(ecIndex <= 4);
+static void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
+    assert(ecIndex <= 16);
 
     float oldU, oldI;
     if (readCalibrationFactors(ecIndex, oldU, oldI)) {
-        ESP_LOGI("store", "Writing calib.factors at %hhu: %.6f/%.6f (old: %.6f/%.6f)", ecIndex, u, i, oldU, oldI);
+        ESP_LOGI("store", "Writing calib.facWriting calib.factors at %hhu: %.6f/%.6f (old: %.6f/%.6f)", ecIndex, u, i, oldU, oldI);
     }
 
     EEPROM.begin(256);
@@ -51,9 +51,14 @@ void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
     EEPROM.writeFloat(16 + ecIndex * 4 * 2 + 4, i);
     EEPROM.commit();
     EEPROM.end();
+
+    float ru, ri;
+    assert(readCalibrationFactors(ecIndex, ru, ri));
+    assert( abs(ru - u)/u < 1e-9);
+    assert( abs(ri - i)/i < 1e-9);
 }
 
-bool checkCalibrationFactorBounds(float f) {
+static bool checkCalibrationFactorBounds(float f) {
     if (!std::isnormal(f))
         return false;
 
@@ -63,8 +68,8 @@ bool checkCalibrationFactorBounds(float f) {
     return f > -10e3 and f < 10e3;
 }
 
-bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
-    assert(ecIndex <= 6);
+static bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
+    assert(ecIndex <= 16);
     EEPROM.begin(256);
     // 16 bytes name
     // 32 bytes calibration data (4*2*4)

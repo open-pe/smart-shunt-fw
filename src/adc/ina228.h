@@ -95,15 +95,17 @@ public:
             return false;
         }
 
+        int inaAddrIdx = i2c_addr - I2C_A0;
+
+
         float resistor = 2e-3f, range = 38.0f;// default: vishay 2mOhm, .1%, 3W
-        if (readCalibrationFactors(6, resistor, range)) {
+        if (readCalibrationFactors(8 + inaAddrIdx, resistor, range)) {
             ESP_LOGI("ina228", "Restore resistor/range settings: %.6f/%.6f", resistor, range);
         } else {
             ESP_LOGI("ina228", "Default resistor/range settings: %.6f/%.6f", resistor, range);
         }
         setResistorRange(resistor, range, false);
 
-        int inaAddrIdx = i2c_addr - I2C_A0;
 
         std::array<uint8_t, 3> alertPins = {
                 settings.Pin_INA22x_ALERT,
@@ -181,8 +183,9 @@ public:
 
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_SHUNT_CAL, shuntCalShort));
 
+        int inaAddrIdx = i2c_addr - I2C_A0;
         if (store)
-            storeCalibrationFactors(4, resistor, range);
+            storeCalibrationFactors(8 + inaAddrIdx, resistor, range);
     }
 
     void startReading() {
