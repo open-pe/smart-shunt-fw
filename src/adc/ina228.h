@@ -121,13 +121,20 @@ public:
 
 
         uint16_t adc_config = 0;
-        adc_config |= 0xB << 12; // MODE   = Continuous shunt and bus voltage
-        // conversion times see https://www.ti.com/lit/ds/symlink/ina229.pdf#page=22
-        // 4h = 540 µs, 0x5: 1052µs,
-        adc_config |= 0x5 << 9; // VBUSCT  = 1052 µs (bus voltage conversion time) // << 9 => 1052
-        adc_config |= 0x5 << 6; // VSHCT   = 1052 µs (shunt voltage conversion time)
+
+        //adc_config |= 0xB << 12; // MODE   = Continuous shunt and bus voltage
+        adc_config |= 0xF << 12; // MODE   = Continuous shunt, bus voltage and temperature
+
+        // conversion times see https://www.ti.com/lit/ds/symlink/ina228.pdf#page=22
+        constexpr auto CT_50u = 0x0, CCT_84u = 0x1, CT_1052u = 0x5, CT_4120u = 0x7;
+        adc_config |= CT_1052u << 9; // VBUSCT  = bus voltage conversion time
+        adc_config |= CT_4120u << 6; // VSHCT   = shunt voltage conversion time
+        adc_config |= CCT_84u << 3; // temperature conversion time
+
+        // averaging
         adc_config |= 0x0 << 0; // AVG     = (0x0:1, 0x1:4)
         // total 1/((1052-6+1052-6) * 1)
+
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_ADC_CONFIG, adc_config));
 
 

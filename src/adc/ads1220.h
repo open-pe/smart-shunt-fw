@@ -3,7 +3,7 @@
 
 #include "sampling.h"
 #include "util.h"
-#include "../../.pio/libdeps/adafruit_feather_esp32s3/ADS1220_WE/src/ADS1220_WE.h"
+//#include "../../.pio/libdeps/adafruit_feather_esp32s3/ADS1220_WE/src/ADS1220_WE.h"
 
 
 void IRAM_ATTR ads1220_alert();
@@ -24,7 +24,7 @@ class PowerSampler_ADS1220 : public PowerSampler {
     //int readUICycle = 0;
     //bool readingU = false;
 
-    Sample lastSample{0, 0, 0, 0};
+    Sample lastSample{};
 
     //const std::array<adsGain_t, 6> gains = {GAIN_TWOTHIRDS, GAIN_ONE, GAIN_TWO, GAIN_FOUR, GAIN_EIGHT, GAIN_SIXTEEN};
     //adsGain_t gainI = GAIN_EIGHT, gainU = GAIN_TWO;
@@ -65,14 +65,9 @@ public:
     }
 
     void startReading() {
-        //
+        // TODO read register
     }
 
-
-    void alertNewDataFromISR() {
-        new_data = true;
-        notification.notifyFromIsr();
-    }
 
     bool hasData() {
         if (!new_data) {
@@ -89,6 +84,13 @@ public:
 
     Sample getSample() {
         return lastSample;
+    }
+
+
+
+    void alertNewDataFromISR() {
+        new_data = true;
+        notification.notifyFromIsr();
     }
 };
 

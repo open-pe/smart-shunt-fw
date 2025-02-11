@@ -3,6 +3,7 @@
 #include <Adafruit_ADS1X15.h>
 
 #include "sampling.h"
+#include "util.h"
 
 #if CONFIG_IDF_TARGET_ESP32S3
 constexpr int ADS_READY_PIN = 6; // ESP32-S3: fugu=6;
@@ -26,6 +27,7 @@ class PowerSampler_ADS : public PowerSampler {
     Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
     //Adafruit_ADS1015 ads; /* Use this for the 12-bit version */
 
+    TaskNotification notification;
     volatile bool new_data = false;
 
 
@@ -69,7 +71,7 @@ public:
         ads_instance = this;
 
         if (std::is_same<decltype(ads), Adafruit_ADS1115>::value) {
-            ads.setDataRate(RATE_ADS1115_860SPS);
+            ads.setDataRate(RATE_ADS1115_475SPS);
             ESP_LOGI("ads", "ADS1115");
         } else {
 
@@ -96,7 +98,7 @@ public:
     void startReading() {
         //if ((++readUICycle % 4) == 0) {
         //if(++readUICycle > 3) {
-        if ((++readUICycle % 40) == 0) {
+        if ((++readUICycle % 4) == 0) {
             // 1.25 ADC_Sample/Power_Sample
             //if (random(0, 4) == 0) {  // random sampling better than cyclic
             // occasionally sample U
@@ -149,18 +151,22 @@ public:
 
     void alertNewDataFromISR() {
         new_data = true;
+        notification.notifyFromIsr();
     }
 
     bool hasData() {
-        if (new_data) {
-            int16_t adc = ads.getLastConversionResults();
-            new_data = false;
-            bool readU = readingU;
-            startReading();
-            processSampleFromADC(adc, readU);
-            return !readU;
+        if (!new_data) {
+            notification.subscribe();
+            if (!notification.wait(1) || !new_data)
+                return false;
         }
-        return false;
+
+        new_data = false;
+        int16_t adc = ads.getLastConversionResults();
+        bool readU = readingU;
+        startReading();
+        processSampleFromADC(adc, readU);
+        return !readU;
     }
 
     Sample getSample() {
