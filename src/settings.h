@@ -23,6 +23,10 @@ struct settings_t {
     uint8_t Pin_ADS1220_CS = 7;
     uint8_t Pin_ADS1220_DRDY = 6;
 
+    uint8_t Pin_ADS1262_START = 8;
+
+    uint8_t Pin_ADS1262_PWDN = 9; //
+
 
 };
 #else

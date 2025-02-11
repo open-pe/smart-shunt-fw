@@ -9,11 +9,15 @@
 #include "adc/ina226.h"
 #include "adc/ina228.h"
 #include "adc/ads1220.h"
+#include "adc/ads1262.h"
 
 #include "lcd.h"
 
 #include "driver/uart.h"
 //#include "adc/adc_esp_dma.h"
+//#if ARDUINO_USB_MODE == 1
+#include "USB.h"
+//#endif
 
 #include "energy_counter.h"
 #include "util.h"
@@ -23,6 +27,8 @@ InfluxDBClient client;
 
 PowerSampler_ADS ads;
 PowerSampler_ADS1220 ads1220;
+//PowerSampler_ADS1262 ads1262;
+
 PowerSampler_INA226 ina226;
 PowerSampler_INA228 ina228_40{0x40};
 PowerSampler_INA228 ina228_41{0x41};
@@ -42,7 +48,10 @@ unsigned long LastTimePrint = 0;
 std::map<std::string, PowerSampler *> samplers{
         {"ESP32_ADS",      &ads},
         {"ESP32_ADS1220",  &ads1220},
+        //{"ESP32_ADS1262",  &ads1262},
+
         {"ESP32_INA226",   &ina226},
+
         {"ESP32_INA228",   &ina228_40},
         {"ESP32_INA228_2", &ina228_41},
         {"ESP32_INA228_3", &ina228_42},
