@@ -68,13 +68,16 @@ void vTaskGetRunTimeStats();
 
 void setup(void) {
 
-    //Serial.begin(115200);
+    Serial.begin(115200);
 //#if CONFIG_IDF_TARGET_ESP32S3
     // for unknown reason need to initialize uart0 for serial reading (see loop below)
     // Serial.available() works under Arduino IDE (for both ESP32,ESP32S3), but always returns 0 under platformio
     // so we access the uart port directly. on ESP32 the Serial.begin() is sufficient (since it uses the uart0)
     uartInit(0);
 //#endif
+
+    //USBSerial.begin();
+    // USB.begin();
 
 
     ESP_LOGI("main", "SmartShunt started");
@@ -154,84 +157,10 @@ void loop() {
     vTaskDelay(1000);
 }
 
-void update() {
-    constexpr bool hfWrites = false;
-
-    unsigned long nowTime = micros();
-
-    assert(xPortGetCoreID() != RT_CORE);
-
-    //ESP_LOGI("main", "Loop!");
-
-    for (auto &ec: energyCounters) {
-        ec.consumeQueue();
-    }
-
-    /*    if (hfWrites) {
-          Point point("smart_shunt");
-          samplePoint(point, s, "ESP8266_proto1");
-          pointFrame[i] = point;
-        }
-
-    if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
-
-    if (nowTime - LastTimeOut > 100e3) {
-        auto print = nowTime - LastTimePrint > 2000e3;
-
-        for (auto &ec: energyCounters) {
-            if (ec.newSamplesSinceLastSummary()) {
-                if (std::abs(ec.winPrint.P.getMean()) >= 0.0005f) {
-                    timeLastWakeEvent = nowTime;
-                }
-
-                auto p = ec.summary((nowTime - LastTimeOut), print);
-                points_frame.push_back(p);
-
-                if (print) {
-                    lcd.updateValues(ec.printSample);
-                }
-            }
-        }
-
-        if (print) {
-            if (energyCounters.size() > 1)
-                UART_LOG("");
-            LastTimePrint = nowTime;
-        }
-
-        if (points_frame.size() >= 18) {
-            if (!disableWifi)
-                influxWritePointsUDP(&points_frame[0], points_frame.size());
-            points_frame.clear();
-        }
-
-        LastTimeOut = nowTime;
-    }
-
-
-    // for some reason Serial.available() doesn't work under platformio
-    // so access the uart port directly
-
-    const uart_port_t uart_num = UART_NUM_0; // Arduino Serial is on port 0
-    static char buf[128];
-    static int buf_pos = 0;
-    int length = 0;
-    ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *) &length));
-    if (length > 0) {
-        length = uart_read_bytes(uart_num, buf + buf_pos, min(length, 127 - buf_pos), 20);
-        uart_write_bytes(uart_num, buf + buf_pos, length); // echo
-        buf_pos += length;
-    }
-
-    auto eol = strchr(buf, '\n');
-    while (eol) { // enable using break below
-        *eol = 0; // terminate string at line break
-        buf_pos = 0; // reset buf
-
+void handleConsoleInput(const String &buf) {
+    while (1) {
         String inp(buf);
         inp.trim();
-
-        timeLastWakeEvent = nowTime;
 
         if (inp.isEmpty()) break;
 
@@ -320,9 +249,105 @@ void update() {
         } else if (inp == "help") {
             UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
         } else {
-            UART_LOG("Unknown command. enter 'help' for help");
+            UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());
         }
+
         break;
+    }
+}
+
+void update() {
+    constexpr bool hfWrites = false;
+
+    unsigned long nowTime = micros();
+
+    assert(xPortGetCoreID() != RT_CORE);
+
+    //ESP_LOGI("main", "Loop!");
+
+    for (auto &ec: energyCounters) {
+        ec.consumeQueue();
+    }
+
+    /*    if (hfWrites) {
+          Point point("smart_shunt");
+          samplePoint(point, s, "ESP8266_proto1");
+          pointFrame[i] = point;
+        }
+
+    if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
+
+    if (nowTime - LastTimeOut > 19e3) {
+        auto print = nowTime - LastTimePrint > 2000e3;
+
+        for (auto &ec: energyCounters) {
+            if (ec.newSamplesSinceLastSummary()) {
+                if (std::abs(ec.winPrint.P.getMean()) >= 0.0005f) {
+                    timeLastWakeEvent = nowTime;
+                }
+
+                auto p = ec.summary((nowTime - LastTimeOut), print);
+                if(p.hasFields())
+                    points_frame.push_back(p);
+
+                if (print) {
+                    lcd.updateValues(ec.printSample);
+                }
+            }
+        }
+
+        if (print) {
+            if (energyCounters.size() > 1)
+                UART_LOG("");
+            LastTimePrint = nowTime;
+        }
+
+        if (points_frame.size() >= 18) {
+            if (!disableWifi)
+                influxWritePointsUDP(&points_frame[0], points_frame.size());
+            points_frame.clear();
+        }
+
+        LastTimeOut = nowTime;
+    }
+
+
+    // for some reason Serial.available() doesn't work under platformio
+    // so access the uart port directly
+
+    const uart_port_t uart_num = UART_NUM_0; // Arduino Serial is on port 0
+    static char buf[128];
+    static int buf_pos = 0;
+    int length = 0;
+    ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *) &length));
+    if (length > 0) {
+        length = uart_read_bytes(uart_num, buf + buf_pos, min(length, 127 - buf_pos), 20);
+        uart_write_bytes(uart_num, buf + buf_pos, length); // echo
+        buf_pos += length;
+    }
+
+    auto eol = strchr(buf, '\n');
+    while (eol) { // enable using break below
+        *eol = 0; // terminate string at line break
+        buf_pos = 0; // reset buf
+        handleConsoleInput(buf);
+        timeLastWakeEvent = nowTime;
+        break;
+    }
+
+    static String serialBuf;
+    if (Serial.available()) {
+        auto r = Serial.readString();
+        serialBuf += r;
+        Serial.write(r.c_str()); // echo
+        Serial.flush();
+        int lb;
+        while ((lb = serialBuf.indexOf('\n')) != -1) {
+            String line = serialBuf.substring(0, lb);
+            handleConsoleInput(line);
+            serialBuf = serialBuf.substring(lb + 1);
+        }
+        timeLastWakeEvent = nowTime;
     }
 
     if (nowTime - timeLastWakeEvent > (1e6 * 3600)) {

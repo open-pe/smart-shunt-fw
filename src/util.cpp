@@ -235,5 +235,6 @@ void UART_LOG(const char *fmt, ...) {
     auto l = strlen(UART_LOG_buf);
     UART_LOG_buf[l] = '\n';
     UART_LOG_buf[++l] = '\0';
-    uart_write_bytes(0, UART_LOG_buf, l);
+    printf("%s", UART_LOG_buf);
+    //uart_write_bytes(0, UART_LOG_buf, l);
 }
