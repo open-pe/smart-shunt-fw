@@ -6,6 +6,7 @@
 #include <Wire.h>
 
 #include "adc/sampling.h"
+#include "settings.h"
 
 #include <InfluxDbClient.h>
 #include <WiFiUDP.h>
@@ -195,7 +196,8 @@ void scan_i2c() {
     byte error, address;
     int nDevices;
 
-    ESP_LOGI(TAG, "Scanning I2C...");
+    ESP_LOGI(TAG, "Scanning I2C... (SDA=%hhu, SCL=%hhu)", settings.Pin_I2C_SDA,
+             settings.Pin_I2C_SCL);
 
     nDevices = 0;
     for (address = 1; address < 127; address++) {

@@ -70,7 +70,7 @@ unsigned long timeLastWakeEvent = 0;
 
 [[noreturn]] void nonRealTimeTask(void *arg);
 
-constexpr auto RT_CORE = 1;
+#define RT_CORE 1
 constexpr auto RT_PRIO = 20;  // highest priority is 24
 
 void vTaskGetRunTimeStats();
@@ -95,7 +95,8 @@ void setup(void) {
     Wire.begin(
             settings.Pin_I2C_SDA,
             settings.Pin_I2C_SCL,
-            800000UL
+            //800000UL
+            1000000UL
     );
 
     if (!lcd.init()) {
@@ -155,6 +156,22 @@ std::vector<Point> points_frame;
     assert(xPortGetCoreID() == RT_CORE);
     vTaskPrioritySet(nullptr, RT_PRIO);
 
+#define VALUE_TO_STRING(x) #x
+#define VALUE(x) VALUE_TO_STRING(x)
+#define PRINT_MACRO_AT_COMPILE_TIME(var) #var "=`" VALUE(var) "`"
+
+#if CONFIG_ARDUINO_RUNNING_CORE == RT_CORE or CONFIG_ARDUINO_EVENT_RUNNING_CORE == RT_CORE or \
+    CONFIG_ARDUINO_UDP_RUNNING_CORE == RT_CORE or CONFIG_ARDUINO_SERIAL_EVENT_TASK_RUNNING_CORE == RT_CORE
+//#pragma message PRINT_MACRO_AT_COMPILE_TIME(CONFIG_ARDUINO_RUNNING_CORE)
+//#error "arduino runtime is configured to run on RT_CORE CONFIG_ARDUINO_RUNNING_CORE="
+#endif
+
+    // CONFIG_ESP_TIMER_ISR_AFFINITY != RT_CORE or CONFIG_ESP_TIMER_TASK_AFFINITY == RT_CORE or
+#if CONFIG_LWIP_TCPIP_TASK_AFFINITY == RT_CORE \
+ or CONFIG_PTHREAD_TASK_CORE_DEFAULT == RT_CORE or CONFIG_FMB_PORT_TASK_AFFINITY == RT_CORE or CONFIG_MDNS_TASK_AFFINITY == RT_CORE
+//#error "esp runtime is configured to run on RT_CORE"
+#endif
+
     while (true) {
         for (auto &ec: energyCounters) {
             ec.update();
@@ -186,6 +203,9 @@ void handleConsoleInput(const String &buf) {
             // calibrate ESP32_INA228 U *1.000983433436737
             // calibrate ESP32_ADS U *1.0003957914179227
             // calibrate ESP32_ADS I *1.0017
+            // calibrate ESP32_INA228_3 U 1
+            // calibrate ESP32_INA228_2 U 1
+            // calibrate ESP32_INA228 U 1
             std::string samplerName = inp.substring(10, inp.indexOf(' ', 10)).c_str();
             size_t i = 10 + samplerName.size() + 1;
 
@@ -286,7 +306,7 @@ void update() {
 
     if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-    if (nowTime - LastTimeOut > 19e3) {
+    if (nowTime - LastTimeOut > 19e3) { // every 19 ms
         auto print = nowTime - LastTimePrint > 2000e3;
 
         for (auto &ec: energyCounters) {
@@ -369,7 +389,7 @@ void update() {
 void nonRealTimeTask(void *arg) {
     while (1) {
         update();
-        vTaskDelay(5);
+        vTaskDelay(10);
     }
 }
 

@@ -31,6 +31,8 @@ public:
 private:
     unsigned long NumSamples = 0;
     unsigned long NSamplesLastSummary = 0;
+    unsigned long NSamplesLastPrint = 0;
+    unsigned long tLastPrint = 0;
 
     double Energy = 0;//Wh
     float LastP = 0.0f;
@@ -117,7 +119,7 @@ public:
         } else {
             unsigned long nowTime = micros();
             auto lt = lastTime; // capture
-            if (nowTime > lt && (nowTime - lt) > 4e6) {
+            if (nowTime > lt && (nowTime - lt) > 4e6 && nowTime > 10e6) {
                 ++numTimeouts;
                 ++numTimeoutsStreak;
                 ESP_LOGW("ec", "\n%s Timeout waiting for new sample! %u %f %u %u \n",
@@ -161,7 +163,7 @@ public:
 
     Sample printSample{};
 
-    Point summary(unsigned long dt_us, bool print) {
+    Point summary(unsigned long dt_us,  bool print) {
 
         // capture
         auto nSamples = NumSamples;
@@ -170,8 +172,7 @@ public:
         float i_mean = winPoint.I.pop(), u_mean = winPoint.U.pop(), p_mean = winPoint.P.pop();
         float temp_mean = winPoint.Temp.pop();
 
-        // compute
-        float sps = (nSamples - NSamplesLastSummary) / (dt_us * 1e-6f);
+
 
         Point point("smart_shunt");
         point.addTag("device", name.c_str());
@@ -197,6 +198,10 @@ public:
         // client.writePoint(point);
 
         if (print) {
+            auto now = micros();
+            // compute
+            float sps = (float)(nSamples - NSamplesLastPrint) / ((float)(now - tLastPrint) * 1e-6f);
+
             printSample.u = winPrint.U.pop();
             printSample.i = winPrint.I.pop();
             printSample.e = (float) energy;
@@ -210,6 +215,9 @@ public:
             // Serial0.print(", numDropped=");
             // Serial0.print(numDropped);
             // Serial0.println();
+
+            tLastPrint = now;
+            NSamplesLastPrint = nSamples;
         }
 
         NSamplesLastSummary = nSamples;
