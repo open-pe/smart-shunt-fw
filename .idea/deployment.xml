@@ -10,6 +10,13 @@
           </mappings>
         </serverdata>
       </paths>
+      <paths name="rpi3">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/keithley" local="$PROJECT_DIR$/etc/keithley" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
     </serverData>
     <option name="myAutoUpload" value="ALWAYS" />
   </component>

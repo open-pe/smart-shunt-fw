@@ -49,7 +49,7 @@ HOME_DIR="${HOME}/"
 BOOT_DIR="/boot/"
 KIT_DIR="/repo/"
 GPIB_INSTALL_DIR="/opt"
-LINUX_GPIB_VER="4.3.6"
+LINUX_GPIB_VER="4.3.5"
 GPIB_FILE="gpib.conf"
 GPIB_FILE_PATH="/usr/local/etc/"
 TIGHTVNC_FILE="tightvncserver"
@@ -95,7 +95,7 @@ update_system()
     # Remove realvnc before installing tightvnc. Realvnc server doesn't work with some clients
     sudo apt-get remove -y realvnc-vnc-server
 
-    sudo apt-get -y install ftp vsftpd git mc screen i2c-tools bc python3-pip python-dev-is-python3 rpi-update tk-dev build-essential texinfo texi2html libcwidget-dev libncurses5-dev libx11-dev binutils-dev bison flex libusb-1.0-0 libusb-dev libmpfr-dev libexpat1-dev tofrodos subversion autoconf automake libtool libssl-dev build-essential mercurial dos2unix sqlite3 lshw
+    sudo apt-get -y install ftp vsftpd git mc screen i2c-tools bc python3-pip python-dev rpi-update tk-dev build-essential texinfo texi2html libcwidget-dev libncurses5-dev libx11-dev binutils-dev bison flex libusb-1.0-0 libusb-dev libmpfr-dev libexpat1-dev tofrodos subversion autoconf automake libtool libssl-dev build-essential mercurial dos2unix sqlite3 lshw
 
     # sudo apt-get -y purge wolfram-engine sonic-pi scratch minecraft-pi
 
@@ -170,18 +170,16 @@ install_linux_gpib()
 
     cd ..
     cd linux-gpib-user-${LINUX_GPIB_VER}
-
-    sudo ./bootstrap
-    sudo ./configure
-    #sudo make clean
-    sudo make -j6
-    sudo make install
-
     # compile linux-gpib python bindings
     cd language/python
     sudo python setup.py install
     cd ../..
 
+    sudo ./bootstrap
+    sudo ./configure
+    sudo make clean
+    sudo make -j6
+    sudo make install
 
     # test for location of gpib.conf file. It is either in /etc or /usr/local/etc
     if [ -f "${GPIB_FILE_PATH}${GPIB_FILE}" ]; then
@@ -243,7 +241,7 @@ install_linux_gpib()
     echo "running depmod -a"
     sudo depmod -a
     echo "running gpib_config"
-    sudo gpib_config || true
+    sudo gpib_config
 
     # the following lines runs gpib_config on boot. gpib_config command added before the "exit 0" at the end of the file
     # first test if it already exists. if true, skip adding line

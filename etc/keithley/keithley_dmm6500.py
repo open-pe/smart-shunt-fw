@@ -8,6 +8,12 @@ pip install pyusb pyvisa pyvisa-py
 "On Unix system, one may have to modify udev rules to allow non-root access to the device you are trying to connect to. The following tutorial describes how to do it http://ask.xmodulo.com/change-usb-device-permission-linux.html."
 
 
+macos:
+python 32bit needed
+https://stackoverflow.com/questions/5541096/ni-visa-pyvisa-on-mac-os-x-snow-leopard
+
+not so
+
 """
 import collections
 import socket
@@ -23,7 +29,13 @@ from util import round_to_n_dec
 resource_name = 'USB::0x05e6::0x6500::04577308::INSTR'
 print(resource_name)
 
-mm = DMM6500(visa.ResourceManager().open_resource(resource_name))
+rm = visa.ResourceManager()
+rsc = rm.open_resource(resource_name)
+mm = DMM6500(rsc)
+
+# nplc 12 is adc max integration time
+# mm.nplc = 12
+# TODO doesnt work
 
 # mm.reset()
 # mm.function = Function.DC_CURRENT  # ioreg -p IOUSB
@@ -34,11 +46,15 @@ sock = socket.socket(socket.AF_INET,  # Internet
 avg = 1
 
 # csr = 2e-3
-csr = 2.5e-3
+csr = 0
+
+if len(sys.argv) > 1:
+    csr = 2.5e-3
+    print('measuring current with current sense resistor = %.1f mΩ' % (csr * 1e3))
 
 if csr:
     voltage = False
-    print('measuring voltage across shunt R= %.3s mΩ (%.1fA/50mV)' % ( csr*1e3, 50e-3/csr))
+    print('measuring voltage across shunt R= %.3s mΩ (%.1fA/50mV)' % (csr * 1e3, 50e-3 / csr))
 elif True:
     voltage = True
     print('measuring voltage')
@@ -67,6 +83,8 @@ def watchdog_loop():
     while time.time() - t_last_read < 5:
         time.sleep(1)
     print('Watchdog timeout, exit')
+    # rsc.close()
+    rm.close()
     sys.exit(1)
 
 

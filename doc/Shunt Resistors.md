@@ -37,3 +37,12 @@ Considerations choosing the shunt / burden / current sense resistor:
 * CMRR: -100dB @ DC
 * SNR: VIN = 100 mVPP, fIN = 1 kHz, BW = 10 kHz 80dB min 84dB typica
 
+
+
+# Calibration 
+https://www.fluke.com/de-de/produkt/kalibratoren/elektrische-kalibrierung/elektrische-normale/a40b
+https://www.goldeno.com/pictures/CH48T4HK.pdf
+
+
+https://www.distrelec.de/en/power-resistor-100mohm-250w-isabellenhuette-rug-r100-tk1/p/16057585?srsltid=AfmBOoojidCGZXWdHEtrtlDy2OI7STHuRNi8dZS8k9FCPCUYf7Rr9Iw7
+https://www.distrelec.de/en/power-resistor-10mohm-250w-isabellenhuette-rug-r010-tk1/p/16057583?pos=5&origPos=2&origPageSize=50&track=true&filterapplied=filter_disresistancenum_en_ds%3D0.005&sid=OWnMSukFWu&itemList=category
