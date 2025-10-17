@@ -21,3 +21,9 @@ hw/fp-info-cache
 build/
 
 .idea/workspace.xml
+
+__pycache__
+
+*.lck
+
+.idea/editor.xml

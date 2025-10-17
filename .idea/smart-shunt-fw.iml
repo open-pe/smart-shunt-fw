@@ -2,10 +2,7 @@
 <module version="4">
   <component name="FacetManager">
     <facet type="Python" name="Python facet">
-      <configuration sdkName="ha" />
+      <configuration sdkName="Python 3.13 (smart-shunt-fw)" />
     </facet>
-  </component>
-  <component name="NewModuleRootManager">
-    <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

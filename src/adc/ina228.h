@@ -133,6 +133,7 @@ class PowerSampler_INA228 : public PowerSampler {
      */
     uint8_t acFreq = 0;
 
+    uint8_t nplc = 1;
 
     uint16_t avgNum = 0, avgCnt = 0;
 
@@ -207,11 +208,11 @@ public:
             // so with 280u we'll have some head room
             adc_config |= CT_280u << 9; // VBUSCT  = bus voltage conversion time
             adc_config |= CT_280u << 6; // VSHCT   = shunt voltage conversion time
+            const auto totalConvTime = 2 * 280e-6f;
 
-
-            avgNum = (uint16_t) rintf(1.f / (acFreq * 2 * 280e-6f));
+            avgNum = (uint16_t) rintf((float) nplc / (acFreq * totalConvTime));
             avgCnt = 0;
-            ESP_LOGI("ina228", "measuring ac at freq %hhu, averaging %hu", acFreq, avgNum);
+            ESP_LOGI("ina228", "measuring ac with freq %hhu, nplc=%i, averaging %hu", acFreq, (int) nplc, avgNum);
 
             // sps = 1/(84us+84us) * avgNum
         } else {

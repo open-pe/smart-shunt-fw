@@ -199,6 +199,8 @@ void handleConsoleInput(const String &buf) {
             }
         } else if (inp.startsWith("calibrate ")) {
             // calibrate ESP32_INA228 I 1.0028870
+            // calibrate ESP32_INA228 I 1.00223895 // rsn20-50 with ref=3458a (2025-10) 1.1A
+            // calibrate ESP32_INA228 U 1.00015655 // 60v
             // calibrate ESP32_INA228 I *0.9997247927345282
             // calibrate ESP32_INA228 U *1.000983433436737
             // calibrate ESP32_ADS U *1.0003957914179227
@@ -247,6 +249,7 @@ void handleConsoleInput(const String &buf) {
             } else {
                 ESP_LOGW("main", "unknown dim %s", dim.c_str());
             }
+            // todo add offset
         } else if (inp.startsWith("ina22x-resistor-range")) {
             int devIdx = 0;
             size_t i = strlen("ina22x-resistor-range");

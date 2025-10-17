@@ -97,3 +97,24 @@ PwrTool 500
 
 # Thermal
 20A with Y14880R00200B9R 2mΩ temp-rise 18 => 38°C  ∆20°C (ina229 package: 25°C)
+
+
+# 24bit
+REF6225IDGKT
+ads127 (
+ADS131M02 (apps: power, battery) https://www.ti.com/lit/ds/symlink/ads131m02.pdf
+
+
+# 32bit
+ADS1288
+
+
+SPI:
+CS (->)
+SCLK ->
+MOSI ->
+MISO <-
+DRDY <-
+
+ISO6721BDR, 3kv, 50mbps, 2/0ch
+ISO6731DWR, 5kv, 50mbps, 2/1ch

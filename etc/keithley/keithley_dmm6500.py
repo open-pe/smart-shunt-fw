@@ -14,6 +14,8 @@ https://stackoverflow.com/questions/5541096/ni-visa-pyvisa-on-mac-os-x-snow-leop
 
 not so
 
+TODO usb_modeswitch -v 0x05e6 -p 0x6500 --reset-usb
+
 """
 import collections
 import socket
@@ -22,9 +24,8 @@ import time
 
 import pyvisa as visa
 from DMM6500 import DMM6500
-from DMM6500_SCPI import Function
 
-from util import round_to_n_dec
+from util import round_to_n_dec, write_point
 
 resource_name = 'USB::0x05e6::0x6500::04577308::INSTR'
 print(resource_name)
@@ -40,8 +41,7 @@ mm = DMM6500(rsc)
 # mm.reset()
 # mm.function = Function.DC_CURRENT  # ioreg -p IOUSB
 
-sock = socket.socket(socket.AF_INET,  # Internet
-                     socket.SOCK_DGRAM)  # UDP
+
 
 avg = 1
 
@@ -63,18 +63,6 @@ else:
     print('measuring current')
 
 print('averaging = ', avg)
-
-
-def write_point(measurement, tags, values, timestamp_ms):
-    lp = "smart_shunt"
-    for k, v in tags.items():
-        lp += ',%s=%s' % (k, v)
-    for k, v in values.items():
-        lp += ' %s=%s' % (k, v)
-    # print(lp)
-    lp += ' ' + str(int(round(timestamp_ms)))
-    sock.sendto(lp.encode(), ('127.0.0.1', 8086))
-
 
 t_last_read = time.time()
 

@@ -1,4 +1,5 @@
 import math
+import socket
 
 
 def round_to_n(x, n):
@@ -26,7 +27,7 @@ def num2str(x, n=None, strip_zeros=True):
         if s.endswith('.0'):
             s = s[:-2]
     else:
-        s = str(x) # TODO
+        s = str(x)  # TODO
     return s
 
 
@@ -55,3 +56,18 @@ def round_to_n_dec(x, n):
     # elif x > 9
     else:
         return num2str(x, n)
+
+
+sock = socket.socket(socket.AF_INET,  # Internet
+                     socket.SOCK_DGRAM)  # UDP
+
+
+def write_point(measurement, tags, values, timestamp_ms):
+    lp = measurement
+    for k, v in tags.items():
+        lp += ',%s=%s' % (k, v)
+    for k, v in values.items():
+        lp += ' %s=%s' % (k, v)
+    # print(lp)
+    lp += ' ' + str(int(round(timestamp_ms))) + '\n'
+    sock.sendto(lp.encode(), ('127.0.0.1', 8086))

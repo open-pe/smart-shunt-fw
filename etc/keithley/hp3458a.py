@@ -125,7 +125,7 @@ if __name__ == "__main__":
     rm = pyvisa.ResourceManager()
     print('opening', 'GPIB0::15::INSTR')
     inst = rm.open_resource('GPIB0::15::INSTR')
-    inst.clear()
+    #inst.clear()
     inst.write("RESET")
     #print(inst.query("*IDN?"))
     #dm = HP3458A()
