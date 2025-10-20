@@ -52,10 +52,10 @@ public:
         if (!ina226.init())
             return false;
 
-        ina226.setAverage(AVERAGE_4);
+        ina226.setAverage(INA226_AVERAGE_4);
         //ina226.setConversionTime(CONV_TIME_204);
         //ina226.setConversionTime(CONV_TIME_588, CONV_TIME_588);
-        ina226.setConversionTime(CONV_TIME_588);
+        ina226.setConversionTime(INA226_CONV_TIME_588);
 
         // analog filters:
         // use RC with cutoff at sampling rate
@@ -103,7 +103,7 @@ public:
     }
 
     void startReading() override {
-        ina226.setMeasureMode(CONTINUOUS);
+        ina226.setMeasureMode(INA226_CONTINUOUS);
     }
 
     void alertNewDataFromISR() {

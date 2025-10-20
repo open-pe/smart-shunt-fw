@@ -1,5 +1,5 @@
 #include <SPI.h>
-#include "ads131/ADS131M02.h"
+#include "ads131/ADS131M0x.h"
 
 #include "sampling.h"
 #include "util.h"
@@ -11,10 +11,10 @@ class PowerSampler_ADS131;
 
 PowerSampler_ADS131 *ads131_instance = nullptr;
 
-bool adc15_set_frequency ( uint32_t frequency );
+bool adc15_set_frequency(uint32_t frequency);
 
 class PowerSampler_ADS131 : public PowerSampler {
-    ADS131M02 ads{};
+    ADS131M0x ads{};
 
     TaskNotification notification;
     volatile bool new_data = false;
@@ -31,6 +31,8 @@ public:
     const uint8_t storageId = 0;
 
     uint8_t getStorageId() const override { return storageId; };
+
+    SPIClass SpiADC {HSPI};
 
     bool init() {
         if (ads131_instance)
@@ -60,72 +62,45 @@ public:
 
 
         ESP_LOGI("ads", "Init ads131");
-        ads.begin(
-            settings.Pin_ADS131_Clk,
-            settings.Pin_ADS131_Miso,
-            settings.Pin_ADS131_Mosi,
-            settings.Pin_ADS131_Cs,
-            settings.Pin_ADS131_Drdy);
-
-        // listen to the ADC's ALERT pin
-        //pinMode(settings.Pin_ADS13_DRDY, INPUT_PULLUP);
-        //pinMode(settings.Pin_ADS131_START, OUTPUT);
-
+        ads.setClockSpeed(ADC15_FREQ_MODE_HIGH_RESOLUTION); // SPI clock
+        new_data = false;
         attachInterrupt(digitalPinToInterrupt(settings.Pin_ADS131_Drdy), ads131_alert, FALLING);
         ESP_LOGI("ads1220", "Interrupt attached to pin %d", settings.Pin_ADS131_Drdy);
+        ads.reset(settings.Pin_ADS131_Rst);
+        ads.begin(&SpiADC, settings.Pin_ADS131_Clk, settings.Pin_ADS131_Miso, settings.Pin_ADS131_Mosi,
+                  settings.Pin_ADS131_Cs,
+                  settings.Pin_ADS131_Drdy);
 
-        // reset adc
-        pinMode(settings.Pin_ADS131_Rst, OUTPUT);
-        digitalWrite(settings.Pin_ADS131_Rst, LOW);
-        delayMicroseconds(100000); // must wait at least 2048 clock cycles (tCLKIN)
-        new_data = false;
-        digitalWrite(settings.Pin_ADS131_Rst, HIGH);
-        // then DRDY* low => high
+        ads.setInputChannelSelection(0, INPUT_CHANNEL_MUX_AIN0P_AIN0N);
+
+        ads.setChannelPGA(0, CHANNEL_PGA_1); // pga gain=1 => ±1.2 V FSR
 
         ESP_LOGI("ads131", "waiting  for ads to become ready..");
-        // TODO actually check for edge
         while (!digitalRead(settings.Pin_ADS131_Drdy)) vTaskDelay(1);
         //while (!new_data) vTaskDelay(1); //  Wait for DRDY to go high indicating it is ok// to talk to ADC
         new_data = false;
 
-        while (true){
+        // check number of channels
+        while (true) {
             auto idReg = ads.readRegister(REG_ID);
             uint8_t chan_cnt = (idReg >> 8) & 0b1111;
-            ESP_LOGI("ads", "Read Channel Count %hhu (%hu)", chan_cnt, idReg);
-            if (chan_cnt!= 0) break;
+            ESP_LOGI("ads", "Read Channel Count %hhu (registerVal=%hu)", chan_cnt, idReg);
+            if (chan_cnt != 0) break;
             delay(100);
-            break; // TODO
         }
 
-        ESP_LOGI("ads", "REG_ID %hu", ads.readRegister(REG_ID));
+        // calibrate ESP32_ADS131M02 U *
 
-
-        //ads.setC
-
-        //ads.setPowerMode(POWER_MODE_VERY_LOW_POWER);
-        //assert(ads.setPowerMode(POWER_MODE_HIGH_RESOLUTION));
-
+        assert(ads.setPowerMode(POWER_MODE_HIGH_RESOLUTION));
+        ads.setGlobalChop(1);
+        ads.setGlobalChopDelay(16); // default:16
+        // In global-chop mode, noise is improved by a factor of √ 2.
         //ads.setDrdyFormat(1); // 1: any channel
         // * Changing the DRDY_SEL[1:0] bits has no effect on DRDY behavior in global-chop mod because phase calibration is automatically disabled in global-chop mode.
-
-        ESP_LOGI("ads", "REG_CLOCK=%hu", ads.readRegister(REG_CLOCK));
-        ads.setOsr(OSR_4096);
-        ESP_LOGI("ads", "REG_CLOCK=%hu", ads.readRegister(REG_CLOCK));
-        //ads.writeRegister()
-        //ads.setO
-
+        ads.setOsr(OSR_16384); // OSR (Modulator oversampling ratio selection) https://www.ti.com/lit/ds/symlink/ads131m02.pdf#page=50
         ads.setChannelEnable(0, 1);
-        ads.setChannelEnable(1,0);
-
-        // OSR (Modulator oversampling ratio selection) https://www.ti.com/lit/ds/symlink/ads131m02.pdf#page=50
-        // 1024 is default =>
-        //assert(ads.setOsr(OSR_16384)); // 16384 is max ( https://www.ti.com/lit/ds/symlink/ads131m02.pdf#page=20 )
-        //assert(ads.setChannelPGA(0, PGA_GAIN_1)); // default=PGA_GAIN_1
-        ads.setInputChannelSelection(0, INPUT_CHANNEL_MUX_POSITIVE_DC_TEST_SIGNAL);
-
-        //assert(ads.setChannelEnable(1, 0));
-        ads.setInputChannelSelection(1, INPUT_CHANNEL_MUX_POSITIVE_DC_TEST_SIGNAL);
-
+        ads.setChannelEnable(1, 0);
+        ads.setInputChannelSelection(0, INPUT_CHANNEL_MUX_AIN0P_AIN0N);
 
         return true;
     }
@@ -152,7 +127,7 @@ public:
             firstRead = false;
         }
         auto dat = ads.readADC();
-        lastSample.u = (float) dat.ch0 * 1.2296 / (float) ((2 << (23 - 1)) - 1) * 101.505f / 1.505f * 1.0481;
+        lastSample.u = (float) dat.ch0 * 1.2f / (float) ((2 << (23 - 1)) - 1) * (101.505f / 1.505f) * 1.00458259;
         return true; // !readingU
     }
 
@@ -175,20 +150,19 @@ void IRAM_ATTR ads131_alert() {
 }
 
 
-bool adc15_ltc_write (uint8_t oct, uint16_t dac, uint8_t cfg )
-{
+bool adc15_ltc_write(uint8_t oct, uint16_t dac, uint8_t cfg) {
     uint16_t temp_data = 0;
-    temp_data |= ( uint16_t )( oct & 0xF ) << 12;
-    temp_data |= ( uint16_t )( dac & 0x3FF ) << 2;
-    temp_data |= ( uint16_t )( cfg & 0x3 ) << 0;
-    uint8_t tx_data[ 2 ] = { temp_data >> 8, temp_data };
+    temp_data |= (uint16_t) (oct & 0xF) << 12;
+    temp_data |= (uint16_t) (dac & 0x3FF) << 2;
+    temp_data |= (uint16_t) (cfg & 0x3) << 0;
+    uint8_t tx_data[2] = {temp_data >> 8, temp_data};
 
     SPI.setBitOrder(MSBFIRST);
     SPI.setFrequency(4000000);
     SPI.setDataMode(SPI_MODE0);
-    SPI.begin(            settings.Pin_ADS131_Clk,
-            settings.Pin_ADS131_Miso,
-            settings.Pin_ADS131_Mosi);
+    SPI.begin(settings.Pin_ADS131_Clk,
+              settings.Pin_ADS131_Miso,
+              settings.Pin_ADS131_Mosi);
     pinMode(settings.Pin_ADS131_CsClk, OUTPUT);
     digitalWrite(settings.Pin_ADS131_CsClk, LOW);
     delayMicroseconds(1);
@@ -199,17 +173,16 @@ bool adc15_ltc_write (uint8_t oct, uint16_t dac, uint8_t cfg )
     return true;
 }
 
-bool adc15_set_frequency ( uint32_t frequency )
-{
-    constexpr auto  OCT_DIVIDER=      1039.0;
-    constexpr auto OCT_RES =        3.322;
+bool adc15_set_frequency(uint32_t frequency) {
+    constexpr auto OCT_DIVIDER = 1039.0;
+    constexpr auto OCT_RES = 3.322;
 #define DAC_OFFSET      2048.0
 #define DAC_RES         2078
 #define DAC_OCT_OFFSET  10
 #define ADC15_LDC_CFG_POWER_ON      2
 #define ADC15_LDC_CFG_POWER_DOWN    3
-    uint8_t oct = OCT_RES * log10( frequency / OCT_DIVIDER );
-    uint16_t dac = DAC_OFFSET - ( ( DAC_RES * pow( 2, DAC_OCT_OFFSET + oct ) ) / ( float )frequency );
-    return adc15_ltc_write( oct, dac, ADC15_LDC_CFG_POWER_ON );
+    uint8_t oct = OCT_RES * log10(frequency / OCT_DIVIDER);
+    uint16_t dac = DAC_OFFSET - ((DAC_RES * pow(2, DAC_OCT_OFFSET + oct)) / (float) frequency);
+    return adc15_ltc_write(oct, dac, ADC15_LDC_CFG_POWER_ON);
 }
 
