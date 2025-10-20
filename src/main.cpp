@@ -10,6 +10,7 @@
 #include "adc/ina228.h"
 #include "adc/ads1220.h"
 #include "adc/ads1262.h"
+#include "adc/ads131.h"
 
 #include "lcd.h"
 
@@ -26,8 +27,9 @@
 InfluxDBClient client;
 
 PowerSampler_ADS ads;
-PowerSampler_ADS1220 ads1220;
+//PowerSampler_ADS1220 ads1220;
 //PowerSampler_ADS1262 ads1262;
+PowerSampler_ADS131 ads131;
 
 PowerSampler_INA226 ina226;
 PowerSampler_INA228 ina228_40{0x40};
@@ -46,21 +48,22 @@ unsigned long LastTimePrint = 0;
 //};
 
 std::map<std::string, PowerSampler *> samplers{
-        {"ESP32_ADS",      &ads},
-        {"ESP32_ADS1220",  &ads1220},
-        //{"ESP32_ADS1262",  &ads1262},
+    //{"ESP32_ADS", &ads},
+    //{"ESP32_ADS1220",  &ads1220},
+    //{"ESP32_ADS1262",  &ads1262},
+    {"ESP32_ADS131M02", &ads131},
 
-        {"ESP32_INA226",   &ina226},
+    /*{"ESP32_INA226", &ina226},
 
-        {"ESP32_INA228",   &ina228_40},
-        {"ESP32_INA228_2", &ina228_41},
-        {"ESP32_INA228_3", &ina228_42},
+    {"ESP32_INA228", &ina228_40},
+    {"ESP32_INA228_2", &ina228_41},
+    {"ESP32_INA228_3", &ina228_42}, */
 };
 
 std::vector<EnergyCounter> energyCounters;
 
 
-bool disableWifi = false;
+bool disableWifi =true; // false;
 
 LCD lcd;
 
@@ -71,32 +74,32 @@ unsigned long timeLastWakeEvent = 0;
 [[noreturn]] void nonRealTimeTask(void *arg);
 
 #define RT_CORE 1
-constexpr auto RT_PRIO = 20;  // highest priority is 24
+constexpr auto RT_PRIO = 20; // highest priority is 24
 
 void vTaskGetRunTimeStats();
 
 void setup(void) {
-
     Serial.begin(115200);
-//#if CONFIG_IDF_TARGET_ESP32S3
+    //#if CONFIG_IDF_TARGET_ESP32S3
     // for unknown reason need to initialize uart0 for serial reading (see loop below)
     // Serial.available() works under Arduino IDE (for both ESP32,ESP32S3), but always returns 0 under platformio
     // so we access the uart port directly. on ESP32 the Serial.begin() is sufficient (since it uses the uart0)
     uartInit(0);
-//#endif
+    //#endif
 
     //USBSerial.begin();
     // USB.begin();
 
+    delay(500);
 
     ESP_LOGI("main", "SmartShunt started");
 
 
     Wire.begin(
-            settings.Pin_I2C_SDA,
-            settings.Pin_I2C_SCL,
-            //800000UL
-            1000000UL
+        settings.Pin_I2C_SDA,
+        settings.Pin_I2C_SCL,
+        //800000UL
+        1000000UL
     );
 
     if (!lcd.init()) {
@@ -128,14 +131,12 @@ void setup(void) {
     if (!disableWifi) {
         client.setConnectionParamsV1("http://homeassistant.local:8086", /*db*/ "open_pe", "home_assistant", "h0me");
         client.setWriteOptions(WriteOptions()
-                                       .writePrecision(WritePrecision::MS)
-                                       .batchSize(200)
-                                       .bufferSize(400)
-                                       .flushInterval(1) // uint16! min is 1
-                                       .retryInterval(0) // 0=disable retry
+            .writePrecision(WritePrecision::MS)
+            .batchSize(200)
+            .bufferSize(400)
+            .flushInterval(1) // uint16! min is 1
+            .retryInterval(0) // 0=disable retry
         );
-
-
     }
     // when multiplexing channels, TI recommnads single-shot mode
     for (auto &ec: energyCounters) {
@@ -161,15 +162,15 @@ std::vector<Point> points_frame;
 #define PRINT_MACRO_AT_COMPILE_TIME(var) #var "=`" VALUE(var) "`"
 
 #if CONFIG_ARDUINO_RUNNING_CORE == RT_CORE or CONFIG_ARDUINO_EVENT_RUNNING_CORE == RT_CORE or \
-    CONFIG_ARDUINO_UDP_RUNNING_CORE == RT_CORE or CONFIG_ARDUINO_SERIAL_EVENT_TASK_RUNNING_CORE == RT_CORE
-//#pragma message PRINT_MACRO_AT_COMPILE_TIME(CONFIG_ARDUINO_RUNNING_CORE)
-//#error "arduino runtime is configured to run on RT_CORE CONFIG_ARDUINO_RUNNING_CORE="
+CONFIG_ARDUINO_UDP_RUNNING_CORE == RT_CORE or CONFIG_ARDUINO_SERIAL_EVENT_TASK_RUNNING_CORE == RT_CORE
+    //#pragma message PRINT_MACRO_AT_COMPILE_TIME(CONFIG_ARDUINO_RUNNING_CORE)
+    //#error "arduino runtime is configured to run on RT_CORE CONFIG_ARDUINO_RUNNING_CORE="
 #endif
 
     // CONFIG_ESP_TIMER_ISR_AFFINITY != RT_CORE or CONFIG_ESP_TIMER_TASK_AFFINITY == RT_CORE or
 #if CONFIG_LWIP_TCPIP_TASK_AFFINITY == RT_CORE \
  or CONFIG_PTHREAD_TASK_CORE_DEFAULT == RT_CORE or CONFIG_FMB_PORT_TASK_AFFINITY == RT_CORE or CONFIG_MDNS_TASK_AFFINITY == RT_CORE
-//#error "esp runtime is configured to run on RT_CORE"
+    //#error "esp runtime is configured to run on RT_CORE"
 #endif
 
     while (true) {
@@ -271,7 +272,6 @@ void handleConsoleInput(const String &buf) {
             } else {
                 ESP_LOGW("main", "No INA22x instance!");
             }
-
         } else if (inp == "wifi on") {
             disableWifi = false;
             connect_wifi_async();
@@ -309,7 +309,8 @@ void update() {
 
     if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-    if (nowTime - LastTimeOut > 19e3) { // every 19 ms
+    if (nowTime - LastTimeOut > 19e3) {
+        // every 19 ms
         auto print = nowTime - LastTimePrint > 2000e3;
 
         for (auto &ec: energyCounters) {
@@ -319,7 +320,7 @@ void update() {
                 }
 
                 auto p = ec.summary((nowTime - LastTimeOut), print);
-                if(p.hasFields())
+                if (p.hasFields())
                     points_frame.push_back(p);
 
                 if (print) {
@@ -359,7 +360,8 @@ void update() {
     }
 
     auto eol = strchr(buf, '\n');
-    while (eol) { // enable using break below
+    while (eol) {
+        // enable using break below
         *eol = 0; // terminate string at line break
         buf_pos = 0; // reset buf
         handleConsoleInput(buf);
@@ -401,18 +403,17 @@ const int BUF_SIZE = 1024;
 QueueHandle_t uart_queue;
 
 void uartInit(int port_num) {
-
     uart_config_t uart_config = {
-            .baud_rate = 115200,
-            .data_bits = UART_DATA_8_BITS,
-            .parity    = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // UART_HW_FLOWCTRL_CTS_RTS
-            .source_clk = UART_SCLK_APB,
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // UART_HW_FLOWCTRL_CTS_RTS
+        .source_clk = UART_SCLK_APB,
     };
     int intr_alloc_flags = 0;
 
-// tx=34, rx=33, stack=2048
+    // tx=34, rx=33, stack=2048
 
 
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -427,14 +428,14 @@ void uartInit(int port_num) {
     ESP_ERROR_CHECK(uart_driver_install(port_num, BUF_SIZE * 2, BUF_SIZE * 2, 10, &uart_queue, intr_alloc_flags));
 
 
-/* uart_intr_config_t uart_intr = {
-     .intr_enable_mask = (0x1 << 0) | (0x8 << 0),  // UART_INTR_RXFIFO_FULL | UART_INTR_RXFIFO_TOUT,
-     .rx_timeout_thresh = 1,
-     .txfifo_empty_intr_thresh = 10,
-     .rxfifo_full_thresh = 112,
-};
-uart_intr_config((uart_port_t) 0, &uart_intr);  // Zero is the UART number for Arduino Serial
-*/
+    /* uart_intr_config_t uart_intr = {
+         .intr_enable_mask = (0x1 << 0) | (0x8 << 0),  // UART_INTR_RXFIFO_FULL | UART_INTR_RXFIFO_TOUT,
+         .rx_timeout_thresh = 1,
+         .txfifo_empty_intr_thresh = 10,
+         .rxfifo_full_thresh = 112,
+    };
+    uart_intr_config((uart_port_t) 0, &uart_intr);  // Zero is the UART number for Arduino Serial
+    */
 }
 
 
@@ -460,17 +461,17 @@ void vTaskGetRunTimeStats() {
     if (pxTaskStatusArray != NULL) {
         // Generate raw status information about each task.
         uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
-// For percentage calculations.
+        // For percentage calculations.
         ulTotalRunTime /= 100UL;
 
-// Avoid divide by zero errors.
+        // Avoid divide by zero errors.
         if (ulTotalRunTime > 0) {
-// For each populated position in the pxTaskStatusArray array,
-// format the raw data as human readable ASCII data
+            // For each populated position in the pxTaskStatusArray array,
+            // format the raw data as human readable ASCII data
             for (x = 0; x < uxArraySize; x++)
-// What percentage of the total run time has the task used?
-// This will always be rounded down to the nearest integer.
-// ulTotalRunTimeDiv100 has already been divided by 100.
+                // What percentage of the total run time has the task used?
+                // This will always be rounded down to the nearest integer.
+                // ulTotalRunTimeDiv100 has already been divided by 100.
                 ulStatsAsPercentage = pxTaskStatusArray[x].ulRunTimeCounter / ulTotalRunTime;
 
             auto aff = xTaskGetAffinity(pxTaskStatusArray[x].xHandle);
@@ -479,8 +480,8 @@ void vTaskGetRunTimeStats() {
                 printf("%s (core#%i)\t\t%lu\t\t%lu%%\r\n", pxTaskStatusArray[x].pcTaskName, aff,
                        pxTaskStatusArray[x].ulRunTimeCounter, ulStatsAsPercentage);
             } else {
-// If the percentage is zero here then the task has
-// consumed less than 1% of the total run time.
+                // If the percentage is zero here then the task has
+                // consumed less than 1% of the total run time.
                 printf("%s (core#%i)\t\t%lu\t\t1%%\r\n", pxTaskStatusArray[x].pcTaskName, aff,
                        pxTaskStatusArray[x].ulRunTimeCounter);
             }
@@ -489,6 +490,6 @@ void vTaskGetRunTimeStats() {
         }
     }
 
-// The array is no longer needed, free the memory it consumes.
+    // The array is no longer needed, free the memory it consumes.
     vPortFree(pxTaskStatusArray);
 }

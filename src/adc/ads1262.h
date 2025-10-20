@@ -93,7 +93,7 @@ public:
         auto volt_V = (resolution) * (float) sads1262Count;     // voltage = resolution * adc count
         auto volt_mV = volt_V * 1000;                           // voltage in mV
 
-        lastSample.u = -volt_V * (205.f / 5.f);
+        lastSample.u = -volt_V * (102.37f / 2.37f);
 
 
         //auto v = ads.getVoltage_mV();

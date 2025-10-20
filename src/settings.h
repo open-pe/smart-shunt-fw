@@ -4,30 +4,49 @@
 
 #if CONFIG_IDF_TARGET_ESP32S3
 struct settings_t_01 {
-    // uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2; // fugu
-    //uint8_t Pin_INA22x_ALERT = 40;
-    //uint8_t Pin_INA22x_ALERT = 41; // fugu2
-
-    uint8_t Pin_I2C_SDA = 15, Pin_I2C_SCL = 16;
-    uint8_t Pin_INA22x_ALERT = 7;
+    //uint8_t Pin_I2C_SDA = 15, Pin_I2C_SCL = 16;
+     //uint8_t Pin_INA22x_ALERT = 7;
     uint8_t Pin_INA22x_ALERT2 = 6;
     uint8_t Pin_INA22x_ALERT3 = 5;
+
+    //uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
 };
 
+
+
 struct settings_t {
-    uint8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
+#ifdef FMETAL
+    uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
+#else
+    int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
     uint8_t Pin_INA22x_ALERT = 1;
+#endif
     uint8_t Pin_INA22x_ALERT2 = 4;
     uint8_t Pin_INA22x_ALERT3 = 5;
 
+
     uint8_t Pin_ADS1220_CS = 7;
     uint8_t Pin_ADS1220_DRDY = 6;
-
     uint8_t Pin_ADS1262_START = 8;
-
     uint8_t Pin_ADS1262_PWDN = 9; //
 
 
+    /*
+    //uint8_t Pin_ADS131_START = -1;
+    uint8_t Pin_ADS131_Clk = 40; //SCK
+    uint8_t Pin_ADS131_Miso = 41; // SDO
+    uint8_t Pin_ADS131_Mosi = 42; // SDI on click
+    uint8_t Pin_ADS131_Cs = 21; // chip select
+    uint8_t Pin_ADS131_Drdy = 47;
+    uint8_t Pin_ADS131_Rst = 14; */
+
+    uint8_t Pin_ADS131_Clk = 13; //SCK
+    uint8_t Pin_ADS131_Miso = 12; // SDO
+    uint8_t Pin_ADS131_Mosi = 11; // SDI on click
+    uint8_t Pin_ADS131_Cs = 7; // chip select
+    uint8_t Pin_ADS131_CsClk = 5; // CS for LTC clock
+    uint8_t Pin_ADS131_Drdy = 6;
+    uint8_t Pin_ADS131_Rst = 9;
 };
 #else
 struct settings_t_01 {
