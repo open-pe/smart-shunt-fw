@@ -28,3 +28,7 @@ ADS9212
 
 gain drift
 gain error
+
+
+- EMF issues with solder jumpers and input resistors
+- SPI version for speed

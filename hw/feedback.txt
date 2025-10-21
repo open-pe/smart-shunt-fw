@@ -1,0 +1,6 @@
+* bigger screw terminal holes
+* banana footprint?
+* Y14880R00200B9R footprint?
+* and wslp2726l70000FEA
+* battery LDO 1uF for 100nf?
+i2c iso pull ups

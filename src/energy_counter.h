@@ -111,7 +111,7 @@ public:
 
             sampleQueue.emplace(s);
             auto qs = sampleQueue.size_approx();
-            if(qs > 250 && qs < 300) {
+            if(qs > 250 && qs < 355) {
                 ESP_LOGW("ec", "Sample queue is growing beyond 250: %u", qs);
             }
 

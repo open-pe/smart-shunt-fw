@@ -57,7 +57,7 @@ bool readRegister(uint16_t addr, uint8_t reg, uint16_t *regValue) {
     success = Wire.write(reg) == 1;
     success &= Wire.endTransmission(false) == 0;
     success &= Wire.requestFrom(static_cast<uint8_t>(addr), static_cast<uint8_t>(2)) == 2;
-//i2cErrorCode = !success;
+    //i2cErrorCode = !success;
     if (Wire.available() == 2) {
         MSByte = Wire.read();
         LSByte = Wire.read();
@@ -143,27 +143,11 @@ public:
 
     uint8_t getStorageId() const override { return storageId; };
 
-    explicit PowerSampler_INA228(uint8_t i2c_addr) : storageId{(uint8_t) (2 + i2c_addr - I2C_A0)}, i2c_addr(i2c_addr) {}
+    explicit PowerSampler_INA228(uint8_t i2c_addr) : storageId{(uint8_t) (2 + i2c_addr - I2C_A0)}, i2c_addr(i2c_addr) {
+    }
 
-
-    bool init() {
-
-        if (ina228_instance[i2c_addr - I2C_A0]) {
-            return false;
-        }
-
-
-        ESP_LOGI("ina228", "Manufacturer ID:    0x%04X",
-                 i2c_read_short(i2c_port, i2c_addr, INA228_MANUFACTURER_ID));
-        auto deviceId = i2c_read_short(i2c_port, i2c_addr, INA228_DEVICE_ID);
-        ESP_LOGI("ina228", "Device ID:          0x%04X", deviceId);
-
-        if (deviceId != 0x2280 && deviceId != 0x2281) {
-            ESP_LOGW("ina228", "This is not an INA228 device!");
-            return false;
-        }
-
-        // reset
+    bool resetPeriphery() {
+ // reset
         if (i2c_write_short(i2c_port, i2c_addr, INA228_CONFIG, 0x8000) != ESP_OK) {
             return false;
         }
@@ -171,7 +155,7 @@ public:
         int inaAddrIdx = i2c_addr - I2C_A0;
 
 
-        float resistor = 2e-3f, range = 38.0f;// default: vishay 2mOhm, .1%, 3W
+        float resistor = 2e-3f, range = 38.0f; // default: vishay 2mOhm, .1%, 3W
         if (readCalibrationFactors(8 + inaAddrIdx, resistor, range)) {
             ESP_LOGI("ina228", "Restore resistor/range settings: %.6f/%.6f", resistor, range);
         } else {
@@ -181,9 +165,9 @@ public:
 
 
         std::array<uint8_t, 3> alertPins = {
-                settings.Pin_INA22x_ALERT,
-                settings.Pin_INA22x_ALERT2,
-                settings.Pin_INA22x_ALERT3
+            settings.Pin_INA22x_ALERT,
+            settings.Pin_INA22x_ALERT2,
+            settings.Pin_INA22x_ALERT3
         };
         std::array<void (*)(void), 3> alerts = {&ina228_alert0, &ina228_alert1, &ina228_alert2};
 
@@ -199,9 +183,10 @@ public:
         constexpr auto CT_50u = 0x0, CCT_84u = 0x1, CCT_150u = 0x2, CT_280u = 0x3,
                 CT_540u = 0x4, CT_1052u = 0x5, CT_4120u = 0x7;
 
+        constexpr auto MODE_Field_OS = 12;
         if (acFreq) {
             // AC: https://www.ti.com/lit/an/slaa638a/slaa638a.pdf#page=10
-            adc_config |= 0xB << 12; // MODE   = Continuous shunt and bus voltage
+            adc_config |= 0xB << MODE_Field_OS; // MODE   = Continuous shunt and bus voltage
 
             // 280us is the shortest conversion time with i2c bus @ 800 khz
             // 150us is almost doable, reaches sps=41.2 instead of 50
@@ -216,17 +201,25 @@ public:
 
             // sps = 1/(84us+84us) * avgNum
         } else {
-            adc_config |= 0xF << 12; // MODE   = Continuous shunt, bus voltage and temperature
+            bool measureCurrent = false;
 
-            adc_config |= CT_1052u << 9; // VBUSCT  = bus voltage conversion time
-            adc_config |= CT_1052u << 6; // VSHCT   = shunt voltage conversion time
+            adc_config |= (measureCurrent ? 0xF : 0x9) << MODE_Field_OS; // MODE   = Continuous shunt, bus voltage and temperature
+
+            // only voltage
+            if (!measureCurrent) {
+                adc_config |= CT_4120u << 9; // VBUSCT
+            } else {
+                adc_config |= CT_1052u << 9; // VBUSCT  = bus voltage conversion time
+                adc_config |= CT_4120u << 6; // VSHCT   = shunt voltage conversion time
+            }
             adc_config |= CCT_84u << 3; // temperature conversion time
             // total period : 8324us => 120 Hz
             // total period : 2*1052+84us => 457 Hz
         }
 
         // averaging
-        adc_config |= 0x0 << 0; // AVG     = (0x0:1, 0x1:4)
+        constexpr auto AVG_0 = 0x0, AVG_4 = 0x1;
+        adc_config |= AVG_0 << 0;
         // total 1/((1052-6+1052-6) * 1)
 
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_ADC_CONFIG, adc_config));
@@ -235,6 +228,29 @@ public:
         uint16_t diagAlrt = 0;
         diagAlrt |= 0x1 << 14; // CNVR: enable conversion ready flag on ALERT pin
         ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_DIAG_ALRT, diagAlrt));
+
+        return true;
+    }
+
+    bool init() {
+        if (ina228_instance[i2c_addr - I2C_A0]) {
+            return false;
+        }
+
+
+        ESP_LOGI("ina228", "Manufacturer ID:    0x%04X",
+                 i2c_read_short(i2c_port, i2c_addr, INA228_MANUFACTURER_ID));
+        auto deviceId = i2c_read_short(i2c_port, i2c_addr, INA228_DEVICE_ID);
+        ESP_LOGI("ina228", "Device ID:          0x%04X", deviceId);
+
+        if (deviceId != 0x2280 && deviceId != 0x2281) {
+            ESP_LOGW("ina228", "This is not an INA228 device!");
+            return false;
+        }
+
+        if (!resetPeriphery()) {
+            return false;
+        }
 
         ina228_instance[i2c_addr - I2C_A0] = this;
 
@@ -344,7 +360,8 @@ public:
                 float u, i;
                 //read_voltage_current(u, i);
                 u = read_voltage();
-                i = read_current();
+                bool measureCurrent = false;
+                i = measureCurrent ? read_current() : NAN;
                 lastSample.u += u;
                 lastSample.i += i;
                 lastSample.p_ += u * i;
@@ -426,35 +443,35 @@ public:
 
         return true;
 
-/*
-        //i2c_read_buf(i2c_port, i2c_addr, INA228_VBUS, (uint8_t *) &iBusVoltage, 3);
+        /*
+                //i2c_read_buf(i2c_port, i2c_addr, INA228_VBUS, (uint8_t *) &iBusVoltage, 3);
 
-        if(!readBuf(i2c_addr, INA228_VBUS,  (uint8_t *) &iBusVoltage, 3)) {
-            ESP_LOGE("i2c", "err reading voltage");
-            return NAN;
-        }
-
-
-        iBusVoltage = __bswap32(iBusVoltage & 0xFFFFFF) >> 12;
-        if (sign) iBusVoltage += 0xFFF00000;
-        fBusVoltage = (iBusVoltage) * 0.0001953125;
-
-        return (fBusVoltage);
+                if(!readBuf(i2c_addr, INA228_VBUS,  (uint8_t *) &iBusVoltage, 3)) {
+                    ESP_LOGE("i2c", "err reading voltage");
+                    return NAN;
+                }
 
 
+                iBusVoltage = __bswap32(iBusVoltage & 0xFFFFFF) >> 12;
+                if (sign) iBusVoltage += 0xFFF00000;
+                fBusVoltage = (iBusVoltage) * 0.0001953125;
 
-
-        //i2c_read_buf(i2c_port, i2c_addr, INA228_CURRENT, (uint8_t *) &iCurrent, 3);
-        // faster:
-        if(!readBuf(i2c_addr, INA228_CURRENT,  (uint8_t *) &iCurrent, 3)) {
-            ESP_LOGE("i2c", "err reading current");
-            return NAN;
-        }
+                return (fBusVoltage);
 
 
 
-        return (fCurrent);
-        */
+
+                //i2c_read_buf(i2c_port, i2c_addr, INA228_CURRENT, (uint8_t *) &iCurrent, 3);
+                // faster:
+                if(!readBuf(i2c_addr, INA228_CURRENT,  (uint8_t *) &iCurrent, 3)) {
+                    ESP_LOGE("i2c", "err reading current");
+                    return NAN;
+                }
+
+
+
+                return (fCurrent);
+                */
     }
 
     float read_dietemp() {
@@ -472,7 +489,6 @@ public:
     }
 
     Sample getSample() {
-
         lastSample.setTimeNow();
 
         if (acFreq) {
@@ -484,7 +500,7 @@ public:
             lastSample.p_ *= n;
         } else {
             lastSample.u = read_voltage();
-            lastSample.i = read_current();
+            lastSample.i = NAN; // read_current();
             lastSample.temp = read_dietemp();
         }
 

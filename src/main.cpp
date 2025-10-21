@@ -51,19 +51,19 @@ std::map<std::string, PowerSampler *> samplers{
     //{"ESP32_ADS", &ads},
     //{"ESP32_ADS1220",  &ads1220},
     //{"ESP32_ADS1262",  &ads1262},
-    {"ESP32_ADS131M02", &ads131},
+    //{"ESP32_ADS131M02", &ads131},
 
-    /*{"ESP32_INA226", &ina226},
+    //{"ESP32_INA226", &ina226},
 
     {"ESP32_INA228", &ina228_40},
     {"ESP32_INA228_2", &ina228_41},
-    {"ESP32_INA228_3", &ina228_42}, */
+    {"ESP32_INA228_3", &ina228_42},
 };
 
 std::vector<EnergyCounter> energyCounters;
 
 
-bool disableWifi =true; // false;
+bool disableWifi =false;
 
 LCD lcd;
 
@@ -98,8 +98,8 @@ void setup(void) {
     Wire.begin(
         settings.Pin_I2C_SDA,
         settings.Pin_I2C_SCL,
-        //800000UL
-        1000000UL
+        400000UL
+        //1000000UL
     );
 
     if (!lcd.init()) {
@@ -201,7 +201,8 @@ void handleConsoleInput(const String &buf) {
         } else if (inp.startsWith("calibrate ")) {
             // calibrate ESP32_INA228 I 1.0028870
             // calibrate ESP32_INA228 I 1.00223895 // rsn20-50 with ref=3458a (2025-10) 1.1A
-            // calibrate ESP32_INA228 U 1.00015655 // 60v
+            // calibrate ESP32_INA228_2 U 1.00// 60v
+            // calibrate ESP32_INA228 U 1.00
             // calibrate ESP32_INA228 I *0.9997247927345282
             // calibrate ESP32_INA228 U *1.000983433436737
             // calibrate ESP32_ADS U *1.0003957914179227

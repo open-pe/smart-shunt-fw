@@ -11,6 +11,21 @@
 across devices the curve looks pretty much the same:
 ![inl2.png](inl2.png)
 
+
+going up to 82V reveals more linear error (the DMM6500 continues to do its job very well):
+![ina228_inl_.png](ina228_inl_80v.png)
+
+notice these measurements where only taken for 90s each with some noise on the power supply.
+
+here is a measurement with another less noisy power supply and 900s (15min) measurements:
+TODO 
+
+this looks like we can do a polyfit, and indeed it helps.
+
+
+
+
+
 # Noise
 
 ![img_7.png](img_7.png)

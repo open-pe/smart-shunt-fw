@@ -176,6 +176,17 @@ reduces temperature rise.
 | Riedon RSN-100-100B | 1  | 10W  | 0.1%  | 15ppm  | $60   |
 | RSA-50-100          | 1  | 5W   | 0.25% | 15ppm  | $30   |
 
+## for battery monitoring
+
+* SMD chip resistors are way cheaper (such as HoLRS5930-7W-0.25mR-1% )
+
+|                                | mΩ | I(A) | tol |   |   | px |
+|--------------------------------|----|------|-----|---|---|----|
+| Milliohm HoFL2-75A-75mV-0.5%   | 1  | 75   | .5% |   |   | $5 |
+| RESI ARCS8518JL100A9           | .1 |      | .5% |   |   |    |
+| Milliohm HoFL3-8518-A-100uΩ-1% | .1 |      |     |   |   |    |
+| HoFL2-200A-60mV-0.5%-HS        | .3 | 200  |     |   |   |    |
+
 # 30A
 
 ina228 has a shunt voltage range of 40.96 and 163.84 mV.
