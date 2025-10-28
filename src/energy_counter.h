@@ -177,11 +177,11 @@ public:
         Point point("smart_shunt");
         point.addTag("device", name.c_str());
         if(nSamples != NSamplesLastSummary) {
-            point.addField("I", i_mean, 6);
-            point.addField("U", u_mean, 6);
+            point.addField("I", i_mean, 8);
+            point.addField("U", u_mean, 8);
             point.addField("I_max", i_max, 3);
             point.addField("U_max", u_max, 3);
-            point.addField("P", p_mean, 6);
+            point.addField("P", p_mean, 7);
             point.addField("E", energy, 4);
             point.addField("T", temp_mean, 2);
             if (maxDt > maxDtReported) {
