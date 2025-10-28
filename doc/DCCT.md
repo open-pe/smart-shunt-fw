@@ -41,7 +41,7 @@ https://testequipment.center/Product_Documents/Tegam-SR1-100-Specifications-F898
 # Danisense
 
 https://www.eevblog.com/forum/metrology/dccts-(ultrastab-for-example)-infos-and-workingdefective-devices-sought/
-![img_8.png](img_8.png)
+![img_8.png](img/img_8.png)
 
 
 # DCCT Example:
@@ -49,7 +49,7 @@ https://www.eevblog.com/forum/metrology/dccts-(ultrastab-for-example)-infos-and-
 Choose ULTRASTAB 866-600 because it is cheap on ebay. The current range of interest is 0-40A.
 To cover the range of the DCCT, we use 10 windings, so at 40A the DCCT will measure 400A and outputs 267 mA.
 
-![img_9.png](img_9.png)
+![img_9.png](img/img_9.png)
 
 We want to capture the signal with an ADC, so keep in mind the range. We choose ADS1262-32bit-38kSPS, because
 there's a breakout board and it has an internal PGA and a secondary 24bit aux ADC.

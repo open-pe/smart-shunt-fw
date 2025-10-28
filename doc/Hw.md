@@ -46,7 +46,7 @@ https://edms.cern.ch/ui/file/2820336/1/EDA-04061-V4-1_sch.pdf
 
 # amp gain desing
 assuming a burden voltage of 170mV
-![img_16.png](../img_16.png)
+![img_16.png](img/2/img_16.png)
 
 - connect AIN- to Vrefp
 - AIN+ is now our single-ended input

@@ -21,10 +21,10 @@ two stage buffer:
 | OPA2172       |              |                       |                      |      | 100M   | 30             |                              |   |   |                                                                                   |
 |   LTC2057            |              |                       |                      |      |        |                |                              |   |   |                                                                                   |
 
-![img_13.png](img_13.png)
+![img_13.png](img/img_13.png)
 
 the HPM7177 reference:
-![img_14.png](img_14.png)
+![img_14.png](img/img_14.png)
 
 * ADA4522-1ARMZ
 * AD8065ART
@@ -53,4 +53,4 @@ are much less susceptible to both problems."
 
 
 
-![img_15.png](img_15.png)
+![img_15.png](img/img_15.png)

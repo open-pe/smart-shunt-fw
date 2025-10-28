@@ -14,7 +14,7 @@
 * generally no noise issue
 
 
-![img.png](img.png)
+![img.png](img/img.png)
 * INA228 devices appear to have similar distortion
 * ADS1220 has a lower INL
   * 5k/200k voltage divider
@@ -27,7 +27,7 @@ monolythic resistor network
 monolythic thin film array
 
 
-![img_7.png](img_7.png)
+![img_7.png](img/img_7.png)
 https://youtu.be/D28uSzCs7-k?si=xbc2kDCH82Io2PJb&t=880
 vhp101
 

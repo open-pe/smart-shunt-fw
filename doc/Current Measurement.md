@@ -23,12 +23,12 @@ Here's an experiment:
 This 2.54mm pitch connector is placed between a DM6500 and a 40mV voltage source.
 (The 40mV come from a 2mΩ current sense resistor).
 A heat gun set to 100°C is pointed at the connector, with T_Ambient = 20°C.
-![img_2.png](img_2.png)
+![img_2.png](img/img_2.png)
 
 The orange line is the voltage measured by an INA228 chip on the same board with the resistor.
 The green line is the voltage from the DM6500. Heat was added where the green line abruptly falls (17:49:07).
 At 17:49:45 the hot air was removed.
-![img_1.png](img_1.png)
+![img_1.png](img/img_1.png)
 
 * A temp rise by 80°C adds 0.15% error
 * the connector in the test has a temperature drift ~20ppm/°C at 40mV
@@ -36,7 +36,7 @@ At 17:49:45 the hot air was removed.
 * connectors have a temp drift (compare to Seebeck effect, [thermocouples](https://en.wikipedia.org/wiki/Thermocouple
 
 Here's another example:
-![img_5.png](img_5.png)
+![img_5.png](img/img_5.png)
 
 Two smart-shunt boards with ina228, supply and i2c isolated, the left board has a current sense resistor populated (
 2mΩ).
@@ -47,7 +47,7 @@ jumper cable. The connector pins (PRPC040SACN-RC) are made of brass with flash g
 layer). The jumper wire terminals have a tin plating (similar to
 JST [eXH](https://www.jst-mfg.com/product/pdf/eng/eXH.pdf), see below).
 
-![img_3.png](img_3.png)
+![img_3.png](img/img_3.png)
 The yellow curve ist what the board on the right (ESP32_INA228) measured over time and is drifting from the jumper
 cables. Peak-to-peak: 4mA which is 8µV here.
 * Orange: what the board on the left measured.
@@ -55,7 +55,7 @@ cables. Peak-to-peak: 4mA which is 8µV here.
 * Green: DM6500 measuring voltage across a Riedon RSN-20-50B (20A/50mV). All devices measure the same current, which was ~300µA here.
 
 I then replaced the jumper cable with wires soldered to the PCBs:
-![img_4.png](img_4.png)
+![img_4.png](img/img_4.png)
 
 Tada, the drift is gone!
 
@@ -66,7 +66,7 @@ The INA228 Datasheet says 1µV max.
 
 
 A smoothin filter:
-![img_6.png](img_6.png)
+![img_6.png](img/img_6.png)
 
 Reveals the `ESP32_INA228` and the `ESP32_INA228_3` both have a AC component with a period of 6 seconds.
 TODO
