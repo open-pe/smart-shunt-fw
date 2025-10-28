@@ -22,6 +22,7 @@
 
 #include "energy_counter.h"
 #include "util.h"
+#include "adc/tmp117.h"
 
 
 InfluxDBClient client;
@@ -37,6 +38,7 @@ PowerSampler_INA228 ina228_41{0x41};
 PowerSampler_INA228 ina228_42{0x42};
 // PowerSampler_ESP32 esp_adc;
 
+PowerSampler_TMP117 tmp117{0x48};
 
 unsigned long LastTimeOut = 0;
 unsigned long LastTimePrint = 0;
@@ -58,6 +60,7 @@ std::map<std::string, PowerSampler *> samplers{
     {"ESP32_INA228", &ina228_40},
     {"ESP32_INA228_2", &ina228_41},
     {"ESP32_INA228_3", &ina228_42},
+    {"TMP117", &tmp117},
 };
 
 std::vector<EnergyCounter> energyCounters;
