@@ -320,13 +320,18 @@ public:
 
     bool inOverflow = false;
 
+    unsigned long tLastDataCheck = 0;
+
     bool hasData() override {
         if (!new_data) {
             notification.subscribe();
-            if (!notification.wait(1) || !new_data)
-                return false;
+            if (!notification.wait(1) || !new_data) {
+                if (micros() - tLastDataCheck < 50000)
+                    return false; // every 50ms read the register regardless if interrupt happened (maybe we missed it?)
+            }
         }
 
+        tLastDataCheck = micros();
         new_data = false;
 
         //auto diagAlrt = i2c_read_short(i2c_port, i2c_addr, INA228_DIAG_ALRT);
