@@ -36,9 +36,12 @@ or
 
 Supported ADC:
 
-* ADS1115 / ADS 1015 (with SSA-100)
-* INA226
-* INA228
+* ADS1115 / ADS 1015 (for example with SSA-100)
+* INA226 (16-bit)
+* INA228 (20-bit, 85V)
+* ADS1262 (32-bit)
+* ADS131M0x (24-bit sim. sampling)
+* TODO ADS127L11
 
 On startup it detects the ADCs on the I2C bus using there default addresses.
 
@@ -72,9 +75,9 @@ https://accelconf.web.cern.ch/p07/papers/MOPAN071.pdf
 => Bulk Metal Foil or “foil”.
 
 https://accelconf.web.cern.ch/p77/PDF/PAC1977_1810.PDF
-![img_37.png](img_37.png)
-![img_35.png](img_35.png)
-![img_36.png](img_36.png)
+![img_37.png](doc/img/img_37.png)
+![img_35.png](doc/img/img_35.png)
+![img_36.png](doc/img/img_36.png)
 
 10A <1ppm reference https://cds.cern.ch/record/643293/files/cer-002399330.pdf
 
@@ -135,7 +138,7 @@ Choose Chassis Mount resistor, suchs as the 1mOhm RSN-100-100B with 15ppm/k
 
 ## THT Resistors
 
-![img_7.png](img_7.png)
+![img_7.png](doc/img/2/img_7.png)
 
 Riedon PCS (10ppm, 40W)
 PCS-0R001D1
@@ -157,15 +160,15 @@ These commonly have lower tolerance and lower temp drift as compared to chip mou
 The larger surface of the resistive material and larger terminals decreases thermal resistance to ambient, which
 reduces temperature rise.
 
-| ![img_3.webp](riedon-rsn-temp.webp) |
+| ![img_3.webp](doc/img/riedon-rsn-temp.webp) |
 |:-----------------------------------:|
 |  Manganin (Riedon RSN, RSW and RS)  |
 
-![img.webp](riedon-rsw.webp)
+![img.webp](doc/img/riedon-rsw.webp)
 
-![img_1.webp](riedon-rs.webp)
+![img_1.webp](doc/img/riedon-rs.webp)
 
-![img_2.webp](riedon-rsn.webp)
+![img_2.webp](doc/img/riedon-rsn.webp)
 
 |                     | mΩ | P    | Tol   | TCR/K  | px    |
 |---------------------|----|------|-------|--------|-------|
@@ -236,7 +239,7 @@ https://www.analog.com/media/en/technical-documentation/data-sheets/ad637.pdf
 * log-antilog
 
 Thermal RMS Converters for ultimate
-![img_42.png](img_42.png)
+![img_42.png](doc/img/img_42.png)
 
 # EVM430
 
@@ -321,7 +324,7 @@ calibrate ESP32_ADS1262 U 1.01045
 
 ### ADS131B23
 
-![img_14.png](img_14.png)
+![img_14.png](doc/img/2/img_14.png)
 
 # Going Further
 
@@ -364,8 +367,8 @@ ADS131B23:
 | LTC6652      | 5ppm       |          | 0.05%            |                                                      |
 | LTZ1000      | 0.05ppm/°C | 1.2µVP-P |                  | for calibrators                                      |
 
-![img_23.png](img_23.png)
-![img_24.png](img_24.png)
+![img_23.png](doc/img/img_23.png)
+![img_24.png](doc/img/img_24.png)
 https://youtu.be/upTgM_S5rAQ?si=JQq38q3_NsaYmSlv&t=2213
 
 Fluke732A
@@ -376,14 +379,14 @@ Reference of all References
 https://hackaday.com/2015/12/03/nuts-about-volts/
 https://www.ptb.de/cms/service-seiten/news/forschungsnachricht.html?tx_news_pi1%5Bnews%5D=12912&tx_news_pi1%5Bcontroller%5D=News&tx_news_pi1%5Baction%5D=detail&tx_news_pi1%5Bday%5D=11&tx_news_pi1%5Bmonth%5D=10&tx_news_pi1%5Byear%5D=2023&cHash=8994d84faf7ba52fd97fa9559617df21
 
-![img_33.png](img_33.png)
-![img_34.png](img_34.png)
+![img_33.png](doc/img/img_33.png)
+![img_34.png](doc/img/img_34.png)
 
 # Voltage Divider
 
 VHD200 (digikey 15 weeks )
 100mW. for measuring 80V at 2V ADC min 64k r_total
-![img_25.png](img_25.png)
+![img_25.png](doc/img/img_25.png)
 
 # Amps
 
@@ -401,7 +404,7 @@ https://www.mikroe.com/adc-15-click
 
 https://www.waveshare.com/18983.htm (ADS1263)
 
-MIKROE-4743 (ADS1262) ![img_15.png](img_15.png)
+MIKROE-4743 (ADS1262) ![img_15.png](doc/img/2/img_15.png)
 
 # Misc
 
@@ -485,7 +488,7 @@ using DCL541A01 (150Mbps, 3f/1r channels, default Low out)
 
 https://www.electronics-lab.com/project/4-channel-spi-interface-isolator-with-three-forward-and-one-reverse-direction-channels/
 based on ISO77418 (100Mbps, 5000V iso, 3f/1r ch, default High out)
-![img_6.png](img_6.png)
+![img_6.png](doc/img/2/img_6.png)
 
 # Tools
 
@@ -498,10 +501,10 @@ https://www.digikey.de/en/products/detail/dfrobot/FIT0845/15848056
 https://www.amazon.de/sourcing-map-selbstklebende-Heizelemente-Heizstreifen/dp/B0CTT8DCNG?mcid=2e62e8e0dd8637f59241dbf166a54a3d&th=1&psc=1&hvocijid=11518062653062946358-B0CTT8DCNG-&hvexpln=75&tag=googshopde-21&linkCode=df0&hvadid=696184104678&hvpos=&hvnetw=g&hvrand=11518062653062946358&hvpone=&hvptwo=&hvqmt=&hvdev=c&hvdvcmdl=&hvlocint=&hvlocphy=9043874&hvtargid=pla-2281435176898&psc=1&gad_source=1
 https://electronics.stackexchange.com/questions/631263/using-mosfet-as-a-voltage-controlled-current-source
 
-![img_11.png](img_11.png)
+![img_11.png](doc/img/2/img_11.png)
 https://www.digikey.de/en/products/detail/innovative-sensor-technology-usa-division/HST-P11R0-1010-63A-2L-020/21407273
 
-![img_12.png](img_12.png)
+![img_12.png](doc/img/2/img_12.png)
 https://www.digikey.de/en/products/detail/riedon-products-by-bourns/PTCA-40/10271325
 
 # Peltier
@@ -517,7 +520,7 @@ heat anyway and it might cause unnecessary switching noise.
 
 A linear control loop appear to make most sense. There are circuits like
 
-![img_13.png](img_13.png)
+![img_13.png](doc/img/2/img_13.png)
 
 the NTC is a LC471F3K, nominal 470 X at 25 °C, which acts as a sensor and heating element.
 
@@ -558,16 +561,16 @@ even more error for energy measurement.
 # Measuring Single-Ended Signals with Diff-ADC
 
 https://www.ti.com/lit/an/sbaa133a/sbaa133a.pdf?ts=1738999464967
-![img_16.png](img_16.png)
+![img_16.png](doc/img/2/img_16.png)
 
 THS4551
-![img_20.png](img_20.png)
+![img_20.png](doc/img/img_20.png)
 
-![img_17.png](img_17.png)
-![img_18.png](img_18.png)
-![img_19.png](img_19.png)
+![img_17.png](doc/img/img_17.png)
+![img_18.png](doc/img/img_18.png)
+![img_19.png](doc/img/img_19.png)
 
-![img_38.png](img_38.png)
+![img_38.png](doc/img/img_38.png)
 LTC2057 + LTC2508-32
 
 # Current sense ampplifiers
@@ -581,8 +584,8 @@ MCP6C02
 - high CMRR
 - high input impedance, low output impedance
 
-![img_21.png](img_21.png)
-![img_22.png](img_22.png)
+![img_21.png](doc/img/img_21.png)
+![img_22.png](doc/img/img_22.png)
 
 https://www.ti.com/lit/ds/symlink/ina118.pdf?HQS=dis-dk-null-digikeymode-dsf-pf-null-wwe&ts=1739209355414&ref_url=https%253A%252F%252Fwww.ti.com%252Fgeneral%252Fdocs%252Fsuppproductinfo.tsp%253FdistId%253D10%2526gotoUrl%253Dhttps%253A%252F%252Fwww.ti.com%252Flit%252Fgpn%252Fina118#page=4&zoom=100,0,96
 https://www.ti.com/solution/battery-cell-formation-test-equipment?variantid=34913&subsystemid=292016
@@ -609,9 +612,9 @@ https://www.ti.com/solution/battery-cell-formation-test-equipment?variantid=3491
 | LTC6363       |     |             | 0.2µVpp, DC to 10Hz (Typ)       |                      | 0.015μV/°C         |                           |                   | 150db (typ)     |                       |
 | MCP6C02(G=20) |     |             | <=1Hz:0.48μVpp, 1.54            | G=20: 16µV           | 0.09 µV/°C         | 5ppm                      | 50ppm/100ppm      |                 | current sense amp     |
 
-![img_30.png](img_30.png)
-![img_31.png](img_31.png)
-![img_32.png](img_32.png)
+![img_30.png](doc/img/img_30.png)
+![img_31.png](doc/img/img_31.png)
+![img_32.png](doc/img/img_32.png)
 
 LNA10 (OPA4727) see https://www.youtube.com/watch?v=NoCp6cz32yo
 Stanford Research SR560
@@ -619,7 +622,7 @@ Stanford Research SR560
 https://www.thorlabs.com/thorproduct.cfm?partnumber=AMP100
 https://github.com/marcoreps/low_noise_amplifier
 
-![img_39.png](img_39.png)
+![img_39.png](doc/img/img_39.png)
 LTC2057HV + LT1991A
 
 # Op Amps
@@ -701,11 +704,11 @@ https://www.ab-precision.de/products/cables-accessories/
 https://www.ni.com/docs/de-DE/bundle/ni-switch/page/thermal-emf-and-offset-voltage.html
 
 https://www.youtube.com/watch?v=EW58sm8ciWk
-![img_26.png](img_26.png)
-![img_27.png](img_27.png)
+![img_26.png](doc/img/img_26.png)
+![img_27.png](doc/img/img_27.png)
 https://www.youtube.com/watch?v=KiYhEP6m7Pc
 
-![img_29.png](img_29.png)
+![img_29.png](doc/img/img_29.png)
 https://dam-assets.fluke.com/s3fs-public/p18-21.pdf
 
 https://www.eevblog.com/forum/metrology/binding-postsbanana-sockets-cleaning-on-dmmsmetrology-lab-gear/
@@ -723,7 +726,7 @@ Thermal EMF to copper wire ~2µV, at 50mV FSR this is 40ppm.
 # Gold Plated Banana Plugs
 
 CT3099
-![img_28.png](img_28.png)
+![img_28.png](doc/img/img_28.png)
 
 [Pomona 4897-2](https://www.digikey.de/en/products/detail/pomona-electronics/4897-2/737024)
 
@@ -742,7 +745,7 @@ CTM-75K
 
 https://xdevs.com/article/inlperf/
 
-![img_40.png](img_40.png)
+![img_40.png](doc/img/img_40.png)
 
 # CERN HPM7177 (open soruce) DMM
 
@@ -752,7 +755,7 @@ effective resolution >23 bits for BW < 10 Hz
 temperature drift (offset and gain) <0.1 ppm/°C from 20°C to 40°C
 INL <0.6 ppm (0 to +10 V)
 
-![img_41.png](img_41.png)
+![img_41.png](doc/img/img_41.png)
 
 # Notes on Precision
 

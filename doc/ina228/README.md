@@ -1,4 +1,11 @@
 
+* datasheet says INL(typ) = 20ppm
+* Linearity can be improved with a second order polynom (~2ppm INL)
+* polynom is the same for the three tested chips
+* non-linearity does not appear to drift
+* gain drifts, need to calibrate gain before each measurement
+* offset didnt drift across measurements
+
 # INL
 ![ina228_inl.png](ina228_inl.png)
 

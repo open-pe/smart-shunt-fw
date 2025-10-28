@@ -2,7 +2,13 @@
 <project version="4">
   <component name="SshConfigs">
     <configs>
-      <sshConfig authType="PASSWORD" host="192.168.178.180" id="1bfa998d-dcbe-409c-854e-7531bb8ecb6f" port="22" nameFormat="DESCRIPTIVE" username="fab" useOpenSSHConfig="true" />
+      <sshConfig authType="PASSWORD" host="rpi.local" id="1bfa998d-dcbe-409c-854e-7531bb8ecb6f" port="22" nameFormat="DESCRIPTIVE" username="fab" useOpenSSHConfig="true" />
+      <sshConfig authType="PASSWORD" host="raspberrypi.local" id="62afc891-2837-425f-8ccf-5cd994110e0f" port="22" customName="fab@raspberrypi.local" nameFormat="CUSTOM" username="fab" useOpenSSHConfig="true">
+        <option name="customName" value="fab@raspberrypi.local" />
+      </sshConfig>
+      <sshConfig authType="PASSWORD" host="10.243.4.4" id="8bfa397f-17bd-485a-84c8-b71e31395fca" port="22" customName="rpi-lab-zto" nameFormat="CUSTOM" username="fab" useOpenSSHConfig="true">
+        <option name="customName" value="rpi-lab-zto" />
+      </sshConfig>
     </configs>
   </component>
 </project>
