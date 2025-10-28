@@ -1,5 +1,7 @@
 """
 
+https://www.tek.com/en/software/kickstart/2-11-4
+
 run `pyvisa-info`
 
 brew install libusb
@@ -27,7 +29,8 @@ from DMM6500 import DMM6500
 
 from util import round_to_n_dec, write_point
 
-resource_name = 'USB::0x05e6::0x6500::04577308::INSTR'
+#resource_name = 'USB::0x05e6::0x6500::04577308::INSTR'
+resource_name =  'USB0::1510::25856::04577308\x00\x00::0::INSTR'
 print(resource_name)
 
 rm = visa.ResourceManager()
@@ -35,8 +38,8 @@ rsc = rm.open_resource(resource_name)
 mm = DMM6500(rsc)
 
 # nplc 12 is adc max integration time
-# mm.nplc = 12
-# TODO doesnt work
+#mm.nplc = 12
+# TODO doesnt work (Error -113, Undefined SCPI header)
 
 # mm.reset()
 # mm.function = Function.DC_CURRENT  # ioreg -p IOUSB

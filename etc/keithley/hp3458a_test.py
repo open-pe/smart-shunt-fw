@@ -9,7 +9,6 @@ import sys
 import time
 
 import timeout_decorator
-from pyvisa.constants import BufferOperation
 from pyvisa.resources import MessageBasedResource
 
 from util import write_point, round_to_n_dec
@@ -22,7 +21,7 @@ def main():
     # res = ('USB0::1003::8293::GPIB_15_34235303432351F0D141::0::INSTR')
     res = ('USB0::1003::8293::HP3458A::0::INSTR')
     print('opening', res)
-    inst:MessageBasedResource = rm.open_resource(res)
+    inst: MessageBasedResource = rm.open_resource(res)
     inst.timeout = 2000000
     # inst.write("RESET")
     inst.write("END ALWAYS")
@@ -37,17 +36,30 @@ def main():
     else:
         raise ValueError()
 
+    dev_id = inst.query("ID?").strip()
+    assert dev_id == "HP3458A", "its not a HP3458A or adapter buffer is lagging (restart)"
+
+    if False:
+        print('performing ACAL..')
+        inst.write("ACAL DCV")
+        time.sleep(30)
+        inst.query("")
+
+    inst.write("NDIG 9")
+    inst.write("TARM AUTO")
+    inst.write("AZERO ON")
+    print('ndig 9, tarm auto')
+
     """
     To specify the most accuracy, highest resolution, and 80 dB of NMR for DC or
     ohms measurements (with the slowest measurement speed), send:
     OUTPUT 722;"NPLC 1000"
     """
-    nplc = 10 # 200
+    nplc = 10  # 200
     inst.write("NPLC " + str(nplc))
     print('nplc <-', nplc)
 
-    dev_id = inst.query("ID?").strip()
-    assert dev_id == "HP3458A", "its not a HP3458A or adapter buffer is lagging (restart)"
+    # print('ser:', inst.query("SER?"))
 
     # print("temp", inst.query("TEMP?"))
 
@@ -66,7 +78,7 @@ def main():
 
     def read_err():
         s = inst.query("ERRSTR?").strip()
-        print('errstr?',s)
+        print('errstr?', s)
         err_code = int(s[:s.index(',')])
         err_msg = s[s.index(',') + 1:].strip('"')
         return err_code, err_msg

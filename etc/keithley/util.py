@@ -66,8 +66,12 @@ def write_point(measurement, tags, values, timestamp_ms):
     lp = measurement
     for k, v in tags.items():
         lp += ',%s=%s' % (k, v)
+    lp += ' '
     for k, v in values.items():
-        lp += ' %s=%s' % (k, v)
-    # print(lp)
-    lp += ' ' + str(int(round(timestamp_ms))) + '\n'
+        lp += '%s=%s,' % (k, v)
+    lp = lp[:-1]
+    if timestamp_ms is not None:
+        lp += ' ' + str(int(round(timestamp_ms)))
+    lp += '\n'
+    #print(lp)
     sock.sendto(lp.encode(), ('127.0.0.1', 8086))
