@@ -37,4 +37,4 @@ while True:
                                                                float(rel_err(calib[n], last_calib[n])) * 1e6))
 
     last_calib = calib
-    time.sleep(3600 * 2)
+    time.sleep(3600 * 1)
