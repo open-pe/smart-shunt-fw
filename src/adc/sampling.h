@@ -1,6 +1,7 @@
 #pragma once
 
 #include <sys/time.h>
+#include <cmath>
 
 
 unsigned long long getTimeStamp(struct timeval *tv, int secFracDigits);
@@ -15,7 +16,7 @@ struct Sample {
   float temp{NAN}; // adc die temperature
 
   inline float p() const {
-      if(isnan(p_)) return u * i;
+      if(std::isnan(p_)) return u * i;
       else return p_;
   }
 
