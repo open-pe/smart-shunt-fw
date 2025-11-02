@@ -7,6 +7,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "Point.h"
+
 std::string timeStr();
 
 
@@ -16,7 +18,8 @@ void wait_for_wifi();
 
 class Point;
 
-void influxWritePointsUDP(const Point *p, uint8_t len);
+void influxWritePointUDP(const Point &p, bool flush=false);
+void influxWritePointsUDP(const Point *p, uint8_t len, bool flush = false);
 
 
 void scan_i2c();

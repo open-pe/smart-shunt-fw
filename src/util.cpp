@@ -57,10 +57,22 @@ void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
     msg.clear();
 }
 
+String influxMsgBuf;
 
-void influxWritePointsUDP(const Point *p, uint8_t len) {
-    constexpr int MTU = CONFIG_TCP_MSS;
 
+void influxWritePointsUDP(const Point *p, uint8_t len, bool flush) {
+    for (uint8_t i = 0; i < len; ++i) {
+        influxWritePointUDP(p[0], flush && (i == len - 1));
+    }
+}
+
+void influxWritePointUDP(const Point &p, bool flush) {
+    constexpr int MTU = CONFIG_TCP_MSS; // TODO this does not apply for udp, udp messages can be much larger
+
+
+    // byte host[] = {192, 168, 0, 185};
+    //byte host[] = {192, 168, 178, 28};
+    byte influxdbhost[] = {192, 168, 178, 180};
     /*
     static IPAddress host{};
     if(uint32_t(host) == 0) {
@@ -70,24 +82,16 @@ void influxWritePointsUDP(const Point *p, uint8_t len) {
     }
      */
 
-    // byte host[] = {192, 168, 0, 185};
-    byte host[] = {192, 168, 178, 28};
-
     auto port = 8086;
 
-
-    String msg;
-
-    for (uint8_t i = 0; i < len; ++i) {
-        auto lp = p[i].toLineProtocol();
-        if (msg.length() + lp.length() >= MTU) {
-            udpFlushString(host, port, msg);
-        }
-        msg += lp + '\n';
+    auto lp = p.toLineProtocol();
+    if (influxMsgBuf.length() + lp.length() >= MTU) {
+        udpFlushString(influxdbhost, port, influxMsgBuf);
     }
+    influxMsgBuf += lp + '\n';
 
-    if (msg.length() > 0) {
-        udpFlushString(host, port, msg);
+    if (flush and influxMsgBuf.length() > 0) {
+        udpFlushString(influxdbhost, port, influxMsgBuf);
     }
 }
 
@@ -99,8 +103,9 @@ std::string timeStr() {
 
     gettimeofday(&tv, NULL);
 
-    millisec = lrint(tv.tv_usec / 1000.0);  // Round to nearest millisec
-    if (millisec >= 1000) {                 // Allow for rounding up to nearest second
+    millisec = lrint(tv.tv_usec / 1000.0); // Round to nearest millisec
+    if (millisec >= 1000) {
+        // Allow for rounding up to nearest second
         millisec -= 1000;
         tv.tv_sec++;
     }
@@ -136,10 +141,12 @@ void pointFromSample(Point &p, const Sample &s, const char *device) {
 class PointDefaultConstructor : public Point {
 public:
     PointDefaultConstructor()
-            : Point("smart_shunt") {}
+        : Point("smart_shunt") {
+    }
 
     PointDefaultConstructor(const Point &p)
-            : Point(p) {}
+        : Point(p) {
+    }
 
     PointDefaultConstructor &operator=(const PointDefaultConstructor &p) {
         Point::operator=(p);
