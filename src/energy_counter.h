@@ -22,8 +22,75 @@ struct UIP {
     }
 };
 
+#pragma pack(push, 1)
+struct WireSample {
+    uint8_t v;
+    uint8_t idx;
+    char dev[16];
+    Sample data;
+    float i_max, u_max;
+    uint16_t crc;
+    // numTimeouts, maxDt
+
+    Point getInfluxDbPoint() const {
+        Point point("smart_shunt");
+        point.addTag("device", dev);
+        //if (nSamples != NSamplesLastSummary) // TODO
+            {
+            point.addField("I", data.i, 8);
+            point.addField("U", data.u, 8);
+            point.addField("I_max", i_max, 3);
+            point.addField("U_max", u_max, 3);
+            point.addField("P", data.p_, 7);
+            point.addField("E", data.e, 4);
+            point.addField("T", data.temp, 2);
+            /*if (maxDt > maxDtReported) {
+                point.addField("dt_max", (float) maxDt * 1e-3f, 2);
+                maxDtReported = maxDt;
+            }
+
+            if (numTimeouts)
+                point.addField("timeouts", numTimeouts); */
+        }
+
+        point.setTime(data.t);
+        return point;
+    }
+
+
+    static unsigned short compute_crc16(unsigned char buf[], int len) {
+        // Start Definition nach Modbus Standard http://www.modbus.org/docs/Modbus_over_serial_line_V1_02.pdf
+        // Seite 39ff
+        unsigned short crc = 0xFFFF;
+        // Durchlaufe jedes Byte (char)
+        for (int pos = 0; pos < len; pos++) {
+            // XOR das erste Byte des Buffers mit dem low-order Byte des 16bit CRC
+            // Registers. Das Ergebnis wird ebenfalls im CRC Register gespeichert
+            crc ^= (unsigned short) buf[pos];
+            // Loop über jedes Bit
+            for (int i = 8; i != 0; i--) {
+                // Shifte das CRC Register ein Bit nach rechts (Richtung LSB),
+                // und fülle das MSB mit einer Null auf (Step 3)
+                if ((crc & 0x001) != 0) {
+                    // (Wenn LSB 1 ist)
+                    crc >>= 1;
+                    // XOR das CRC Register mit dem Polynominal Wert 0xA001 (Step 4)
+                    crc ^= 0xA001;
+                } else {
+                    // (Wenn LSB Null war) Shifte CRC Register ein bit nach rechts (Step 3)
+                    crc >>= 1;
+                }
+            }
+        }
+        return crc;
+    }
+};
+#pragma pack(pop)
+
+
 class EnergyCounter {
     moodycamel::ReaderWriterQueue<Sample> sampleQueue{};
+
 public:
     PowerSampler *sampler;
     std::string name;
@@ -34,7 +101,7 @@ private:
     unsigned long NSamplesLastPrint = 0;
     unsigned long tLastPrint = 0;
 
-    double Energy = 0;//Wh
+    double Energy = 0; //Wh
     float LastP = 0.0f;
 
     float TotalCharge = 0; //Ah
@@ -54,6 +121,7 @@ public:
     unsigned long long windowTimestamp = 0;
 
     float calibFactorU = 1, calibFactorI = 1;
+
 private:
     const uint8_t eePromIndex;
 
@@ -61,15 +129,15 @@ private:
 
 public:
     EnergyCounter(PowerSampler *sampler, std::string name_, size_t eePromIndex_) : sampler(sampler),
-                                                                                   name(std::move(name_)),
-                                                                                   eePromIndex(eePromIndex_) {
+        name(std::move(name_)),
+        eePromIndex(eePromIndex_) {
         if (readCalibrationFactors(eePromIndex_, calibFactorU, calibFactorI)) {
             UART_LOG("%s read calibration factors U/I = (%.8f/%.8f)", name.c_str(), calibFactorU, calibFactorI);
         }
     }
 
     EnergyCounter(const EnergyCounter &) = delete; // no copy
-    EnergyCounter(EnergyCounter &&)  = default;
+    EnergyCounter(EnergyCounter &&) = default;
 
     void setCalibrationFactors(float u, float i, bool multiply) {
         if (!std::isnan(u))calibFactorU = (multiply ? calibFactorU : 1) * u;
@@ -111,7 +179,7 @@ public:
 
             sampleQueue.emplace(s);
             auto qs = sampleQueue.size_approx();
-            if(qs > 250 && qs < 355) {
+            if (qs > 250 && qs < 355) {
                 ESP_LOGW("ec", "Sample queue is growing beyond 250: %u", qs);
             }
 
@@ -137,7 +205,7 @@ public:
         // TODO this is a bit inefficient
         // better to create the window summary inside the RT task and publish this
         Sample s{};
-        while(sampleQueue.try_dequeue(s)) {
+        while (sampleQueue.try_dequeue(s)) {
             //ESP_LOGD("ec", "DEQ!");
             auto P = s.p();
 
@@ -162,9 +230,9 @@ public:
     }
 
     Sample printSample{};
+    uint8_t wireSampleIdx = 0;
 
-    Point summary(unsigned long dt_us,  bool print) {
-
+    WireSample summary(unsigned long dt_us, bool print, bool &outNewSamples) {
         // capture
         auto nSamples = NumSamples;
         auto energy = Energy;
@@ -172,35 +240,27 @@ public:
         float i_mean = winPoint.I.pop(), u_mean = winPoint.U.pop(), p_mean = winPoint.P.pop();
         float temp_mean = winPoint.Temp.pop();
 
-
-
-        Point point("smart_shunt");
-        point.addTag("device", name.c_str());
-        if(nSamples != NSamplesLastSummary) {
-            point.addField("I", i_mean, 8);
-            point.addField("U", u_mean, 8);
-            point.addField("I_max", i_max, 3);
-            point.addField("U_max", u_max, 3);
-            point.addField("P", p_mean, 7);
-            point.addField("E", energy, 4);
-            point.addField("T", temp_mean, 2);
-            if (maxDt > maxDtReported) {
-                point.addField("dt_max", (float) maxDt * 1e-3f, 2);
-                maxDtReported = maxDt;
-            }
-
-            if (numTimeouts)
-                point.addField("timeouts", numTimeouts);
+        WireSample ws{
+            .v = 1,
+            .idx = wireSampleIdx++,
+            .i_max = i_max,
+            .u_max = u_max,
+        };
+        name.copy(ws.dev, 16);
+        Sample &s(ws.data);
+        {
+            s.i = i_mean, s.u = u_mean, s.p_ = p_mean, s.t = windowTimestamp, s.temp = temp_mean;
         }
+        ws.crc = WireSample::compute_crc16((uint8_t *) &ws, (uint8_t *) &ws.crc - (uint8_t *) &ws);
 
-        point.setTime(windowTimestamp);
+        outNewSamples = nSamples != NSamplesLastSummary;
 
         // client.writePoint(point);
 
         if (print) {
             auto now = micros();
             // compute
-            float sps = (float)(nSamples - NSamplesLastPrint) / ((float)(now - tLastPrint) * 1e-6f);
+            float sps = (float) (nSamples - NSamplesLastPrint) / ((float) (now - tLastPrint) * 1e-6f);
 
             printSample.u = winPrint.U.pop();
             printSample.i = winPrint.I.pop();
@@ -222,7 +282,7 @@ public:
 
         NSamplesLastSummary = nSamples;
 
-        return point;
+        return ws;
     }
 
     void reset() {

@@ -31,8 +31,11 @@ class BleSrv {
 public:
     void begin() {
 
-        BLEDevice::init("MyESP32");
+        BLEDevice::init("smart-shunt");
         BLEServer *pServer = BLEDevice::createServer();
+
+
+
         BLEService *pService = pServer->createService(SERVICE_UUID);
         pCharacteristic = pService->createCharacteristic(
                                                CHARACTERISTIC_UUID,
@@ -47,8 +50,12 @@ public:
         pAdvertising->addServiceUUID(SERVICE_UUID);
         pAdvertising->setScanResponse(true);
         //pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
-        pAdvertising->setMinPreferred(0x0C80); // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
+        pAdvertising->setMinPreferred(0x12); // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
+        if (BLEDevice::setMTU(80)!= ESP_OK) {
+            ESP_LOGW("ble", "BLE server set MTU failed");
+        }
         BLEDevice::startAdvertising();
+
         ESP_LOGI("ble", "BLE server started");
     }
 

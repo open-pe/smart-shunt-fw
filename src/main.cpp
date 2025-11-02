@@ -12,7 +12,9 @@
 #include "adc/ads1262.h"
 #include "adc/ads131.h"
 
+#ifdef WITH_LCD
 #include "lcd.h"
+#endif
 
 #include "driver/uart.h"
 //#include "adc/adc_esp_dma.h"
@@ -66,10 +68,13 @@ std::map<std::string, PowerSampler *> samplers{
 
 std::vector<EnergyCounter> energyCounters;
 
+BleSrv bleSrv;
 
 bool disableWifi =false;
 
+#ifdef WITH_LCD
 LCD lcd;
+#endif
 
 unsigned long timeLastWakeEvent = 0;
 
@@ -102,21 +107,30 @@ void setup(void) {
     Wire.begin(
         settings.Pin_I2C_SDA,
         settings.Pin_I2C_SCL,
-        400000UL
+        800000UL
         //1000000UL
     );
 
-    if (!lcd.init()) {
+    /*if (!lcd.init()) {
         ESP_LOGW("main", "Failed to initialize LCD");
         //scan_i2c();
-    }
+    }*/
 
+    bleSrv.begin();
+    if (sizeof(WireSample) != 56) {
+        assert(false);
+    }
+    if (sizeof(Sample) != 28) {
+        assert(false);
+    }
 
     if (!disableWifi) {
         connect_wifi_async();
         wait_for_wifi();
         timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
     }
+
+
 
     for (auto p: samplers) {
         if (!p.second->init()) {
@@ -155,7 +169,7 @@ void setup(void) {
     //vTaskGetRunTimeStats();
 }
 
-std::vector<Point> points_frame;
+std::vector<WireSample> wire_sample_buf;
 
 [[noreturn]] void realTimeTask(void *arg) {
     assert(xPortGetCoreID() == RT_CORE);
@@ -314,8 +328,8 @@ void update() {
 
     if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-    if (nowTime - LastTimeOut > 19e3) {
-        // every 19 ms
+    if (nowTime - LastTimeOut > 400e3) { // every 200 ms => ble missing samples
+        // every 19 ms TODO why?
         auto print = nowTime - LastTimePrint > 2000e3;
 
         for (auto &ec: energyCounters) {
@@ -324,12 +338,15 @@ void update() {
                     timeLastWakeEvent = nowTime;
                 }
 
-                auto p = ec.summary((nowTime - LastTimeOut), print);
-                if (p.hasFields())
-                    points_frame.push_back(p);
+                bool newSample;
+                auto ws = ec.summary((nowTime - LastTimeOut), print, newSample);
+                if (newSample) {
+                    wire_sample_buf.push_back(ws);
+                    bleSrv.setVal((uint8_t*)&ws, sizeof(ws));
+                }
 
                 if (print) {
-                    lcd.updateValues(ec.printSample);
+                   // lcd.updateValues(ec.printSample);
                 }
             }
         }
@@ -340,11 +357,15 @@ void update() {
             LastTimePrint = nowTime;
         }
 
-        if (points_frame.size() >= 18) {
-            if (!disableWifi)
-                influxWritePointsUDP(&points_frame[0], points_frame.size());
-            points_frame.clear();
+        if (!disableWifi) {
+            for (auto &ws : wire_sample_buf) {
+                if (!disableWifi)
+                    influxWritePointUDP(ws.getInfluxDbPoint());
+            }
+
         }
+        wire_sample_buf.clear();
+
 
         LastTimeOut = nowTime;
     }

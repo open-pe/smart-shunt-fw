@@ -10,6 +10,7 @@ unsigned long long getTimeStamp(struct timeval *tv, int secFracDigits);
 // - use raw ADC samples
 // - remove p, e
 // - instead of timeval store dt to the prev sample (uint_16)
+#pragma pack(push, 1)
 struct Sample {
   float u{NAN}, i{NAN}, p_{NAN}, e{NAN};
   unsigned long long t{0};  // 8byte
@@ -26,6 +27,7 @@ struct Sample {
     t = getTimeStamp(&u_time, 3);
   }
 };
+#pragma pack(pop)
 
 class PowerSampler {
   public:
