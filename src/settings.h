@@ -3,7 +3,7 @@
 #include <EEPROM.h>
 
 #if CONFIG_IDF_TARGET_ESP32S3
-struct settings_t_01 {
+/*struct settings_t_01 {
     //uint8_t Pin_I2C_SDA = 15, Pin_I2C_SCL = 16;
      //uint8_t Pin_INA22x_ALERT = 7;
     uint8_t Pin_INA22x_ALERT2 = 6;
@@ -11,24 +11,34 @@ struct settings_t_01 {
 
     //uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
 };
+*/
 
 
+#define WAVESHARE_MINI 1
 
 struct settings_t {
 #ifdef FMETAL
     uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
-#else
+#elif WAVESHARE_MINI
     int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
     uint8_t Pin_INA22x_ALERT = 1;
-#endif
     uint8_t Pin_INA22x_ALERT2 = 4;
     uint8_t Pin_INA22x_ALERT3 = 5;
+#else
+    // fugu mcu-head
+    int8_t Pin_I2C_SDA = 40, Pin_I2C_SCL = 41;
+    uint8_t Pin_INA22x_ALERT = 42; //1;
+    uint8_t Pin_INA22x_ALERT2 = 21;
+    uint8_t Pin_INA22x_ALERT3 = 47;
+#endif
 
 
+    // waveshare pinout:
     uint8_t Pin_ADS1220_CS = 7;
     uint8_t Pin_ADS1220_DRDY = 6;
     uint8_t Pin_ADS1262_START = 8;
-    uint8_t Pin_ADS1262_PWDN = 9; //
+    uint8_t Pin_ADS1262_PWDN = 9;
+
 
 
     /*
@@ -52,7 +62,6 @@ struct settings_t {
 struct settings_t_01 {
     uint8_t Pin_I2C_SDA = 21, Pin_I2C_SCL = 22;
     uint8_t Pin_INA22x_ALERT = 19;
-
 };
 #endif
 static settings_t settings;
@@ -64,7 +73,8 @@ static void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
 
     float oldU, oldI;
     if (readCalibrationFactors(ecIndex, oldU, oldI)) {
-        ESP_LOGI("store", "Writing calib.facWriting calib.factors at %hhu: %.6f/%.6f (old: %.6f/%.6f)", ecIndex, u, i, oldU, oldI);
+        ESP_LOGI("store", "Writing calib.facWriting calib.factors at %hhu: %.6f/%.6f (old: %.6f/%.6f)", ecIndex, u, i,
+                 oldU, oldI);
     }
 
     EEPROM.begin(256);
@@ -77,8 +87,8 @@ static void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
 
     float ru, ri;
     assert(readCalibrationFactors(ecIndex, ru, ri));
-    assert( abs(ru - u)/u < 1e-9);
-    assert( abs(ri - i)/i < 1e-9);
+    assert(abs(ru - u)/u < 1e-9);
+    assert(abs(ri - i)/i < 1e-9);
 }
 
 static bool checkCalibrationFactorBounds(float f) {
