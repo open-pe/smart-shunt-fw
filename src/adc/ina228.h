@@ -121,7 +121,6 @@ class PowerSampler_INA228 : public PowerSampler {
     uint8_t i2c_port{0};
 
     TaskNotification notification;
-
     float current_LSB{};
 
     /**
@@ -132,10 +131,16 @@ class PowerSampler_INA228 : public PowerSampler {
      * the ina229 with SPI should perform better
      */
     uint8_t acFreq = 0;
-
     uint8_t nplc = 1;
-
     uint16_t avgNum = 0, avgCnt = 0;
+
+    struct {
+        bool vbus: 1;
+        bool shunt: 1;
+    } channelState{
+        .vbus = false,
+        .shunt = true
+    };
 
 public:
     const uint8_t storageId;
@@ -147,7 +152,7 @@ public:
     }
 
     bool resetPeriphery() {
- // reset
+        // reset
         if (i2c_write_short(i2c_port, i2c_addr, INA228_CONFIG, 0x8000) != ESP_OK) {
             return false;
         }
@@ -183,13 +188,17 @@ public:
         constexpr auto CT_50u = 0x0, CCT_84u = 0x1, CCT_150u = 0x2, CT_280u = 0x3,
                 CT_540u = 0x4, CT_1052u = 0x5, CT_4120u = 0x7;
 
-        constexpr auto MODE_Field_OS = 12;
-        constexpr auto MODE_ContBusV = 0x9, MODE_ContShuntV = 0xA, MODE_ContBus_ShuntV=0xB, MODE_ContBusV_Temp = 0xD, MODE_Cont_BusV_ShuntV_Temp = 0xF;
+        constexpr auto BitPos_MODE = 12;
+        constexpr auto MODE_ContBusV = 0x9, MODE_ContShuntV = 0xA,
+                MODE_ContBus_ShuntV = 0xB,
+                MODE_ContBusV_Temp = 0xD,
+                MODE_Cont_ShuntV_Temp = 0xE,
+                MODE_Cont_BusV_ShuntV_Temp = 0xF;
         constexpr auto AVG_1 = 0x0, AVG_4 = 0x1, AVG_16 = 0x2;
 
         if (acFreq) {
             // AC: https://www.ti.com/lit/an/slaa638a/slaa638a.pdf#page=10
-            adc_config |= MODE_ContBus_ShuntV << MODE_Field_OS; // MODE   = Continuous shunt and bus voltage
+            adc_config |= MODE_ContBus_ShuntV << BitPos_MODE; // MODE   = Continuous shunt and bus voltage
 
             // 280us is the shortest conversion time with i2c bus @ 800 khz
             // 150us is almost doable, reaches sps=41.2 instead of 50
@@ -203,25 +212,30 @@ public:
             ESP_LOGI("ina228", "measuring ac with freq %hhu, nplc=%i, averaging %hu", acFreq, (int) nplc, avgNum);
 
             adc_config |= AVG_1 << 0;
-            
+
             // sps = 1/(84us+84us) * avgNum
         } else {
-            bool measureCurrent = false;
-
-            adc_config |= (measureCurrent ? MODE_Cont_BusV_ShuntV_Temp : MODE_ContBusV_Temp) << MODE_Field_OS;
-
-            // only voltage
-            if (!measureCurrent) {
-                adc_config |= CT_4120u << 9; // VBUSCT
-            } else {
+            uint8_t mode;
+            if (channelState.shunt && channelState.vbus) {
+                mode = MODE_Cont_BusV_ShuntV_Temp;
                 adc_config |= CT_1052u << 9; // VBUSCT  = bus voltage conversion time
                 adc_config |= CT_4120u << 6; // VSHCT   = shunt voltage conversion time
+            } else if (channelState.vbus) {
+                mode = MODE_ContBusV_Temp;
+                adc_config |= CT_4120u << 9; // VBUSCT
+            } else if (channelState.shunt) {
+                mode = MODE_Cont_ShuntV_Temp;
+                adc_config |= CT_4120u << 6; // VSHCT
+            } else {
+                assert(false);
             }
+
+            adc_config |= mode << BitPos_MODE;
             adc_config |= CCT_84u << 3; // temperature conversion time
+            adc_config |= AVG_16 << 0;
+
             // total period : 8324us => 120 Hz
             // total period : 2*1052+84us => 457 Hz
-
-            adc_config |= AVG_16 << 0;
         }
 
         // total 1/((1052-6+1052-6) * 1)
@@ -508,8 +522,8 @@ public:
             lastSample.i *= n;
             lastSample.p_ *= n;
         } else {
-            lastSample.u = read_voltage();
-            lastSample.i = NAN; // read_current();
+            lastSample.u = channelState.vbus ? read_voltage() : NAN;
+            lastSample.i = channelState.shunt ? read_current() : NAN;
             lastSample.temp = read_dietemp();
         }
 
