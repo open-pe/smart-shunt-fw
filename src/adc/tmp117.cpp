@@ -12,14 +12,17 @@ PowerSampler_TMP117::PowerSampler_TMP117(uint8_t addr) {
 
 bool PowerSampler_TMP117::init()  {
     tmp->init ( nullptr );
-    return true;
+    auto t = tmp->getTemperature();
+    ESP_LOGI("tmp117", "Temp: %f", t);
+    return (int)t != 0; // TODO nasty hack
 }
 
 
 Sample PowerSampler_TMP117::getSample()  {
     tLastRead = micros();
     Sample sample{};
-    sample.temp = tmp->getTemperature();
+    auto t = tmp->getTemperature();
+    sample.temp = int(t) != 0 ? t : 0; // TODO nasty hack
     sample.setTimeNow();
     return sample;
 }
