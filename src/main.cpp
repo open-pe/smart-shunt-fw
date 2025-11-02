@@ -20,6 +20,7 @@
 #include "USB.h"
 //#endif
 
+#include "ble.h"
 #include "energy_counter.h"
 #include "util.h"
 #include "adc/tmp117.h"
