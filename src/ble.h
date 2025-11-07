@@ -29,19 +29,20 @@ class BleSrv {
     BLECharacteristic *pCharacteristic = nullptr;
 
 public:
-    void begin() {
+    static constexpr uint16_t MTU = 256;
+    static constexpr uint16_t MAX_PAYLOAD_LEN = MTU - 3;
 
+    void begin() {
         BLEDevice::init("smart-shunt");
         BLEServer *pServer = BLEDevice::createServer();
 
 
-
         BLEService *pService = pServer->createService(SERVICE_UUID);
         pCharacteristic = pService->createCharacteristic(
-                                               CHARACTERISTIC_UUID,
-                                               BLECharacteristic::PROPERTY_READ |
-                                               BLECharacteristic::PROPERTY_NOTIFY
-                                             );
+            CHARACTERISTIC_UUID,
+            BLECharacteristic::PROPERTY_READ |
+            BLECharacteristic::PROPERTY_NOTIFY
+        );
 
         pCharacteristic->setValue("\0\0\0\0");
         pService->start();
@@ -50,8 +51,9 @@ public:
         pAdvertising->addServiceUUID(SERVICE_UUID);
         pAdvertising->setScanResponse(true);
         //pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
-        pAdvertising->setMinPreferred(0x12); // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
-        if (BLEDevice::setMTU(80)!= ESP_OK) {
+        pAdvertising->setMinPreferred(0x12);
+        // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
+        if (BLEDevice::setMTU(MTU) != ESP_OK) {
             ESP_LOGW("ble", "BLE server set MTU failed");
         }
         BLEDevice::startAdvertising();
@@ -61,26 +63,25 @@ public:
 
     void setVal(const uint8_t *buf, size_t len) {
         if (pCharacteristic) {
-            pCharacteristic->setValue(const_cast<uint8_t*>(buf), len);
+            pCharacteristic->setValue(const_cast<uint8_t *>(buf), len);
             pCharacteristic->notify();
         }
     }
 };
 #else
 class BleSrv {
-    NimBLEServer* NimBLEServer = nullptr;
+    NimBLEServer *NimBLEServer = nullptr;
 
 public:
     void begin() {
-
         BLEDevice::init("MyESP32");
         BLEServer *pServer = BLEDevice::createServer();
         BLEService *pService = pServer->createService(SERVICE_UUID);
         pCharacteristic = pService->createCharacteristic(
-                                               CHARACTERISTIC_UUID,
-                                               BLECharacteristic::PROPERTY_READ |
-                                               BLECharacteristic::PROPERTY_NOTIFY
-                                             );
+            CHARACTERISTIC_UUID,
+            BLECharacteristic::PROPERTY_READ |
+            BLECharacteristic::PROPERTY_NOTIFY
+        );
 
         pCharacteristic->setValue("\0\0\0\0");
         pService->start();
@@ -89,14 +90,15 @@ public:
         pAdvertising->addServiceUUID(SERVICE_UUID);
         pAdvertising->setScanResponse(true);
         //pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
-        pAdvertising->setMinPreferred(0x0C80); // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
+        pAdvertising->setMinPreferred(0x0C80);
+        // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
         BLEDevice::startAdvertising();
         ESP_LOGI("ble", "BLE server started");
     }
 
     void setVal(const uint8_t *buf, size_t len) {
         if (pCharacteristic) {
-            pCharacteristic->setValue(const_cast<uint8_t*>(buf), len);
+            pCharacteristic->setValue(const_cast<uint8_t *>(buf), len);
             pCharacteristic->notify();
         }
     }
