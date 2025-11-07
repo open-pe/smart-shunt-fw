@@ -250,6 +250,18 @@ public:
         return true;
     }
 
+
+    bool pinsAreShorted(int a, int b) {
+        pinMode(a, INPUT_PULLUP);
+        pinMode(b, OUTPUT);
+        digitalWrite(b, LOW);
+        usleep(1);
+        if (digitalRead(a)) return false;
+        digitalWrite(b, HIGH);
+        usleep(1);
+        return digitalRead(a);
+    }
+
     bool init() {
         if (ina228_instance[i2c_addr - I2C_A0]) {
             return false;
@@ -262,9 +274,20 @@ public:
         ESP_LOGI("ina228", "Device ID:          0x%04X", deviceId);
 
         if (deviceId != 0x2280 && deviceId != 0x2281) {
-            ESP_LOGW("ina228", "This is not an INA228 device!");
+            if (deviceId != 0)ESP_LOGW("ina228", "This is not an INA228 device!");
             return false;
         }
+
+        //channelState.shunt
+        if (pinsAreShorted(7,8)) {
+            sleep(1);
+            ESP_LOGI("ina228", "pins 7 & 8 are shorted, measuring vbus only");
+            sleep(1);
+            channelState.shunt = false;
+            channelState.vbus = true;
+        }
+
+
 
         if (!resetPeriphery()) {
             return false;

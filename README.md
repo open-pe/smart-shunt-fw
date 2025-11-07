@@ -269,7 +269,7 @@ ina22x-resistor-range 0.000333333333333333 120
 calibrate ESP32_INA228 U 1.00
 calibrate ESP32_INA228 I 1.00
 
-ina22x-resistor-range 0.002 20
+ina22x-resistor-range 0.0025 16
 ina22x-resistor-range2 0.002 20  
 ina22x-resistor-range3 0.002 20  
 
