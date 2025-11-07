@@ -70,7 +70,8 @@ std::vector<EnergyCounter> energyCounters;
 
 BleSrv bleSrv;
 
-bool disableWifi =false;
+bool disableWifi = true;
+bool wifiTimeSyncOnly = true;
 
 #ifdef WITH_LCD
 LCD lcd;
@@ -107,7 +108,7 @@ void setup(void) {
     Wire.begin(
         settings.Pin_I2C_SDA,
         settings.Pin_I2C_SCL,
-        800000UL
+        400000UL
         //1000000UL
     );
 
@@ -116,6 +117,18 @@ void setup(void) {
         //scan_i2c();
     }*/
 
+
+    if (!disableWifi) {
+        connect_wifi_async();
+        wait_for_wifi();
+        timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
+        if (wifiTimeSyncOnly) {
+            WiFi.disconnect(true);
+            WiFiClass::mode(WIFI_OFF);
+            disableWifi = true;
+        }
+    }
+
     bleSrv.begin();
     if (sizeof(WireSample) != 56) {
         assert(false);
@@ -123,13 +136,6 @@ void setup(void) {
     if (sizeof(Sample) != 28) {
         assert(false);
     }
-
-    if (!disableWifi) {
-        connect_wifi_async();
-        wait_for_wifi();
-        timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
-    }
-
 
 
     for (auto p: samplers) {
@@ -219,7 +225,7 @@ void handleConsoleInput(const String &buf) {
         } else if (inp.startsWith("calibrate ")) {
             // calibrate ESP32_INA228 I 1.0028870
             // calibrate ESP32_INA228 I 1.00223895 // rsn20-50 with ref=3458a (2025-10) 1.1A
-            // calibrate ESP32_INA228_2 U 1.00// 60v
+            // calibrate ESP32_INA228_3 U 1.00// 60v
             // calibrate ESP32_INA228 U 1.00
             // calibrate ESP32_INA228 I *0.9997247927345282
             // calibrate ESP32_INA228 U *1.000983433436737
@@ -328,10 +334,13 @@ void update() {
 
     if (hfWrites) influxWritePointsUDP(&pointFrame[0], pointFrame.size()); */
 
-    if (nowTime - LastTimeOut > 400e3) { // every 200 ms => ble missing samples
+    if (nowTime - LastTimeOut > 400e3) {
+        // every 200 ms => ble missing samples
         // every 19 ms TODO why?
         auto print = nowTime - LastTimePrint > 2000e3;
 
+        uint8_t bleBuf[BleSrv::MAX_PAYLOAD_LEN];
+        uint16_t bleLenPos = 0;
         for (auto &ec: energyCounters) {
             if (ec.newSamplesSinceLastSummary()) {
                 if (std::abs(ec.winPrint.P.getMean()) >= 0.0005f) {
@@ -341,14 +350,23 @@ void update() {
                 bool newSample;
                 auto ws = ec.summary((nowTime - LastTimeOut), print, newSample);
                 if (newSample) {
-                    wire_sample_buf.push_back(ws);
-                    bleSrv.setVal((uint8_t*)&ws, sizeof(ws));
+                    if (!disableWifi) wire_sample_buf.push_back(ws);
+                    if (bleLenPos + sizeof(ws) > sizeof(bleBuf)) {
+                        ESP_LOGW("main", "Insufficient ble buffer space");
+                    } else {
+                        memcpy(&bleBuf[bleLenPos], &ws, sizeof(ws));
+                        bleLenPos += sizeof(ws);
+                    }
                 }
 
                 if (print) {
-                   // lcd.updateValues(ec.printSample);
+                    // lcd.updateValues(ec.printSample);
                 }
             }
+        }
+
+        if (bleLenPos) {
+            bleSrv.setVal(bleBuf, bleLenPos);
         }
 
         if (print) {
@@ -358,11 +376,8 @@ void update() {
         }
 
         if (!disableWifi) {
-            for (auto &ws : wire_sample_buf) {
-                if (!disableWifi)
-                    influxWritePointUDP(ws.getInfluxDbPoint());
-            }
-
+            for (auto &ws: wire_sample_buf)
+                influxWritePointUDP(ws.getInfluxDbPoint());
         }
         wire_sample_buf.clear();
 
