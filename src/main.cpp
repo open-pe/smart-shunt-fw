@@ -313,6 +313,8 @@ void handleConsoleInput(const String &buf) {
     }
 }
 
+
+
 void update() {
     constexpr bool hfWrites = false;
 
@@ -339,7 +341,7 @@ void update() {
         // every 19 ms TODO why?
         auto print = nowTime - LastTimePrint > 2000e3;
 
-        uint8_t bleBuf[BleSrv::MAX_PAYLOAD_LEN];
+
         uint16_t bleLenPos = 0;
         for (auto &ec: energyCounters) {
             if (ec.newSamplesSinceLastSummary()) {
@@ -351,12 +353,7 @@ void update() {
                 auto ws = ec.summary((nowTime - LastTimeOut), print, newSample);
                 if (newSample) {
                     if (!disableWifi) wire_sample_buf.push_back(ws);
-                    if (bleLenPos + sizeof(ws) > sizeof(bleBuf)) {
-                        ESP_LOGW("main", "Insufficient ble buffer space");
-                    } else {
-                        memcpy(&bleBuf[bleLenPos], &ws, sizeof(ws));
-                        bleLenPos += sizeof(ws);
-                    }
+                    bleSrv.send((uint8_t*)&ws, sizeof(ws));
                 }
 
                 if (print) {
@@ -365,9 +362,7 @@ void update() {
             }
         }
 
-        if (bleLenPos) {
-            bleSrv.setVal(bleBuf, bleLenPos);
-        }
+        bleSrv.flush();
 
         if (print) {
             if (energyCounters.size() > 1)
