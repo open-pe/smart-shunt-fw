@@ -60,6 +60,7 @@ struct settings_t {
 };
 #else
 struct settings_t_01 {
+    // the screen daq board prototype (old) with ESP32 (NOT s3 mounted!)
     uint8_t Pin_I2C_SDA = 21, Pin_I2C_SCL = 22;
     uint8_t Pin_INA22x_ALERT = 19;
 };

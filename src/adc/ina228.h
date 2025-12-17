@@ -202,7 +202,7 @@ public:
 
             // 280us is the shortest conversion time with i2c bus @ 800 khz
             // 150us is almost doable, reaches sps=41.2 instead of 50
-            // so with 280u we'll have some head room
+            // so with 280u we'll have some head-room
             adc_config |= CT_280u << 9; // VBUSCT  = bus voltage conversion time
             adc_config |= CT_280u << 6; // VSHCT   = shunt voltage conversion time
             const auto totalConvTime = 2 * 280e-6f;
