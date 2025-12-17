@@ -30,3 +30,36 @@ public:
         return 5;
     }
 };
+
+
+class PowerSampler_Dummy : public PowerSampler {
+    unsigned long tLastRead = 0;
+
+public:
+    PowerSampler_Dummy() {
+    }
+
+    bool init() override {
+        //tStart = micros();
+        return true;
+    };
+
+    void startReading() override {
+    }
+
+    bool hasData() override {
+        return micros() - tLastRead > (125 * 8 * 1000); // ct=125ms, avg=8
+    }
+
+    Sample getSample() override {
+        Sample sample{};
+        sample.u = sinf(static_cast<float>(micros()) * .33e-6f);
+        sample.setTimeNow();
+        tLastRead = micros();
+        return sample;
+    }
+
+    uint8_t getStorageId() const override {
+        return 5;
+    }
+};

@@ -43,6 +43,8 @@ PowerSampler_INA228 ina228_42{0x42};
 
 PowerSampler_TMP117 tmp117{0x48};
 
+PowerSampler_Dummy dummy{};
+
 unsigned long LastTimeOut = 0;
 unsigned long LastTimePrint = 0;
 
@@ -64,6 +66,7 @@ std::map<std::string, PowerSampler *> samplers{
     {"ESP32_INA228_2", &ina228_41},
     {"ESP32_INA228_3", &ina228_42},
     {"TMP117", &tmp117},
+    {"dummy", &dummy},
 };
 
 std::vector<EnergyCounter> energyCounters;
