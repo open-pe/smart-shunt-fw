@@ -14,8 +14,8 @@
 */
 
 
-#define WAVESHARE_MINI 0
-#define GREEN_DAQ_BREAD_BOARD 1
+#define WAVESHARE_MINI 1
+#define GREEN_DAQ_BREAD_BOARD 0
 
 struct settings_t {
 #ifdef FMETAL
