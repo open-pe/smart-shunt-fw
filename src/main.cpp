@@ -18,6 +18,7 @@
 
 #include "driver/uart.h"
 #include "esp_timer.h"
+#include <WiFi.h>
 //#include "adc/adc_esp_dma.h"
 //#if ARDUINO_USB_MODE == 1
 #include "USB.h"
@@ -495,9 +496,10 @@ void uartInit(int port_num) {
     const int PIN_TX = 1, PIN_RX = 3;
 #endif
 
-    ESP_ERROR_CHECK(uart_set_pin(port_num, PIN_TX, PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    ESP_ERROR_CHECK(uart_param_config(port_num, &uart_config));
-    ESP_ERROR_CHECK(uart_driver_install(port_num, BUF_SIZE * 2, BUF_SIZE * 2, 10, &uart_queue, intr_alloc_flags));
+    const auto port = (uart_port_t) port_num;
+    ESP_ERROR_CHECK(uart_set_pin(port, PIN_TX, PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_param_config(port, &uart_config));
+    ESP_ERROR_CHECK(uart_driver_install(port, BUF_SIZE * 2, BUF_SIZE * 2, 10, &uart_queue, intr_alloc_flags));
 
 
     /* uart_intr_config_t uart_intr = {
