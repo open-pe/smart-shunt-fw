@@ -50,7 +50,13 @@ PowerSampler_INA228 *ina228_instance[3] = {nullptr, nullptr, nullptr};
 
 #include<Wire.h>
 
+// These two talk to the same bus as i2c.h, from the real-time task on the other core.
+// A register read is a three-call sequence (write pointer, repeated start, read), so
+// the whole sequence has to hold i2cLock -- not each call. See the comment in i2c.h.
 bool readRegister(uint16_t addr, uint8_t reg, uint16_t *regValue) {
+    I2cLock lock;
+    if (!lock) return false;
+
     uint8_t MSByte = 0, LSByte = 0;
     bool success = true;
     Wire.beginTransmission(addr);
@@ -69,6 +75,9 @@ bool readRegister(uint16_t addr, uint8_t reg, uint16_t *regValue) {
 }
 
 bool readBuf(uint16_t addr, uint8_t reg, uint8_t *buffer, uint8_t len) {
+    I2cLock lock;
+    if (!lock) return false;
+
     bool success = true;
     Wire.beginTransmission(addr);
     success = Wire.write(reg) == 1;
@@ -122,6 +131,7 @@ class PowerSampler_INA228 : public PowerSampler {
 
     TaskNotification notification;
     float current_LSB{};
+    uint16_t adcConfig{0}; // last ADC_CONFIG written, replayed by startReading()
 
     /**
      * when acFreq is != 0, it will sample current and voltage (no dietemp) at the lowest possible conversion time
@@ -240,13 +250,26 @@ public:
 
         // total 1/((1052-6+1052-6) * 1)
 
-        ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_ADC_CONFIG, adc_config));
+        adcConfig = adc_config;
+        return writeAdcConfig();
+    }
 
+    /// The ADC_CONFIG + DIAG_ALRT writes on their own, so a stalled device can be
+    /// re-armed without re-running discovery and calibration. Errors are reported,
+    /// not fatal: these used to be ESP_ERROR_CHECK, i.e. one failed I2C write on a
+    /// contended bus took the whole logger down with an abort().
+    bool writeAdcConfig() {
+        if (i2c_write_short(i2c_port, i2c_addr, INA228_ADC_CONFIG, adcConfig) != ESP_OK) {
+            ESP_LOGE("ina228", "0x%02hhX: ADC_CONFIG write failed", i2c_addr);
+            return false;
+        }
 
         uint16_t diagAlrt = 0;
         diagAlrt |= 0x1 << 14; // CNVR: enable conversion ready flag on ALERT pin
-        ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_DIAG_ALRT, diagAlrt));
-
+        if (i2c_write_short(i2c_port, i2c_addr, INA228_DIAG_ALRT, diagAlrt) != ESP_OK) {
+            ESP_LOGE("ina228", "0x%02hhX: DIAG_ALRT write failed", i2c_addr);
+            return false;
+        }
         return true;
     }
 
@@ -304,7 +327,9 @@ public:
         uint16_t config = 0;
         auto adc_range = (_40_96_mV ? 0x1 : 0x0);
         config |= adc_range << 4; // ADC shunt voltage range: 0h = ±163.84 mV, 1h = ± 40.96 mV
-        ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_CONFIG, config));
+        if (i2c_write_short(i2c_port, i2c_addr, INA228_CONFIG, config) != ESP_OK) {
+            ESP_LOGE("ina228", "0x%02hhX: CONFIG write failed", i2c_addr);
+        }
         shuntLv = _40_96_mV;
         ESP_LOGI("ina228", "Set shunt %s mV range", shuntLv ? "40.96" : "163.84");
     }
@@ -339,7 +364,9 @@ public:
         ESP_LOGI("ina228", "Set shuntCal %hu (from %f), Vmax_exp=%.1fmV, current_LSB=%.7f", shuntCalShort, shuntCal,
                  maxExpectedVoltage * 1e3f, current_LSB);
 
-        ESP_ERROR_CHECK(i2c_write_short(i2c_port, i2c_addr, INA228_SHUNT_CAL, shuntCalShort));
+        if (i2c_write_short(i2c_port, i2c_addr, INA228_SHUNT_CAL, shuntCalShort) != ESP_OK) {
+            ESP_LOGE("ina228", "0x%02hhX: SHUNT_CAL write failed", i2c_addr);
+        }
 
         int inaAddrIdx = i2c_addr - I2C_A0;
         if (store)
@@ -347,7 +374,13 @@ public:
     }
 
     void startReading() {
-        // pass
+        // Called by EnergyCounter when this sampler has gone quiet. This used to be an
+        // empty stub, so the stall path "retried" a dead INA228 by doing nothing at all
+        // (and then blocking the real-time task for up to 10 s to celebrate). Rewriting
+        // ADC_CONFIG and re-enabling the conversion-ready alert is the corrective action
+        // that actually recovers the two failures seen here: a device that reset itself
+        // back to defaults, and a lost CNVR alert configuration.
+        if (adcConfig) writeAdcConfig();
     }
 
     void alertNewDataFromISR() {
