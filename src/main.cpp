@@ -17,6 +17,7 @@
 #endif
 
 #include "driver/uart.h"
+#include "esp_timer.h"
 //#include "adc/adc_esp_dma.h"
 //#if ARDUINO_USB_MODE == 1
 #include "USB.h"
@@ -41,7 +42,7 @@ PowerSampler_INA228 ina228_41{0x41};
 PowerSampler_INA228 ina228_42{0x42};
 // PowerSampler_ESP32 esp_adc;
 
-PowerSampler_TMP117 tmp117{0x48};
+//PowerSampler_TMP117 tmp117{0x48};
 
 PowerSampler_Dummy dummy{};
 
@@ -65,7 +66,7 @@ std::map<std::string, PowerSampler *> samplers{
     {"ESP32_INA228", &ina228_40},
     {"ESP32_INA228_2", &ina228_41},
     {"ESP32_INA228_3", &ina228_42},
-    {"TMP117", &tmp117},
+    //{"TMP117", &tmp117},
     {"dummy", &dummy},
 };
 
@@ -80,7 +81,30 @@ bool wifiTimeSyncOnly = true;
 LCD lcd;
 #endif
 
-unsigned long timeLastWakeEvent = 0;
+// Idle shutdown.  Deliberately on the 64-bit esp_timer clock, not micros(): micros()
+// wraps every 71.6 min, which is uncomfortably close to the 1 h threshold below.
+int64_t timeLastWakeEvent = 0;
+
+constexpr int64_t IDLE_SLEEP_AFTER_US = 3600ll * 1000000ll; // idle this long -> sleep
+constexpr uint64_t IDLE_SLEEP_WAKE_US = 900ull * 1000000ull; // ...and wake up to re-check
+
+/// Idle shutdown must only ever trigger on *evidence* that there is nothing to measure.
+/// It used to trigger on the absence of evidence instead, and that took the logger off
+/// the air for good:
+///   - P is NaN whenever the shunt channel is disabled (vbus-only boards, see
+///     PowerSampler_INA228::init) or an I2C read failed.  The old test was
+///     `std::abs(P) >= 0.0005f`, and !(|NaN| >= x) is false, so a device that could not
+///     measure power at all concluded there was none -- every single window, forever.
+///   - ESP.deepSleep(0) configures NO wake source, so "going to sleep" meant "off until
+///     someone power-cycles it".
+/// Result: every board with a vbus-only INA228 went dark at exactly 60 min of uptime.
+/// So: an unmeasurable power counts as activity, and the sleep is always recoverable.
+static void noteWakeEvent() { timeLastWakeEvent = esp_timer_get_time(); }
+
+static bool looksActive(float meanPower) {
+    if (!std::isfinite(meanPower)) return true; // cannot judge -> stay awake
+    return std::abs(meanPower) >= 0.0005f;
+}
 
 [[noreturn]] void realTimeTask(void *arg);
 
@@ -348,8 +372,8 @@ void update() {
         uint16_t bleLenPos = 0;
         for (auto &ec: energyCounters) {
             if (ec.newSamplesSinceLastSummary()) {
-                if (std::abs(ec.winPrint.P.getMean()) >= 0.0005f) {
-                    timeLastWakeEvent = nowTime;
+                if (looksActive(ec.winPrint.P.getMean())) {
+                    noteWakeEvent();
                 }
 
                 bool newSample;
@@ -404,7 +428,7 @@ void update() {
         *eol = 0; // terminate string at line break
         buf_pos = 0; // reset buf
         handleConsoleInput(buf);
-        timeLastWakeEvent = nowTime;
+        noteWakeEvent();
         break;
     }
 
@@ -420,13 +444,22 @@ void update() {
             handleConsoleInput(line);
             serialBuf = serialBuf.substring(lb + 1);
         }
-        timeLastWakeEvent = nowTime;
+        noteWakeEvent();
     }
 
-    if (nowTime - timeLastWakeEvent > (1e6 * 3600)) {
-        UART_LOG("Zero power for 1h, going to sleep");
-        ESP.deepSleep(0);
-        // TODO setup alarm here to wake up
+    if (esp_timer_get_time() - timeLastWakeEvent > IDLE_SLEEP_AFTER_US) {
+        // A subscribed client is the strongest possible evidence that we are not idle.
+        // Sleeping out from under it is what made the old failure invisible: the samples
+        // just stopped and the peripheral never advertised again.
+        if (bleSrv.isConnected()) {
+            noteWakeEvent();
+        } else {
+            UART_LOG("Zero power for %llds, sleeping for %llds",
+                     (long long) (IDLE_SLEEP_AFTER_US / 1000000),
+                     (long long) (IDLE_SLEEP_WAKE_US / 1000000));
+            Serial.flush();
+            ESP.deepSleep(IDLE_SLEEP_WAKE_US); // wakes and re-checks; never a one-way trip
+        }
     }
 }
 

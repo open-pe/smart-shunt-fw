@@ -91,8 +91,14 @@ public:
 
     bool subscribed = false; // whether the client subscribed for indications
     uint8_t waitingForAck = 0; // in-transit
+    uint32_t tLastIndicate = 0;
+
+    // An indication that is never acknowledged must not park the buffer forever.
+    static constexpr uint32_t ACK_TIMEOUT_MS = 5000;
 
     bool inTransmission() const { return waitingForAck > 0; }
+
+    bool isConnected() const { return pServer && pServer->getConnectedCount() > 0; }
 
     BleSrv() : chrCallbacks{this} {
     }
@@ -151,8 +157,16 @@ public:
     }
 
     void flush() {
-        if (inTransmission()) return;
-        if (pServer->getConnectedCount() == 0) {
+        if (inTransmission()) {
+            // Without this the client stops receiving samples while the link stays up, so
+            // nothing on either side looks wrong -- the worst kind of stall.  bleBufPos is
+            // untouched by a lost ack, so this re-sends the same payload.
+            if (millis() - tLastIndicate < ACK_TIMEOUT_MS) return;
+            ESP_LOGW("ble", "no ack for %ums with %hhu indication(s) in flight, re-arming",
+                     (unsigned) (millis() - tLastIndicate), waitingForAck);
+            waitingForAck = 0;
+        }
+        if (!isConnected()) {
             return;
         }
 
@@ -164,6 +178,7 @@ public:
                 ESP_LOGW("ble", "BLE server indicate failed");
             } else {
                 ++waitingForAck;
+                tLastIndicate = millis();
             }
         }
     }
@@ -221,7 +236,16 @@ public:
     } serverCallbacks;
 
     void onAck(bool done) {
-        waitingForAck--;
+        if (waitingForAck) {
+            --waitingForAck;
+        } else {
+            // A status callback with nothing in flight is reachable: onCharSub() zeroes the
+            // counter, and an indication outstanding at that moment still reports later.
+            // Decrementing here would underflow the uint8_t to 255, so inTransmission()
+            // would be true forever and flush() would never send another sample again --
+            // with the connection still up and healthy.
+            ESP_LOGW("ble", "onAck (done=%i) with no indication in flight", (int) done);
+        }
         ESP_LOGI("ble", "onAck done=%i waiting=%hhu", (int)done, waitingForAck);
         if (done) {
             bleBufPos = 0;
