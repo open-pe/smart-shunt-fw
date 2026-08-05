@@ -7,6 +7,7 @@
 
 #include "adc/sampling.h"
 #include "settings.h"
+#include "secrets.h"
 
 #include <InfluxDbClient.h>
 #include <WiFiUDP.h>
@@ -31,7 +32,12 @@ WiFiUDP udp;
 
 void connect_wifi_async() {
     WiFi.mode(WIFI_STA);
-  wifiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    // Networks come from src/secrets.h, which is gitignored. They were literals here,
+    // and this remote is a public repository.
+#define ADD_AP(ssid, password) wifiMulti.addAP(ssid, password);
+    WIFI_AP_LIST(ADD_AP)
+#undef ADD_AP
 }
 
 void wait_for_wifi() {

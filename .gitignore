@@ -27,3 +27,6 @@ __pycache__
 *.lck
 
 .idea/editor.xml
+
+# WiFi credentials, local only -- see src/secrets.h.example
+src/secrets.h
