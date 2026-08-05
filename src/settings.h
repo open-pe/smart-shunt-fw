@@ -14,7 +14,8 @@
 */
 
 
-#define WAVESHARE_MINI 1
+#define WAVESHARE_MINI 0
+#define GREEN_DAQ_BREAD_BOARD 1
 
 struct settings_t {
 #ifdef FMETAL
@@ -24,6 +25,11 @@ struct settings_t {
     uint8_t Pin_INA22x_ALERT = 1;
     uint8_t Pin_INA22x_ALERT2 = 4;
     uint8_t Pin_INA22x_ALERT3 = 5;
+#elif GREEN_DAQ_BREAD_BOARD
+    int8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 38;
+    uint8_t Pin_INA22x_ALERT = 40;
+    uint8_t Pin_INA22x_ALERT2 = 0;
+    uint8_t Pin_INA22x_ALERT3 = 0;
 #else
     // fugu mcu-head
     int8_t Pin_I2C_SDA = 40, Pin_I2C_SCL = 41;
@@ -60,9 +66,10 @@ struct settings_t {
 };
 #else
 struct settings_t_01 {
-    // the screen daq board prototype (old) with ESP32 (NOT s3 mounted!)
+    // the green daq board prototype (old) with ESP32 (NOT s3 mounted!)
     uint8_t Pin_I2C_SDA = 21, Pin_I2C_SCL = 22;
     uint8_t Pin_INA22x_ALERT = 19;
+ // (42, 38, 40)
 };
 #endif
 static settings_t settings;
