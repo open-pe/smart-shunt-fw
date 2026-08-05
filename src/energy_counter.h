@@ -5,7 +5,7 @@
 #include "adc/sampling.h"
 #include <cmath>
 #include "util.h"
-#include "math.h"
+#include "mean_window.h"
 
 #include "readerwriterqueue.h"
 
