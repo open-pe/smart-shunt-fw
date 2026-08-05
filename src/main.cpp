@@ -293,6 +293,16 @@ void handleConsoleInput(const String &buf) {
 
             // TODO send factors to influxDB
 
+#if !APPLY_U_GAIN_CAL
+            // Reject before logging success: storing a factor that update() never applies
+            // would report "set" and change nothing.
+            if (dim == "U") {
+                ESP_LOGW("main", "U gain calibration is disabled (APPLY_U_GAIN_CAL=0), "
+                         "factor %.9f rejected -- calibrate voltage host-side instead", factor);
+                break;
+            }
+#endif
+
             float was = dim == "U" ? ec->calibFactorU : ec->calibFactorI;
             UART_LOG("%s: set calibration factor for [%s] = %.8f (was %.8f)", samplerName.c_str(), dim.c_str(),
                      multiply ? (was * factor) : factor, was);

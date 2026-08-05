@@ -9,6 +9,19 @@
 
 #include "readerwriterqueue.h"
 
+/// Apply the stored per-device voltage gain factor (calibFactorU) to published samples.
+///
+/// Disabled (0). The factor is keyed to the INA228's I2C address, not to the chip, so it
+/// survives a chip swap and a reflash and is applied invisibly downstream -- a stored
+/// factor from an earlier campaign reads as a gain shift of the sensor itself. Voltage
+/// calibration now lives host-side (calibration/polynom.py in pwr-metering), where it is
+/// versioned and visible in the fit.
+///
+/// Setting this back to 1 re-enables the multiply and makes recorded voltages depend on
+/// hidden EEPROM state again; if you do, log the boot-time factors alongside the data.
+/// The current-channel factor (calibFactorI) is unaffected and still applied.
+#define APPLY_U_GAIN_CAL 0
+
 template<typename T>
 struct UIP {
     T U{}, I{}, P{}, Temp{};
@@ -141,6 +154,13 @@ public:
         eePromIndex(eePromIndex_) {
         if (readCalibrationFactors(eePromIndex_, calibFactorU, calibFactorI)) {
             UART_LOG("%s read calibration factors U/I = (%.8f/%.8f)", name.c_str(), calibFactorU, calibFactorI);
+#if !APPLY_U_GAIN_CAL
+            // Say so explicitly -- a stored factor that is silently ignored looks exactly
+            // like no factor at all, which is the confusion this change exists to end.
+            if (calibFactorU != 1)
+                UART_LOG("%s: stored U gain factor %.8f is NOT applied (APPLY_U_GAIN_CAL=0), "
+                         "voltage is published raw", name.c_str(), calibFactorU);
+#endif
         }
     }
 
@@ -163,7 +183,12 @@ public:
             lastSampleTime = now64;
             retryNotBefore = 0;
 
+            // The U gain correction is disabled: it silently multiplied every published
+            // voltage, so a stored factor from a previous chip/campaign showed up as an
+            // unexplained gain shift in the recorded data (see APPLY_U_GAIN_CAL above).
+#if APPLY_U_GAIN_CAL
             s.u *= calibFactorU;
+#endif
             s.i *= calibFactorI;
 
             auto P = s.p();
