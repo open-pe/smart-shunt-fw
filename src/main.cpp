@@ -68,7 +68,7 @@ std::map<std::string, PowerSampler *> samplers{
     {"ESP32_INA228_2", &ina228_41},
     {"ESP32_INA228_3", &ina228_42},
     //{"TMP117", &tmp117},
-    {"dummy", &dummy},
+    //{"dummy", &dummy},
 };
 
 std::vector<EnergyCounter> energyCounters;
