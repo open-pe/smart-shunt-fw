@@ -93,6 +93,9 @@ public:
     uint8_t waitingForAck = 0; // in-transit
     uint32_t tLastIndicate = 0;
 
+    uint32_t nDroppedNoPeer = 0;   // discarded because nothing was subscribed
+    uint32_t nDroppedBacklog = 0;  // discarded with a subscriber attached -- the real overflow
+
     // An indication that is never acknowledged must not park the buffer forever.
     static constexpr uint32_t ACK_TIMEOUT_MS = 5000;
 
@@ -100,7 +103,7 @@ public:
 
     bool isConnected() const { return pServer && pServer->getConnectedCount() > 0; }
 
-    BleSrv() : chrCallbacks{this} {
+    BleSrv() : serverCallbacks{this}, chrCallbacks{this} {
     }
 
     void begin() {
@@ -145,8 +148,23 @@ public:
     */
 
     void send(const uint8_t *buf, size_t len) {
+        if (!subscribed || !isConnected()) {
+            // Nobody can receive this sample, so there is no point buffering it. The old
+            // code queued it anyway: bleBuf filled up within a few seconds of running
+            // unconnected and then EVERY subsequent sample logged "ble buf overflow",
+            // once per sample, forever. That noise is not just untidy -- it is the same
+            // message a genuine overflow *with a peer attached* produces, so the one
+            // warning that matters was buried in thousands that did not.
+            bleBufPos = 0;
+            ++nDroppedNoPeer;
+            return;
+        }
+
         if (bleBufPos + len > bleBufLen) {
-            ESP_LOGW("main", "ble buf overflow, dropping sample");
+            // This one is real: a peer is subscribed and we still cannot keep up.
+            ++nDroppedBacklog;
+            ESP_LOGW("ble", "buffer full with a subscriber attached, dropping sample "
+                     "(%hu queued, %lu dropped)", bleBufPos, (unsigned long) nDroppedBacklog);
         } else {
             memcpy(&bleBuf[bleBufPos], buf, len);
             bleBufPos += len;
@@ -154,6 +172,15 @@ public:
         if (!inTransmission()) {
             flush();
         }
+    }
+
+    /// Drop every trace of the previous connection. Without this, a stale bleBufPos and a
+    /// stale waitingForAck survive into the next connection, where they either ship a
+    /// fragment of the old session or wedge flush() before it ever sends.
+    void onDisconnected() {
+        bleBufPos = 0;
+        waitingForAck = 0;
+        subscribed = false;
     }
 
     void flush() {
@@ -184,6 +211,13 @@ public:
     }
 
     class ServerCallbacks : public NimBLEServerCallbacks {
+        BleSrv *srv;
+
+    public:
+        explicit ServerCallbacks(BleSrv *srv) : srv{srv} {
+        }
+
+    private:
         void onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo) override {
             Serial.printf("Client address: %s\n", connInfo.getAddress().toString().c_str());
 
@@ -199,8 +233,15 @@ public:
         }
 
         void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
-            Serial.printf("Client disconnected - start advertising\n");
-            NimBLEDevice::startAdvertising();
+            Serial.printf("Client disconnected (reason %d) - start advertising\n", reason);
+            srv->onDisconnected();
+            // Unchecked, this is the difference between "the peer went away" and "this
+            // device is never reachable again", with nothing in the log to tell them
+            // apart. That is exactly the symptom we spent a day chasing from the client
+            // side, so it says so if it fails.
+            if (!NimBLEDevice::startAdvertising()) {
+                ESP_LOGE("ble", "startAdvertising() FAILED after disconnect -- unreachable");
+            }
         }
 
         void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override {
@@ -255,6 +296,12 @@ public:
     void onCharSub(bool sub) {
         waitingForAck = 0;
         subscribed = sub;
+        if (sub && nDroppedNoPeer) {
+            ESP_LOGI("ble", "subscriber attached, %lu samples were discarded unsent",
+                     (unsigned long) nDroppedNoPeer);
+            nDroppedNoPeer = 0;
+        }
+        if (!sub) bleBufPos = 0; // nothing may carry over into the next subscription
     }
 
     /** Handler class for characteristic actions */
