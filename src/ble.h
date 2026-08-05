@@ -88,9 +88,27 @@ public:
     static constexpr auto bleBufLen = BleSrv::MAX_PAYLOAD_LEN * 1;
     uint8_t bleBuf[bleBufLen];
     uint16_t bleBufPos = 0;
+    // How much of bleBuf the in-flight indication actually covers. send() keeps appending
+    // while an indication is unacked, so the ack must only consume THIS many bytes -- an ack
+    // that clears the whole buffer destroys every sample queued since the indication was cut
+    // (that bug made the first energy counter's samples the only ones that ever arrived).
+    //
+    // Single-writer rule: the app task (send/flush) is the ONLY writer of bleBuf, bleBufPos,
+    // inFlightLen and waitingForAck. The NimBLE host-task callbacks write nothing but the
+    // single-byte flags below, which the next send()/flush() consumes -- so no lock is needed
+    // across the two tasks.
+    uint16_t inFlightLen = 0;
+    volatile bool acked = false;      // onAck(done): the in-flight indication was confirmed
+    volatile bool ackFailed = false;  // onAck(!done): it terminally failed; retire it unconsumed
+    // The subscription changed (unsubscribe, resubscribe or disconnect). Consumed at the top of
+    // send()/flush(), which discard the buffer: it belongs to the previous session. A flag (not
+    // an app-task check of `subscribed`) because a quick unsub->resub or disconnect->reconnect
+    // can complete WITHIN one 400ms send cadence, so the app task would never see the gap and
+    // would ship the dead session's bytes to the new client.
+    volatile bool sessionChanged = false;
 
-    bool subscribed = false; // whether the client subscribed for indications
-    uint8_t waitingForAck = 0; // in-transit
+    volatile bool subscribed = false; // whether the client subscribed for indications
+    volatile uint8_t waitingForAck = 0; // in-transit; written by app task, read by onAck
     uint32_t tLastIndicate = 0;
 
     uint32_t nDroppedNoPeer = 0;   // discarded because nothing was subscribed
@@ -147,7 +165,19 @@ public:
     }
     */
 
+    /// App task only. Discard all transfer state; the buffer content died with its session.
+    void consumeSessionChange() {
+        if (!sessionChanged) return;
+        sessionChanged = false;
+        bleBufPos = 0;
+        inFlightLen = 0;
+        waitingForAck = 0;
+        acked = false;
+        ackFailed = false;
+    }
+
     void send(const uint8_t *buf, size_t len) {
+        consumeSessionChange();
         if (!subscribed || !isConnected()) {
             // Nobody can receive this sample, so there is no point buffering it. The old
             // code queued it anyway: bleBuf filled up within a few seconds of running
@@ -156,6 +186,7 @@ public:
             // message a genuine overflow *with a peer attached* produces, so the one
             // warning that matters was buried in thousands that did not.
             bleBufPos = 0;
+            inFlightLen = 0;
             ++nDroppedNoPeer;
             return;
         }
@@ -178,20 +209,48 @@ public:
     /// stale waitingForAck survive into the next connection, where they either ship a
     /// fragment of the old session or wedge flush() before it ever sends.
     void onDisconnected() {
-        bleBufPos = 0;
-        waitingForAck = 0;
+        // Host-task context: flags only. The app task tears the transfer state down when it
+        // consumes sessionChanged.
         subscribed = false;
+        sessionChanged = true;
     }
 
     void flush() {
+        consumeSessionChange();
+        if (acked || ackFailed) {
+            // Consume the ack here, in the app task, instead of inside onAck (host task):
+            // only the bytes the acked indication covered leave the buffer, the tail that
+            // send() queued since moves to the front and goes out with the next indication.
+            // A failed indication retires without consuming -- the payload goes out again.
+            const bool consume = acked;
+            acked = false;
+            ackFailed = false;
+            waitingForAck = 0;
+            if (consume) {
+                if (inFlightLen > bleBufPos) {
+                    // No path is known to produce this; if it ever fires the bookkeeping is
+                    // wrong and silently clamping would hide it.
+                    ESP_LOGE("ble", "inFlightLen %hu > bleBufPos %hu", inFlightLen, bleBufPos);
+                    inFlightLen = bleBufPos;
+                }
+                memmove(bleBuf, bleBuf + inFlightLen, bleBufPos - inFlightLen);
+                bleBufPos -= inFlightLen;
+            }
+            inFlightLen = 0;
+        }
         if (inTransmission()) {
             // Without this the client stops receiving samples while the link stays up, so
             // nothing on either side looks wrong -- the worst kind of stall.  bleBufPos is
-            // untouched by a lost ack, so this re-sends the same payload.
+            // untouched by a lost ack, so the next indicate re-sends the same payload (the
+            // client dedups by idx). A late ack for the ABANDONED indication is ignored by
+            // onAck's waitingForAck guard only until we re-indicate; if it arrives after
+            // that, it consumes the re-sent range early -- acceptable, since that range was
+            // transmitted and the true ack for it then hits the guard and is dropped.
             if (millis() - tLastIndicate < ACK_TIMEOUT_MS) return;
             ESP_LOGW("ble", "no ack for %ums with %hhu indication(s) in flight, re-arming",
                      (unsigned) (millis() - tLastIndicate), waitingForAck);
             waitingForAck = 0;
+            inFlightLen = 0;
         }
         if (!isConnected()) {
             return;
@@ -204,6 +263,7 @@ public:
             if (!res) {
                 ESP_LOGW("ble", "BLE server indicate failed");
             } else {
+                inFlightLen = bleBufPos;
                 ++waitingForAck;
                 tLastIndicate = millis();
             }
@@ -278,30 +338,29 @@ public:
 
     void onAck(bool done) {
         if (waitingForAck) {
-            --waitingForAck;
+            // Host-task context: report only. flush() clears waitingForAck and consumes the
+            // buffer in the app task.
+            if (done) acked = true;
+            else ackFailed = true;
         } else {
-            // A status callback with nothing in flight is reachable: onCharSub() zeroes the
-            // counter, and an indication outstanding at that moment still reports later.
-            // Decrementing here would underflow the uint8_t to 255, so inTransmission()
-            // would be true forever and flush() would never send another sample again --
-            // with the connection still up and healthy.
-            ESP_LOGW("ble", "onAck (done=%i) with no indication in flight", (int) done);
+            // A status callback with nothing in flight is reachable: a session change zeroes
+            // the counter while an indication is still outstanding, and the abandoned
+            // indication reports later. Attributing it to anything would consume bytes it
+            // never covered, so it is only logged.
+            ESP_LOGW("ble", "onAck (done=%i) with no indication in flight, ignored", (int) done);
         }
         ESP_LOGI("ble", "onAck done=%i waiting=%hhu", (int)done, waitingForAck);
-        if (done) {
-            bleBufPos = 0;
-        }
     }
 
     void onCharSub(bool sub) {
-        waitingForAck = 0;
+        // Host-task context: flags only, see the single-writer rule at the top.
         subscribed = sub;
+        sessionChanged = true;
         if (sub && nDroppedNoPeer) {
             ESP_LOGI("ble", "subscriber attached, %lu samples were discarded unsent",
                      (unsigned long) nDroppedNoPeer);
             nDroppedNoPeer = 0;
         }
-        if (!sub) bleBufPos = 0; // nothing may carry over into the next subscription
     }
 
     /** Handler class for characteristic actions */
