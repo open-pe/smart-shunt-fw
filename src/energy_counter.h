@@ -113,6 +113,14 @@ private:
     unsigned long numTimeouts = 0;
     uint32_t numTimeoutsStreak = 0;
 
+    // Stall detection runs on esp_timer (64-bit, never wraps), separately from the
+    // micros()-based lastTime used for the energy integration.
+    int64_t lastSampleTime = 0;
+    int64_t retryNotBefore = 0;
+
+    static constexpr int64_t STALL_TIMEOUT_US = 4000000;  // no sample for 4 s -> stalled
+    static constexpr int64_t BOOT_GRACE_US = 10000000;    // ignore the first 10 s
+
 public:
     UIP<MeanWindow> winPoint{};
     UIP<MeanWindow> winPrint{};
@@ -150,7 +158,10 @@ public:
         PowerSampler &ps(*sampler);
         if (ps.hasData()) {
             Sample s = ps.getSample();
-            unsigned long nowTime = micros(); // capture timestamp after value capture
+            int64_t now64 = esp_timer_get_time();      // capture timestamp after value capture
+            unsigned long nowTime = (unsigned long) now64; // (micros() is this, truncated)
+            lastSampleTime = now64;
+            retryNotBefore = 0;
 
             s.u *= calibFactorU;
             s.i *= calibFactorI;
@@ -185,19 +196,33 @@ public:
 
             if (numTimeoutsStreak > 0) numTimeoutsStreak = 0;
         } else {
-            unsigned long nowTime = micros();
-            auto lt = lastTime; // capture
-            if (nowTime > lt && (nowTime - lt) > 4e6 && nowTime > 10e6) {
-                ++numTimeouts;
-                ++numTimeoutsStreak;
-                ESP_LOGW("ec", "\n%s Timeout waiting for new sample! %u %f %u %u \n",
-                         name.c_str(),
-                         numTimeoutsStreak,
-                         (nowTime - lt) * 1e-6, lt, nowTime);
-                ps.startReading();
-                auto sl = min(100U, numTimeoutsStreak);
-                delay(sl * sl);
-            }
+            // Stall detection, on the 64-bit clock. The old test was
+            //     nowTime > lt && (nowTime - lt) > 4e6 && nowTime > 10e6
+            // on micros(). The unsigned subtraction in the middle is the correct
+            // rollover-safe idiom; the `nowTime > lt` in front of it destroyed that.
+            // micros() wraps every 71.6 min, so a stall beginning shortly before a wrap
+            // leaves nowTime numerically below a stale lt for up to another 71 minutes,
+            // and the entire recovery path is disabled for that whole window -- i.e. it
+            // switches itself off exactly when a sensor has just died. The `nowTime >
+            // 10e6` boot grace re-armed itself on every wrap for the same reason.
+            const int64_t now = esp_timer_get_time();
+            if (lastSampleTime == 0) lastSampleTime = now; // start the clock on first call
+            if (now < BOOT_GRACE_US) return;
+            if (now - lastSampleTime <= STALL_TIMEOUT_US) return;
+            if (now < retryNotBefore) return;
+
+            ++numTimeouts;
+            ++numTimeoutsStreak;
+            ESP_LOGW("ec", "%s: no sample for %.1fs (streak %u), re-arming sampler",
+                     name.c_str(), (double) (now - lastSampleTime) * 1e-6, numTimeoutsStreak);
+            ps.startReading();
+
+            // Back off WITHOUT blocking. This runs in the single realTimeTask that
+            // services every counter in turn, so the old delay(min(100,streak)^2) -- up
+            // to 10 SECONDS -- starved every healthy sensor on the board because one
+            // sensor had died. Now only the dead counter waits.
+            const int64_t backoff = std::min<int64_t>(numTimeoutsStreak * 500000ll, 10000000ll);
+            retryNotBefore = now + backoff;
         }
     }
 
