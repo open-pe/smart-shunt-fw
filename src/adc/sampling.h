@@ -36,6 +36,17 @@ class PowerSampler {
   virtual bool hasData() = 0;
   virtual Sample getSample() = 0;
   virtual uint8_t getStorageId() const = 0;
+
+  /// Does this sampler measure power at all?  Only samplers that do get a vote in
+  /// the idle-sleep decision (see looksActive()/noteWakeEvent() in main.cpp), which
+  /// reads a non-finite mean power as "cannot judge -> stay awake".  For a power
+  /// channel that is the right call: NaN there means a disabled channel or a failed
+  /// read, i.e. a transient inability to judge.  For a temperature-only sampler it
+  /// is not -- its mean power is NaN by construction, forever, so letting it vote
+  /// would permanently pin the whole board awake.
+  /// Defaults to true so a sampler must opt OUT deliberately: the failure direction
+  /// of a wrong answer here is "stays awake", never "sleeps while there is data".
+  virtual bool measuresPower() const { return true; }
 };
 
 

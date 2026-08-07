@@ -381,10 +381,16 @@ void update() {
 
 
         uint16_t bleLenPos = 0;
+        // Idle-sleep vote, tallied over the whole window rather than decided per
+        // counter: a counter that cannot vote must not be able to *cause* sleep by
+        // staying silent, and a counter that has no business voting (temperature)
+        // must not be able to prevent it.  See the resolution below the loop.
+        bool anyPowerVote = false, anyActive = false;
         for (auto &ec: energyCounters) {
             if (ec.newSamplesSinceLastSummary()) {
-                if (looksActive(ec.winPrint.P.getMean())) {
-                    noteWakeEvent();
+                if (ec.sampler->measuresPower()) {
+                    anyPowerVote = true;
+                    if (looksActive(ec.winPrint.P.getMean())) anyActive = true;
                 }
 
                 bool newSample;
@@ -397,6 +403,30 @@ void update() {
                 if (print) {
                     // lcd.updateValues(ec.printSample);
                 }
+            }
+        }
+
+        /// Sleep only on positive evidence that there IS a power channel and it reads
+        /// idle.  Both other outcomes stay awake:
+        ///   - anyActive: something is drawing power.
+        ///   - !anyPowerVote: no power channel reported this window at all -- every
+        ///     sampler failed init, or stalled, or the only samplers registered are
+        ///     temperature-only.  That is "cannot judge", not "nothing to measure",
+        ///     and it is exactly the confusion that once put vbus-only boards to
+        ///     sleep forever at 60 min (see the comment on looksActive above).
+        const bool active = anyActive || !anyPowerVote;
+        if (active) noteWakeEvent();
+
+        // Make the verdict observable: a guard nobody ever sees fire is not a guard.
+        // Logs the first evaluation after boot, then only on a change, so it is
+        // silent in steady state.
+        {
+            static int8_t wasActive = -1;
+            if (wasActive != (int8_t) active) {
+                UART_LOG("idle-sleep vote: %s (powerVote=%d anyActive=%d) after %.0fs idle",
+                         active ? "ACTIVE" : "IDLE", (int) anyPowerVote, (int) anyActive,
+                         (double) (esp_timer_get_time() - timeLastWakeEvent) * 1e-6);
+                wasActive = (int8_t) active;
             }
         }
 

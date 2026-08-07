@@ -46,11 +46,10 @@
 /// is still clear -- and two per iteration forever if the part stops answering,
 /// which would throttle the INA228 channels that share the loop and the bus.
 ///
-/// NOTE before uncommenting the registration in main.cpp: this sampler never sets
-/// u/i/p, so its EnergyCounter's mean power is permanently NaN, and looksActive()
-/// treats a non-finite mean as "cannot judge -> stay awake".  Since the wake vote
-/// is OR'd over all counters, registering this one defeats the 1 h idle-sleep for
-/// the whole board.  That vote needs to exclude temperature-only samplers first.
+/// This sampler never sets u/i/p, so its EnergyCounter's mean power is NaN forever;
+/// measuresPower() returns false to keep it out of the idle-sleep vote, which reads
+/// a non-finite mean as "cannot judge -> stay awake" and would otherwise pin the
+/// whole board awake for good.
 class PowerSampler_TMP117 : public PowerSampler {
 public:
     // Registers.
@@ -92,6 +91,10 @@ public:
     uint8_t getStorageId() const override {
         return 5;
     }
+
+    /// Temperature only -- u/i/p are never set, so this counter's mean power is NaN
+    /// by construction and must not vote on idle-sleep.  See PowerSampler.
+    bool measuresPower() const override { return false; }
 
 private:
     /// NAN on any I2C failure or out-of-range value.
