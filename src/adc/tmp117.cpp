@@ -18,6 +18,14 @@ static bool shouldLog(uint32_t consecutiveErrors) {
 bool PowerSampler_TMP117::init() {
     uint8_t buf[2];
 
+    // Checked here because getStorageId() derives an EEPROM slot from the address,
+    // and the caller only calls it once init() has returned true.  Fail closed: an
+    // out-of-range part is never registered, so it can never index out of range.
+    if (address < ADDR_MIN || address > ADDR_MAX) {
+        ESP_LOGE(TAG, "address 0x%02hhX outside TMP117 range 0x%02X..0x%02X", address, ADDR_MIN, ADDR_MAX);
+        return false;
+    }
+
     if (i2c_read_buf(0, address, REG_DEVICE_ID, buf, 2) != ESP_OK) {
         ESP_LOGE(TAG, "0x%02hhX: no response reading DEVICE_ID", address);
         return false;

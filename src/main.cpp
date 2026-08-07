@@ -43,7 +43,11 @@ PowerSampler_INA228 ina228_41{0x41};
 PowerSampler_INA228 ina228_42{0x42};
 // PowerSampler_ESP32 esp_adc;
 
+// ADD0 -> GND / V+.  A part that is not fitted simply fails the DEVICE_ID check in
+// init() and is never registered, so listing an address costs nothing but one log
+// line at boot.  0x4A (ADD0->SDA) and 0x4B (ADD0->SCL) can be added the same way.
 PowerSampler_TMP117 tmp117{0x48};
+PowerSampler_TMP117 tmp117_49{0x49};
 
 PowerSampler_Dummy dummy{};
 
@@ -68,6 +72,7 @@ std::map<std::string, PowerSampler *> samplers{
     {"ESP32_INA228_2", &ina228_41},
     {"ESP32_INA228_3", &ina228_42},
     {"TMP117", &tmp117},
+    {"TMP117_2", &tmp117_49},
     //{"dummy", &dummy},
 };
 

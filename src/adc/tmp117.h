@@ -76,6 +76,13 @@ public:
     // keeping the poll off the bus for the rest of the cycle.
     static constexpr unsigned long POLL_INTERVAL_US = 25000;
 
+    // ADD0 -> GND / V+ / SDA / SCL.  Four parts per bus.
+    static constexpr uint8_t ADDR_MIN = 0x48, ADDR_MAX = 0x4B;
+    // EEPROM calibration slots.  PowerSampler_INA228 takes 2..4 (0x40..0x42, as
+    // 2 + addr - 0x40), so start above that.  An INA228 at 0x43 would also compute
+    // 5 -- not used today, but do not add one without moving this.
+    static constexpr uint8_t STORAGE_ID_BASE = 5;
+
     explicit PowerSampler_TMP117(uint8_t addr) : address(addr) {
     }
 
@@ -88,8 +95,12 @@ public:
 
     Sample getSample() override;
 
+    /// Distinct per part, so several TMP117s do not alias onto one EEPROM
+    /// calibration slot.  init() rejects an address outside [ADDR_MIN, ADDR_MAX]
+    /// and the caller only reaches this after init() succeeds, so the result is
+    /// always within STORAGE_ID_BASE..STORAGE_ID_BASE+3.
     uint8_t getStorageId() const override {
-        return 5;
+        return STORAGE_ID_BASE + (address - ADDR_MIN);
     }
 
     /// Temperature only -- u/i/p are never set, so this counter's mean power is NaN
@@ -135,7 +146,9 @@ public:
         return sample;
     }
 
+    // Was 5, which now aliases onto the TMP117 at 0x48 -- two samplers sharing one
+    // EEPROM calibration slot overwrite each other silently.
     uint8_t getStorageId() const override {
-        return 5;
+        return 15;
     }
 };
