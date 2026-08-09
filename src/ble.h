@@ -153,7 +153,9 @@ public:
     /// a device-initiated LL update synchronously inside the connect callback trips a controller
     /// assert (lld_con.c:3275) -- fugu paid for that one.
     enum class ConnParams : uint8_t { None, Default, Fast };
-    volatile ConnParams connParamsWanted = ConnParams::None;
+    /// App task (tick()) is the ONLY writer -- see the single-writer rule above. There is
+    /// deliberately no "wanted" companion field: nothing outside tick() gets to request a
+    /// parameter change, because the steady-state answer is "ask for nothing".
     ConnParams connParamsApplied = ConnParams::None;
 
     /// OTA status stream (device -> host). The status hook appends here from the app task and the
@@ -384,7 +386,6 @@ public:
                     // asks for anyway. NOT the old 24/48/180, which is what caused the drops.
                     pServer->updateConnParams(connHandle, 80, 160, 0, 400);
                 connParamsApplied = want;
-                connParamsWanted = ConnParams::None;
             }
         }
 
@@ -498,9 +499,9 @@ public:
              *  callback trips a controller assert (lld_con.c:3275); BleSrv::tick() applies it a pass
              *  later, which is soon enough and cannot assert.
              */
+            // Accept whatever the central negotiated; tick() requests nothing in steady state.
             srv->connHandle = connInfo.getConnHandle();
-            srv->connParamsWanted = ConnParams::None; // accept whatever the central negotiated
-            srv->haveConn = true;                     // set last: it is what gates tick()
+            srv->haveConn = true; // set last: it is what gates tick()
             srv->auxPublished = -1; // force tick() to re-publish for the new client
         }
 
