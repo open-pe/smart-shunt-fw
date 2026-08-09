@@ -207,6 +207,9 @@ static void markOtaValidIfHealthy() {
 void setup(void) {
     bootWatchdogArm();
     Serial.begin(115200);
+    // Early, before the long init below: coming out of the idle deep sleep the pad hold has been
+    // carrying the load across the reset, and it should be handed back to the firmware promptly.
+    auxBegin();
     //#if CONFIG_IDF_TARGET_ESP32S3
     // for unknown reason need to initialize uart0 for serial reading (see loop below)
     // Serial.available() works under Arduino IDE (for both ESP32,ESP32S3), but always returns 0 under platformio
@@ -435,6 +438,22 @@ void handleConsoleInput(const String &buf) {
             } else {
                 ESP_LOGW("main", "No INA22x instance!");
             }
+        } else if (inp == "aux" || inp.startsWith("aux ")) {
+            // Runs on the app task, so it may write NVS directly. Also the only way to work the
+            // switch with no BLE client attached.
+            String arg = inp.substring(3);
+            arg.trim();
+            if (arg.isEmpty()) {
+                UART_LOG("aux GPIO%d = %s", (int) AUX_PIN, auxGet() ? "ON" : "off");
+            } else {
+                bool want;
+                if (!auxParseCommand((const uint8_t *) arg.c_str(), arg.length(), want)) {
+                    ESP_LOGW("aux", "expected: aux [on|off|toggle]");
+                } else {
+                    auxSet(want);
+                    UART_LOG("aux GPIO%d = %s", (int) AUX_PIN, auxGet() ? "ON" : "off");
+                }
+            }
         } else if (inp == "bootinfo") {
             // The only way to see whether a rollback happened: after a bad OTA the device comes back
             // looking perfectly healthy, just running the previous slot.
@@ -464,6 +483,11 @@ void handleConsoleInput(const String &buf) {
             WiFi.disconnect(true);
         } else if (inp == "help") {
             UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
+            UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
+            UART_LOG("aux [on|off|toggle]   aux switch on GPIO%d", (int) AUX_PIN);
+            UART_LOG("bootinfo              running slot + OTA verify state");
+            UART_LOG("reset                 zero the energy counters");
+            UART_LOG("wifi on|off");
         } else {
             UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());
         }
@@ -630,10 +654,13 @@ void update() {
         if (bleSrv.isConnected()) {
             noteWakeEvent();
         } else {
-            UART_LOG("Zero power for %llds, sleeping for %llds",
+            UART_LOG("Zero power for %llds, sleeping for %llds (aux=%s)",
                      (long long) (IDLE_SLEEP_AFTER_US / 1000000),
-                     (long long) (IDLE_SLEEP_WAKE_US / 1000000));
+                     (long long) (IDLE_SLEEP_WAKE_US / 1000000), auxGet() ? "ON" : "off");
             Serial.flush();
+            // Latch the aux pad so the switch survives the sleep and the wake reset. Without it the
+            // load would drop for the whole boot interval every 15 minutes, and nothing would say so.
+            auxArmDeepSleepHold();
             ESP.deepSleep(IDLE_SLEEP_WAKE_US); // wakes and re-checks; never a one-way trip
         }
     }

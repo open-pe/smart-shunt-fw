@@ -31,6 +31,8 @@ NimBLECharacteristicCallbacks::onStatus
 
 #include <ota_ble.h>
 
+#include "aux_switch.h"
+
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
 
@@ -42,6 +44,10 @@ NimBLECharacteristicCallbacks::onStatus
 // their own write-no-response characteristic because that is the only high-throughput path.
 #define OTA_CTRL_CHAR_UUID  "b0e0d1a4-7f52-4a3e-9c61-2d8f5b3ae741"
 #define OTA_DATA_CHAR_UUID  "b0e0d1a5-7f52-4a3e-9c61-2d8f5b3ae741"
+
+// Aux switch (see aux_switch.h). Value is a single ASCII '0'/'1' so a read or a notification is
+// trivially parseable; writes additionally accept raw 0/1 and on/off/toggle.
+#define AUX_CHAR_UUID       "b952dad5-9541-4852-bab6-96b9cbc9131a"
 
 /// Set by the OTA quiesce hook, read by realTimeTask. Flash erase/write disables the CPU cache and
 /// stalls the other core, so the sampling loop has to stand down for the duration of a transfer.
@@ -160,6 +166,23 @@ public:
 
     inline static BleSrv *s_self = nullptr;
 
+    // ---- aux switch --------------------------------------------------------------------------
+    BLECharacteristic *pAuxChar = nullptr;
+    /// Latched by the write callback on the NimBLE host task; applied by tick() on the app task,
+    /// because setting the switch persists to NVS and that writes flash.
+    volatile bool auxReqPending = false;
+    volatile bool auxReqValue = false;
+    /// Last value published to the characteristic, so tick() only notifies on an actual change.
+    int8_t auxPublished = -1;
+
+    void publishAux(bool notify) {
+        if (!pAuxChar) return;
+        const char v = auxGet() ? '1' : '0';
+        pAuxChar->setValue((uint8_t *) &v, 1); // keep a plain read truthful, connected or not
+        if (notify && isConnected()) pAuxChar->notify((uint8_t *) &v, 1);
+        auxPublished = auxGet() ? 1 : 0;
+    }
+
     void otaStatusAppend(const char *line) {
         std::lock_guard<std::mutex> lk(otaTxMutex);
         if (otaTx.size() + strlen(line) + 1 > OTA_TX_CAP) {
@@ -196,7 +219,7 @@ public:
 
     bool isConnected() const { return pServer && pServer->getConnectedCount() > 0; }
 
-    BleSrv() : serverCallbacks{this}, chrCallbacks{this}, otaCtrlCallbacks{this} {
+    BleSrv() : serverCallbacks{this}, chrCallbacks{this}, otaCtrlCallbacks{this}, auxCallbacks{this} {
     }
 
     void begin() {
@@ -220,6 +243,11 @@ public:
         // connection interval, which is the difference between a one-minute push and a ten-minute one.
         pOtaData = pService->createCharacteristic(OTA_DATA_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
         pOtaData->setCallbacks(&otaDataCallbacks);
+
+        pAuxChar = pService->createCharacteristic(
+            AUX_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+        pAuxChar->setCallbacks(&auxCallbacks);
+        publishAux(false); // the pin already has its restored state; make a read reflect it
 
         pService->start();
 
@@ -341,6 +369,15 @@ public:
             }
         }
 
+        // Apply a latched aux request here rather than in the write callback: auxSet() persists to
+        // NVS, and an NVS commit is a flash write -- the one thing the BLE host task must never do.
+        if (auxReqPending) {
+            auxReqPending = false;
+            auxSet(auxReqValue);
+        }
+        // Covers the console path too, so `aux on` over UART notifies any subscribed client.
+        if (auxPublished != (auxGet() ? 1 : 0)) publishAux(true);
+
         drainOtaTx();
     }
 
@@ -446,6 +483,7 @@ public:
             srv->haveConn = true;
             srv->connParamsApplied = ConnParams::None;
             srv->connParamsWanted = ConnParams::Default;
+            srv->auxPublished = -1; // force tick() to re-publish for the new client
         }
 
         void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
@@ -600,6 +638,29 @@ public:
                 ESP_LOGW("otab", "rejected command: %s", v.c_str());
         }
     } otaCtrlCallbacks;
+
+    /// Aux switch control. Host-task context: parse and latch only -- applying it writes NVS.
+    class AuxCallbacks : public NimBLECharacteristicCallbacks {
+        BleSrv *srv;
+
+    public:
+        explicit AuxCallbacks(BleSrv *srv) : srv{srv} {
+        }
+
+        void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
+            std::string v = pCharacteristic->getValue();
+            bool want;
+            if (!auxParseCommand((const uint8_t *) v.data(), v.size(), want)) {
+                ESP_LOGW("aux", "unparseable aux write (%u bytes), ignored", (unsigned) v.size());
+                // Re-publish so the characteristic value never reflects the garbage that was
+                // written into it, and the client can see the switch did not move.
+                srv->publishAux(false);
+                return;
+            }
+            srv->auxReqValue = want;
+            srv->auxReqPending = true;
+        }
+    } auxCallbacks;
 
     /// OTA data plane: copy into the staging ring and return. Nothing here may touch flash.
     class OtaDataCallbacks : public NimBLECharacteristicCallbacks {
