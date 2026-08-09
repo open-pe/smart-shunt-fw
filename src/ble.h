@@ -357,8 +357,19 @@ public:
         // 30-60ms would stretch a 1.4MB image over minutes), and the link goes back to the relaxed
         // interval as soon as the transfer ends, however it ended.
         if (haveConn) {
-            ConnParams want = otaBleActive() ? ConnParams::Fast : ConnParams::Default;
-            if (connParamsWanted != ConnParams::None) want = connParamsWanted;
+            // Steady state: request NOTHING. Whatever the central negotiated is the central's
+            // business, and here it is a deliberate choice -- the bench rpi widens its interval to
+            // 100-200ms with a 4s supervision timeout because BLE and WiFi share one radio
+            // (ble-conn-params.service). The old code overrode that with 30-60ms / 1.8s on every
+            // connect, and the link died with an LL timeout (reason 546) roughly once a minute,
+            // forever, which looked like flaky radio rather than the device arguing with its peer.
+            //
+            // The only time we ask for anything is during an OTA, where the transfer genuinely
+            // needs the throughput -- and then we hand the link back when it is done.
+            ConnParams want = otaBleActive() ? ConnParams::Fast
+                                             : (connParamsApplied == ConnParams::Fast
+                                                    ? ConnParams::Default
+                                                    : connParamsApplied);
             if (want != connParamsApplied) {
                 // 15-30ms during OTA, NOT the 7.5-15ms fugu uses. The bench rpi deliberately widens
                 // its connection interval to 100-200ms (ble-conn-params.service) because BLE and
@@ -369,7 +380,9 @@ public:
                 if (want == ConnParams::Fast)
                     pServer->updateConnParams(connHandle, 12, 24, 0, 400);
                 else
-                    pServer->updateConnParams(connHandle, 24, 48, 0, 180);
+                    // Post-OTA: relax to the coex-friendly end, matching what the bench central
+                    // asks for anyway. NOT the old 24/48/180, which is what caused the drops.
+                    pServer->updateConnParams(connHandle, 80, 160, 0, 400);
                 connParamsApplied = want;
                 connParamsWanted = ConnParams::None;
             }
@@ -486,9 +499,8 @@ public:
              *  later, which is soon enough and cannot assert.
              */
             srv->connHandle = connInfo.getConnHandle();
-            srv->haveConn = true;
-            srv->connParamsApplied = ConnParams::None;
-            srv->connParamsWanted = ConnParams::Default;
+            srv->connParamsWanted = ConnParams::None; // accept whatever the central negotiated
+            srv->haveConn = true;                     // set last: it is what gates tick()
             srv->auxPublished = -1; // force tick() to re-publish for the new client
         }
 
@@ -496,7 +508,6 @@ public:
             Serial.printf("Client disconnected (reason %d) - start advertising\n", reason);
             srv->onDisconnected();
             srv->haveConn = false;
-            srv->connParamsApplied = ConnParams::None;
             srv->peerMtu = 23;
             // Harmless when no transfer is in flight -- otaBleRequestAbort() ignores it -- which
             // matters, because this fires for every ordinary telemetry disconnect too.
