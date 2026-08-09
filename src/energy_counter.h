@@ -108,6 +108,11 @@ public:
     PowerSampler *sampler;
     std::string name;
 
+    /// Cumulative sample count. Read by the OTA rollback confirmation as a liveness signal -- it
+    /// only counts as evidence if it is seen to *increase*, since a wedged build still reports
+    /// whatever it managed before it stopped.
+    unsigned long numSamples() const { return NumSamples; }
+
 private:
     unsigned long NumSamples = 0;
     unsigned long NSamplesLastSummary = 0;

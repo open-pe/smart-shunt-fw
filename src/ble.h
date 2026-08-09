@@ -26,11 +26,26 @@ NimBLECharacteristicCallbacks::onStatus
 
 #include <esp_log.h>
 
+#include <mutex>
+#include <string>
+
+#include <ota_ble.h>
+
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
 
 #define SERVICE_UUID        "e8308d3d-c3b4-45ff-ba58-9c0fb99d0ecb"
 #define CHARACTERISTIC_UUID "df51a73d-0b60-43a5-bc86-a043f3841152"
+
+// OTA firmware push, on the same service as the telemetry characteristic. Control and status share
+// one characteristic (fugu splits them only because it is reusing a console); firmware bytes get
+// their own write-no-response characteristic because that is the only high-throughput path.
+#define OTA_CTRL_CHAR_UUID  "b0e0d1a4-7f52-4a3e-9c61-2d8f5b3ae741"
+#define OTA_DATA_CHAR_UUID  "b0e0d1a5-7f52-4a3e-9c61-2d8f5b3ae741"
+
+/// Set by the OTA quiesce hook, read by realTimeTask. Flash erase/write disables the CPU cache and
+/// stalls the other core, so the sampling loop has to stand down for the duration of a transfer.
+extern volatile bool g_samplingHalted;
 
 #ifdef USE_ARDUINO_BLE
 class BleSrv {
@@ -117,11 +132,71 @@ public:
     // An indication that is never acknowledged must not park the buffer forever.
     static constexpr uint32_t ACK_TIMEOUT_MS = 5000;
 
+    // ---- OTA over BLE -------------------------------------------------------------------------
+    BLECharacteristic *pOtaCtrl = nullptr;
+    BLECharacteristic *pOtaData = nullptr;
+
+    /// Negotiated ATT MTU. onMTUChange used to only print it; notifications have to be chunked to
+    /// it, and CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256 in the prebuilt libs caps the 512 we ask for,
+    /// so the requested value is not the value we get.
+    volatile uint16_t peerMtu = 23;
+    volatile uint16_t connHandle = 0;
+    volatile bool haveConn = false;
+
+    /// Pending connection-parameter change, applied from the app task. NOT from onConnect: issuing
+    /// a device-initiated LL update synchronously inside the connect callback trips a controller
+    /// assert (lld_con.c:3275) -- fugu paid for that one.
+    enum class ConnParams : uint8_t { None, Default, Fast };
+    volatile ConnParams connParamsWanted = ConnParams::None;
+    ConnParams connParamsApplied = ConnParams::None;
+
+    /// OTA status stream (device -> host). The status hook appends here from the app task and the
+    /// control characteristic's write callback appends from the NimBLE host task, so unlike the
+    /// telemetry path this one genuinely needs a lock.
+    std::string otaTx;
+    std::mutex otaTxMutex;
+    static constexpr size_t OTA_TX_CAP = 4096;
+    uint32_t nOtaTxDropped = 0;
+
+    inline static BleSrv *s_self = nullptr;
+
+    void otaStatusAppend(const char *line) {
+        std::lock_guard<std::mutex> lk(otaTxMutex);
+        if (otaTx.size() + strlen(line) + 1 > OTA_TX_CAP) {
+            // Never silently: a dropped status line is a host that waits out a timeout instead of
+            // learning what went wrong.
+            ++nOtaTxDropped;
+            ESP_LOGW("ble", "OTA status buffer full, dropped a line (%lu total)",
+                     (unsigned long) nOtaTxDropped);
+            return;
+        }
+        otaTx += line;
+        otaTx += '\n';
+    }
+
+    static void otaStatusHook(OtaBleLevel level, const char *line) {
+        // Mirrored to the UART log as well as the client -- during a bench OTA the serial console is
+        // often the only view when the BLE link is the thing misbehaving.
+        switch (level) {
+            case OtaBleLevel::Info:  ESP_LOGI("otab", "%s", line); break;
+            case OtaBleLevel::Warn:  ESP_LOGW("otab", "%s", line); break;
+            case OtaBleLevel::Error: ESP_LOGE("otab", "%s", line); break;
+        }
+        if (s_self) s_self->otaStatusAppend(line);
+    }
+
+    static void otaQuiesceHook(bool halt) { g_samplingHalted = halt; }
+
+    static void otaRestartHook() {
+        Serial.flush();
+        ESP.restart();
+    }
+
     bool inTransmission() const { return waitingForAck > 0; }
 
     bool isConnected() const { return pServer && pServer->getConnectedCount() > 0; }
 
-    BleSrv() : serverCallbacks{this}, chrCallbacks{this} {
+    BleSrv() : serverCallbacks{this}, chrCallbacks{this}, otaCtrlCallbacks{this} {
     }
 
     void begin() {
@@ -137,7 +212,23 @@ public:
             CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::INDICATE);
         pCharacteristic->setCallbacks(&chrCallbacks);
         pCharacteristic->setValue("\0\0\0\0");
+
+        pOtaCtrl = pService->createCharacteristic(
+            OTA_CTRL_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+        pOtaCtrl->setCallbacks(&otaCtrlCallbacks);
+        // Write-no-response only: an acked write per chunk would cap throughput at one packet per
+        // connection interval, which is the difference between a one-minute push and a ten-minute one.
+        pOtaData = pService->createCharacteristic(OTA_DATA_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+        pOtaData->setCallbacks(&otaDataCallbacks);
+
         pService->start();
+
+        s_self = this;
+        OtaBleHooks hooks;
+        hooks.status = &BleSrv::otaStatusHook;
+        hooks.quiesce = &BleSrv::otaQuiesceHook;
+        hooks.restart = &BleSrv::otaRestartHook;
+        otaBleInit(hooks);
         // BLEAdvertising *pAdvertising = pServer->getAdvertising();  // this still is working for backward compatibility
         BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
         pAdvertising->addServiceUUID(SERVICE_UUID);
@@ -178,6 +269,14 @@ public:
 
     void send(const uint8_t *buf, size_t len) {
         consumeSessionChange();
+        if (otaBleActive()) {
+            // Telemetry stands down for the duration of a firmware push: the sampler is halted
+            // anyway, and indications would only compete with the OTA status notifies for the same
+            // small mbuf pool. Dropped here rather than queued -- the buffer holds one payload.
+            bleBufPos = 0;
+            inFlightLen = 0;
+            return;
+        }
         if (!subscribed || !isConnected()) {
             // Nobody can receive this sample, so there is no point buffering it. The old
             // code queued it anyway: bleBuf filled up within a few seconds of running
@@ -215,8 +314,56 @@ public:
         sessionChanged = true;
     }
 
+    /// App-task pump for everything that must not run on the NimBLE host task: the deferred
+    /// connection-parameter change and the OTA status stream. Call once per app-task pass, after
+    /// otaBleTick() so the lines it produced go out in the same pass.
+    void tick() {
+        // Self-reconciling rather than hook-driven: an OTA wants a 7.5-15ms interval (the default
+        // 30-60ms would stretch a 1.4MB image over minutes), and the link goes back to the relaxed
+        // interval as soon as the transfer ends, however it ended.
+        if (haveConn) {
+            ConnParams want = otaBleActive() ? ConnParams::Fast : ConnParams::Default;
+            if (connParamsWanted != ConnParams::None) want = connParamsWanted;
+            if (want != connParamsApplied) {
+                if (want == ConnParams::Fast)
+                    pServer->updateConnParams(connHandle, 6, 12, 0, 400);
+                else
+                    pServer->updateConnParams(connHandle, 24, 48, 0, 180);
+                connParamsApplied = want;
+                connParamsWanted = ConnParams::None;
+            }
+        }
+
+        drainOtaTx();
+    }
+
+    /// Push queued OTA status bytes out with real backpressure. A failed notify means NimBLE's mbuf
+    /// pool is empty; looping on it there exhausts the pool and silently drops packets, so we stop
+    /// and pick up on the next tick when it has refilled.
+    void drainOtaTx() {
+        if (!pOtaCtrl || !isConnected()) return;
+        const size_t chunk = peerMtu > 3 ? (size_t) (peerMtu - 3) : 20;
+        for (;;) {
+            std::string out;
+            {
+                std::lock_guard<std::mutex> lk(otaTxMutex);
+                if (otaTx.empty()) return;
+                size_t n = otaTx.size() < chunk ? otaTx.size() : chunk;
+                out.assign(otaTx, 0, n);
+                otaTx.erase(0, n);
+            }
+            if (!pOtaCtrl->notify((const uint8_t *) out.data(), out.size())) {
+                // Put it back at the front; it never reached the peer.
+                std::lock_guard<std::mutex> lk(otaTxMutex);
+                otaTx.insert(0, out);
+                return;
+            }
+        }
+    }
+
     void flush() {
         consumeSessionChange();
+        if (otaBleActive()) return; // see send()
         if (acked || ackFailed) {
             // Consume the ack here, in the app task, instead of inside onAck (host task):
             // only the bytes the acked indication covered leave the buffer, the tail that
@@ -282,19 +429,27 @@ public:
             Serial.printf("Client address: %s\n", connInfo.getAddress().toString().c_str());
 
             /**
-             *  We can use the connection handle here to ask for different connection parameters.
-             *  Args: connection handle, min connection interval, max connection interval
-             *  latency, supervision timeout.
-             *  Units; Min/Max Intervals: 1.25 millisecond increments.
-             *  Latency: number of intervals allowed to skip.
-             *  Timeout: 10 millisecond increments.
+             *  Connection parameters -- min/max interval in 1.25ms units, latency in intervals,
+             *  supervision timeout in 10ms units -- are requested from the app task, not here.
+             *  Issuing a device-initiated LL connection update synchronously from inside the connect
+             *  callback trips a controller assert (lld_con.c:3275); BleSrv::tick() applies it a pass
+             *  later, which is soon enough and cannot assert.
              */
-            pServer->updateConnParams(connInfo.getConnHandle(), 24, 48, 0, 180);
+            srv->connHandle = connInfo.getConnHandle();
+            srv->haveConn = true;
+            srv->connParamsApplied = ConnParams::None;
+            srv->connParamsWanted = ConnParams::Default;
         }
 
         void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
             Serial.printf("Client disconnected (reason %d) - start advertising\n", reason);
             srv->onDisconnected();
+            srv->haveConn = false;
+            srv->connParamsApplied = ConnParams::None;
+            srv->peerMtu = 23;
+            // Harmless when no transfer is in flight -- otaBleRequestAbort() ignores it -- which
+            // matters, because this fires for every ordinary telemetry disconnect too.
+            otaBleRequestAbort();
             // Unchecked, this is the difference between "the peer went away" and "this
             // device is never reachable again", with nothing in the log to tell them
             // apart. That is exactly the symptom we spent a day chasing from the client
@@ -306,6 +461,7 @@ public:
 
         void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override {
             Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, connInfo.getConnHandle());
+            srv->peerMtu = MTU; // notifications are chunked to this, so it has to be kept, not just printed
         }
 
         /********************* Security handled here *********************/
@@ -416,6 +572,38 @@ public:
             Serial.printf("%s\n", str.c_str());
         }
     } chrCallbacks;
+
+    /// OTA control plane. Runs on the NimBLE host task, so it only parses and latches -- otaBleTick()
+    /// on the app task does the flash work, which blocks for far longer than a host callback may.
+    class OtaCtrlCallbacks : public NimBLECharacteristicCallbacks {
+        BleSrv *srv;
+
+    public:
+        explicit OtaCtrlCallbacks(BleSrv *srv) : srv{srv} {
+        }
+
+        void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
+            std::string v = pCharacteristic->getValue();
+            // Tolerate a client that sends the newline the protocol is written with.
+            while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+            if (v.empty()) return;
+            if (otaBleSubmitCommand(v.c_str()) == OtaBleSubmit::Rejected) {
+                // Reported synchronously rather than left to time out: everything checkable without
+                // touching flash is checked in submit, so the client learns now.
+                ESP_LOGW("otab", "rejected command: %s", v.c_str());
+                srv->otaStatusAppend("OTAB FAIL bad-command");
+            }
+        }
+    } otaCtrlCallbacks;
+
+    /// OTA data plane: copy into the staging ring and return. Nothing here may touch flash.
+    class OtaDataCallbacks : public NimBLECharacteristicCallbacks {
+    public:
+        void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
+            std::string v = pCharacteristic->getValue();
+            otaBleStageBytes((const uint8_t *) v.data(), v.size());
+        }
+    } otaDataCallbacks;
 };
 
 

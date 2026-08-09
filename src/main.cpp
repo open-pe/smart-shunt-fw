@@ -18,6 +18,7 @@
 
 #include "driver/uart.h"
 #include "esp_timer.h"
+#include "esp_ota_ops.h"
 #include <WiFi.h>
 //#include "adc/adc_esp_dma.h"
 //#if ARDUINO_USB_MODE == 1
@@ -78,6 +79,9 @@ std::map<std::string, PowerSampler *> samplers{
 
 std::vector<EnergyCounter> energyCounters;
 
+/// Declared in ble.h, set by the OTA quiesce hook, read by realTimeTask.
+volatile bool g_samplingHalted = false;
+
 BleSrv bleSrv;
 
 bool disableWifi = true;
@@ -121,7 +125,87 @@ constexpr auto RT_PRIO = 20; // highest priority is 24
 
 void vTaskGetRunTimeStats();
 
+// ---- OTA safety net ---------------------------------------------------------------------------
+//
+// The bootloader shipped by pioarduino has CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, so a freshly
+// OTA'd image boots as PENDING_VERIFY and the *next reset* reverts it unless the app confirms it.
+// That gives us a real safety net, but only if two things exist: something that confirms on evidence
+// the firmware actually works, and something that guarantees a reset when it doesn't. Without the
+// second, an image that hangs in setup() just sits there -- no reset, so no rollback, so a brick that
+// needs a wire and a serial adapter. That is not hypothetical; it is how the fugu units were lost.
+
+static constexpr uint32_t OTA_VALIDATE_UPTIME_MS = 60000;
+static constexpr uint64_t BOOT_WATCHDOG_TIMEOUT_US = 30ull * 1000000ull;
+
+static esp_timer_handle_t bootWatchdog = nullptr;
+
+static void bootWatchdogFire(void *) {
+    // No logging that could itself block -- the whole point is that we got here because something is
+    // stuck. A reset with PENDING_VERIFY set is what hands control back to the bootloader.
+    esp_restart();
+}
+
+static void bootWatchdogArm() {
+    esp_timer_create_args_t args = {};
+    args.callback = &bootWatchdogFire;
+    args.name = "bootwd";
+    args.dispatch_method = ESP_TIMER_TASK;
+    if (esp_timer_create(&args, &bootWatchdog) != ESP_OK) {
+        ESP_LOGE("main", "boot watchdog could not be created -- a bad OTA will brick this device");
+        bootWatchdog = nullptr;
+        return;
+    }
+    esp_timer_start_once(bootWatchdog, BOOT_WATCHDOG_TIMEOUT_US);
+}
+
+static void bootWatchdogDisarm() {
+    if (!bootWatchdog) return;
+    esp_timer_stop(bootWatchdog);
+    esp_timer_delete(bootWatchdog);
+    bootWatchdog = nullptr;
+}
+
+/// Confirm a PENDING_VERIFY image, but only on evidence that the device is doing its job. "setup()
+/// returned" is not that evidence -- the failure worth catching is exactly a build that boots and
+/// then does not measure.
+static void markOtaValidIfHealthy() {
+    static bool done = false;
+    if (done) return;
+
+    unsigned long total = 0;
+    for (auto &ec: energyCounters) total += ec.numSamples();
+
+    // Two observations, not one. NumSamples is cumulative, so a single non-zero reading would also
+    // be satisfied by a build that sampled once and then wedged -- which is the shape of failure
+    // this is here to catch. Snapshot at the halfway mark, then require the count to have MOVED.
+    static unsigned long snapshot = 0;
+    static bool haveSnapshot = false;
+    if (!haveSnapshot) {
+        if (millis() < OTA_VALIDATE_UPTIME_MS / 2) return;
+        snapshot = total;
+        haveSnapshot = true;
+        return;
+    }
+    if (millis() < OTA_VALIDATE_UPTIME_MS) return;
+    if (total <= snapshot) {
+        // Not sampling. Stay unconfirmed: a reset from here rolls back, which is the right default
+        // when we cannot show the image works.
+        return;
+    }
+
+    done = true;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+            ESP_LOGI("main", "OTA image confirmed valid (rollback cancelled)");
+        else
+            ESP_LOGE("main", "failed to confirm OTA image valid");
+    }
+}
+
 void setup(void) {
+    bootWatchdogArm();
     Serial.begin(115200);
     //#if CONFIG_IDF_TARGET_ESP32S3
     // for unknown reason need to initialize uart0 for serial reading (see loop below)
@@ -203,6 +287,10 @@ void setup(void) {
     xTaskCreatePinnedToCore(realTimeTask, "loopRt", 4096 * 4, NULL, RT_PRIO, NULL, RT_CORE);
     xTaskCreatePinnedToCore(nonRealTimeTask, "loopy", 4096 * 4, NULL, 1, NULL, RT_CORE - 1);
 
+    // Past every blocking call in setup(); from here the tasks carry the liveness argument, and
+    // markOtaValidIfHealthy() is what decides whether this image gets to keep running.
+    bootWatchdogDisarm();
+
     //TaskStatus_t *pxTaskStatusArray[20];
     //uxTaskGetSystemState(pxTaskStatusArray, 20);
     //vTaskGetRunTimeStats();
@@ -231,6 +319,13 @@ CONFIG_ARDUINO_UDP_RUNNING_CORE == RT_CORE or CONFIG_ARDUINO_SERIAL_EVENT_TASK_R
 #endif
 
     while (true) {
+        if (g_samplingHalted) {
+            // An OTA is writing flash. Erase/write disables the CPU cache and stalls this core, so a
+            // tight sampling loop here does nothing but starve the transfer and generate I2C timeouts.
+            // Yielding also lets the idle task run, which the 5s panic-on-timeout task watchdog wants.
+            vTaskDelay(10);
+            continue;
+        }
         for (auto &ec: energyCounters) {
             ec.update();
         }
@@ -340,6 +435,27 @@ void handleConsoleInput(const String &buf) {
             } else {
                 ESP_LOGW("main", "No INA22x instance!");
             }
+        } else if (inp == "bootinfo") {
+            // The only way to see whether a rollback happened: after a bad OTA the device comes back
+            // looking perfectly healthy, just running the previous slot.
+            const esp_partition_t *running = esp_ota_get_running_partition();
+            esp_ota_img_states_t st;
+            const char *state = "unknown";
+            if (running && esp_ota_get_state_partition(running, &st) == ESP_OK) {
+                switch (st) {
+                    case ESP_OTA_IMG_NEW:            state = "NEW"; break;
+                    case ESP_OTA_IMG_PENDING_VERIFY: state = "PENDING_VERIFY"; break;
+                    case ESP_OTA_IMG_VALID:          state = "VALID"; break;
+                    case ESP_OTA_IMG_INVALID:        state = "INVALID"; break;
+                    case ESP_OTA_IMG_ABORTED:        state = "ABORTED"; break;
+                    case ESP_OTA_IMG_UNDEFINED:      state = "UNDEFINED"; break;
+                }
+            }
+            const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+            UART_LOG("running=%s state=%s next=%s slot=%u B, uptime=%lus, ota=%s",
+                     running ? running->label : "?", state, next ? next->label : "none",
+                     (unsigned) (next ? next->size : 0), (unsigned long) (millis() / 1000),
+                     otaBleActive() ? "ACTIVE" : "idle");
         } else if (inp == "wifi on") {
             disableWifi = false;
             connect_wifi_async();
@@ -366,6 +482,20 @@ void update() {
     assert(xPortGetCoreID() != RT_CORE);
 
     //ESP_LOGI("main", "Loop!");
+
+    // OTA runs entirely on this task -- esp_ota_begin/write/end block on flash for far longer than a
+    // BLE host callback may. The BLE callbacks only latch a command or copy bytes into the ring; this
+    // is where the flash actually gets written. bleSrv.tick() goes after it so the status lines it
+    // just produced are notified in the same pass.
+    otaBleTick(millis());
+    bleSrv.tick();
+    if (otaBleActive()) {
+        // Deep-sleeping out from under a firmware transfer would be a spectacular way to brick the
+        // device: the OTA slot is half-written and the boot partition has not moved. isConnected()
+        // covers this incidentally, but not by intent.
+        noteWakeEvent();
+    }
+    markOtaValidIfHealthy();
 
     for (auto &ec: energyCounters) {
         ec.consumeQueue();
