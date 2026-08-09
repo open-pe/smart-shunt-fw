@@ -587,12 +587,10 @@ public:
             // Tolerate a client that sends the newline the protocol is written with.
             while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
             if (v.empty()) return;
-            if (otaBleSubmitCommand(v.c_str()) == OtaBleSubmit::Rejected) {
-                // Reported synchronously rather than left to time out: everything checkable without
-                // touching flash is checked in submit, so the client learns now.
+            // A rejection is announced by the module itself, on the same OTAB status channel as
+            // every other failure -- nothing to add here beyond echoing what was actually sent.
+            if (otaBleSubmitCommand(v.c_str()) == OtaBleSubmit::Rejected)
                 ESP_LOGW("otab", "rejected command: %s", v.c_str());
-                srv->otaStatusAppend("OTAB FAIL bad-command");
-            }
         }
     } otaCtrlCallbacks;
 
