@@ -312,6 +312,13 @@ public:
         // consumes sessionChanged.
         subscribed = false;
         sessionChanged = true;
+        // Undelivered OTA status belongs to the session that just ended. Carrying it over would
+        // hand the next client the previous one's READY/FAIL lines -- the same trap the telemetry
+        // buffer avoids via sessionChanged, and it would desynchronise a host's line parser.
+        {
+            std::lock_guard<std::mutex> lk(otaTxMutex);
+            otaTx.clear();
+        }
     }
 
     /// App-task pump for everything that must not run on the NimBLE host task: the deferred
