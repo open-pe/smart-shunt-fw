@@ -360,8 +360,14 @@ public:
             ConnParams want = otaBleActive() ? ConnParams::Fast : ConnParams::Default;
             if (connParamsWanted != ConnParams::None) want = connParamsWanted;
             if (want != connParamsApplied) {
+                // 15-30ms during OTA, NOT the 7.5-15ms fugu uses. The bench rpi deliberately widens
+                // its connection interval to 100-200ms (ble-conn-params.service) because BLE and
+                // WiFi share one radio there, and asking for 7.5ms fought that mitigation: the link
+                // died with an LL timeout after ~35s of transfer, reproducibly, twice. The pressure
+                // for a tiny interval came from 20-byte writes anyway; with the MTU actually
+                // negotiated (509-byte chunks) this is far more headroom than the transfer needs.
                 if (want == ConnParams::Fast)
-                    pServer->updateConnParams(connHandle, 6, 12, 0, 400);
+                    pServer->updateConnParams(connHandle, 12, 24, 0, 400);
                 else
                     pServer->updateConnParams(connHandle, 24, 48, 0, 180);
                 connParamsApplied = want;

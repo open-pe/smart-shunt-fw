@@ -137,6 +137,17 @@ void vTaskGetRunTimeStats();
 static constexpr uint32_t OTA_VALIDATE_UPTIME_MS = 60000;
 static constexpr uint64_t BOOT_WATCHDOG_TIMEOUT_US = 30ull * 1000000ull;
 
+/// Overrides the weak definition in the Arduino core (esp32-hal-misc.c). The core's default returns
+/// false, which makes initArduino() call esp_ota_mark_app_valid_cancel_rollback() immediately --
+/// BEFORE setup() runs, on nothing but the fact that the image reached init.
+///
+/// That silently defeats the entire rollback safety net: by the time markOtaValidIfHealthy() looks,
+/// the image is already VALID and there is nothing left to confirm. It was caught on hardware, where
+/// the first real OTA came up `state=VALID` at 43s uptime against a 60s confirm gate that had not
+/// run. Returning true defers the decision to us, so the image stays PENDING_VERIFY until it has
+/// shown it can actually sample -- and a reset before that rolls back, which is the whole point.
+extern "C" bool verifyRollbackLater() { return true; }
+
 static esp_timer_handle_t bootWatchdog = nullptr;
 
 static void bootWatchdogFire(void *) {

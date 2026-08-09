@@ -17,7 +17,22 @@ python3 ../pwr-metering/smart-shunt-ota-ble.py .pio/build/esp32s3/firmware.bin -
 ```
 
 Expect `OTAB READY`, an upload bar, a flush bar, then the device disconnecting and re-advertising.
-A full image takes roughly a minute.
+A 1.4 MB image takes about 10 s at a 512-byte MTU.
+
+**Two things had to be right before this was reliable, both learned the hard way:**
+
+- **The MTU must actually be negotiated.** On BlueZ, bleak reports the 23-byte default until the MTU
+  is acquired (`client._backend._acquire_mtu()` — note it is on the *backend*, not the facade).
+  Chunking at 20 bytes gives ~17 kB/s and an 85-second transfer; at 509 bytes it is ~10 s. The
+  pusher now acquires it, and prints the value it is using.
+- **Do not ask for a very short connection interval.** The OTA path requests 15–30 ms, not the
+  7.5–15 ms fugu uses. The bench rpi deliberately widens its interval to 100–200 ms
+  (`ble-conn-params.service`) because BLE and WiFi share one radio there; asking for 7.5 ms fought
+  that and the link died with an LL timeout (`reason 546`) after ~35 s of transfer, reproducibly,
+  twice, at the same point. With the MTU fixed there is no need for the short interval anyway.
+
+A dropped link mid-transfer is safe: the device aborts, discards the partial slot and keeps running
+the old image. Just retry.
 
 ## GATT
 
@@ -68,6 +83,19 @@ not fit before erasing anything.
 
 The bootloader has `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, so a freshly pushed image boots as
 `PENDING_VERIFY` and **the next reset reverts it** unless the firmware confirms itself.
+
+**The Arduino core defeats this by default, and it is silent.** `initArduino()` (esp32-hal-misc.c)
+calls `esp_ota_mark_app_valid_cancel_rollback()` before `setup()` runs, gated on a weak
+`verifyRollbackLater()` that returns `false`. So the image is confirmed on nothing but the fact that
+it reached init — every health check downstream is then dead code, because by the time it looks the
+state is already `VALID`.
+
+Caught on hardware: the first real OTA came up `state=VALID` at 43 s uptime against a 60 s confirm
+gate that had never run. `main.cpp` now provides a non-weak `verifyRollbackLater()` returning `true`,
+which defers the decision. Verified afterwards: `PENDING_VERIFY` at 21 s → `VALID` at 110 s.
+
+If you ever see a fresh OTA reach `VALID` sooner than `OTA_VALIDATE_UPTIME_MS`, that override has
+been lost.
 
 Two pieces in `main.cpp` make that a safety net rather than a trap:
 
