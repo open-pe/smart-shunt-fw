@@ -19,6 +19,7 @@ std::string timeStr();
 void connect_wifi_async();
 void wait_for_wifi();
 void wifi_tick();
+[[noreturn]] void wifiTask(void *);
 
 class Point;
 void influxWritePointUDP(const Point &p, bool flush=false);

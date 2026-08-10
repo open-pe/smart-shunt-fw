@@ -106,36 +106,29 @@ void wait_for_wifi() {
 }
 
 extern bool disableWifi;
-static bool wifiConnecting = false;
-static unsigned long wifiLastAttempt = 0;
-static constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+extern bool wifiTimeSyncOnly;
 
-void wifi_tick() {
-    if (disableWifi) {
-        if (wifiConnecting) {
-            WiFi.disconnect(true);
-            wifiConnecting = false;
+[[noreturn]] void wifiTask(void *) {
+    while (true) {
+        if (disableWifi) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
-        return;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        wifiConnecting = false;
-        return;
-    }
-
-    if (!wifiConnecting) {
-        wifiConnecting = true;
-        wifiLastAttempt = millis();
-        connect_wifi_async();
-        ESP_LOGI("wifi", "starting async connect attempt");
-        return;
-    }
-
-    if (millis() - wifiLastAttempt > WIFI_RETRY_INTERVAL_MS) {
-        wifiConnecting = false;
+        if (WiFi.status() == WL_CONNECTED) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        ESP_LOGI("wifi", "wifiTask: running wifiMulti.run()...");
+        if (wifiMulti.run() == WL_CONNECTED) {
+            ESP_LOGI("wifi", "Connected, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
+        } else {
+            ESP_LOGW("wifi", "wifiMulti.run() failed, retrying in 10s");
+            vTaskDelay(pdMS_TO_TICKS(10000));
+        }
     }
 }
+
+void wifi_tick() {}
 
 void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
     if (msg.length() > CONFIG_TCP_MSS) {

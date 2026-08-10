@@ -243,6 +243,7 @@ void setup(void) {
 
     xTaskCreatePinnedToCore(realTimeTask, "loopRt", 4096 * 4, NULL, RT_PRIO, NULL, RT_CORE);
     xTaskCreatePinnedToCore(appTask, "loopy", 4096 * 4, NULL, 1, NULL, RT_CORE - 1);
+    xTaskCreatePinnedToCore(wifiTask, "wifi", 4096, NULL, 0, NULL, RT_CORE - 1);
 
     bootWatchdogDisarm();
 }
