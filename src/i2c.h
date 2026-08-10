@@ -2,8 +2,14 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+#include <FreeRTOS.h>
+#include <semphr.h>
+#else
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#endif
 
 /*
  * ONE I2C stack, and one lock around it.

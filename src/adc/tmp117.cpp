@@ -3,7 +3,11 @@
 
 #include "tmp117.h"
 
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+#else
 #include <esp32-hal.h>
+#endif
 
 #include "../i2c.h"
 

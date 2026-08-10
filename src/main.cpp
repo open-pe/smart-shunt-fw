@@ -1,6 +1,296 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#ifdef TARGET_STM32H5
+
+#include "esp_compat.h"
+#include <FreeRTOS.h>
+#include <task.h>
+#include <map>
+#include <vector>
+#include <String.h>
+
+#include "adc/ina228.h"
+#include "adc/ina228_mux.h"
+#include "adc/tmp117.h"
+#include "settings.h"
+#include "i2c.h"
+#include "ble_bridge.h"
+#include "energy_counter.h"
+#include "util.h"
+#include "aux_switch.h"
+
+#ifdef TARGET_STM32H5
+#include <HardwareSerial.h>
+HardwareSerial BleSerial(PB15, PB14);
+BleBridge bleBridge(BleSerial);
+#else
+BleBridge bleBridge;
+#endif
+
+PowerSampler_INA228 ina228_40{0x40};
+
+INA228MuxBackend muxBackend{0x41, settings.Pin_INA22x_ALERT2,
+                            settings.Pin_Mux_S1, settings.Pin_Mux_S2, settings.Pin_Mux_Zero};
+PowerSampler_MuxChannel mux_chA{muxBackend, INA228MuxBackend::Target::CH_A, 3};
+PowerSampler_MuxChannel mux_chB{muxBackend, INA228MuxBackend::Target::CH_B, 11};
+
+PowerSampler_TMP117 tmp117{0x48};
+PowerSampler_TMP117 tmp117_49{0x49};
+
+PowerSampler_Dummy dummy{};
+
+std::map<std::string, PowerSampler *> samplers{
+    {"INA228",     &ina228_40},
+    {"INA228_2A",  &mux_chA},
+    {"INA228_2B",  &mux_chB},
+    {"TMP117",     &tmp117},
+    {"TMP117_2",   &tmp117_49},
+};
+
+std::vector<EnergyCounter> energyCounters;
+
+static int64_t timeLastWakeEvent = 0;
+constexpr int64_t IDLE_SLEEP_AFTER_US = 3600ll * 1000000ll;
+
+static void noteWakeEvent() { timeLastWakeEvent = esp_timer_get_time(); }
+
+static bool looksActive(float meanPower) {
+    if (!std::isfinite(meanPower)) return true;
+    return std::abs(meanPower) >= 0.0005f;
+}
+
+[[noreturn]] void realTimeTask(void *arg);
+[[noreturn]] void nonRealTimeTask(void *arg);
+
+constexpr auto RT_PRIO = 20;
+
+void setup(void) {
+    Serial.begin(115200);
+    delay(500);
+    auxBegin();
+
+    ESP_LOGI("main", "SmartShunt STM32H5 started");
+
+    Wire.begin();
+    Wire.setClock(400000);
+
+    bleBridge.begin();
+
+    if (sizeof(WireSample) != 64) assert(false);
+    if (sizeof(Sample) != 32) assert(false);
+
+    if (!muxBackend.init()) {
+        ESP_LOGW("main", "INA228 mux backend (0x41) init failed");
+    }
+
+    for (auto p: samplers) {
+        if (!p.second->init()) {
+            ESP_LOGI("main", "%s: Failed to initialize sampler.", p.first.c_str());
+        } else {
+            energyCounters.emplace_back(EnergyCounter{p.second, p.first, p.second->getStorageId()});
+            ESP_LOGI("main", "Initialized energy counter for %s", p.first.c_str());
+        }
+    }
+
+    if (energyCounters.empty()) {
+        scan_i2c();
+    }
+
+    for (auto &ec: energyCounters) {
+        ec.sampler->startReading();
+    }
+
+    xTaskCreate(realTimeTask, "rt", 2048, NULL, RT_PRIO, NULL);
+    xTaskCreate(nonRealTimeTask, "nrt", 2048, NULL, 1, NULL);
+}
+
+[[noreturn]] void realTimeTask(void *arg) {
+    (void)arg;
+    while (true) {
+        for (auto &ec: energyCounters) {
+            ec.update();
+        }
+        taskYIELD();
+    }
+}
+
+void loop() {
+    vTaskDelay(1000);
+}
+
+unsigned long LastTimeOut = 0;
+unsigned long LastTimePrint = 0;
+
+void handleConsoleInput(const String &buf);
+
+void update() {
+    unsigned long nowTime = micros();
+
+    bleBridge.tick();
+
+    for (auto &ec: energyCounters) {
+        ec.consumeQueue();
+    }
+
+    if (nowTime - LastTimeOut > 400e3) {
+        auto print = nowTime - LastTimePrint > 2000e3;
+
+        bool anyPowerVote = false, anyActive = false;
+        for (auto &ec: energyCounters) {
+            if (ec.newSamplesSinceLastSummary()) {
+                if (ec.sampler->measuresPower()) {
+                    anyPowerVote = true;
+                    if (looksActive(ec.winPrint.P.getMean())) anyActive = true;
+                }
+
+                bool newSample;
+                auto ws = ec.summary((nowTime - LastTimeOut), print, newSample);
+                if (newSample) {
+                    bleBridge.send((uint8_t*)&ws, sizeof(ws));
+                }
+            }
+        }
+
+        const bool active = anyActive || !anyPowerVote;
+        if (active) noteWakeEvent();
+
+        bleBridge.flush();
+
+        if (print) {
+            if (energyCounters.size() > 1) UART_LOG("");
+            LastTimePrint = nowTime;
+        }
+
+        LastTimeOut = nowTime;
+    }
+
+    if (Serial.available()) {
+        auto r = Serial.readString();
+        Serial.print(r);
+        Serial.flush();
+        int lb;
+        while ((lb = r.indexOf('\n')) != -1) {
+            String line = r.substring(0, lb);
+            handleConsoleInput(line);
+            r = r.substring(lb + 1);
+        }
+        noteWakeEvent();
+    }
+}
+
+[[noreturn]] void nonRealTimeTask(void *arg) {
+    (void)arg;
+    while (1) {
+        update();
+        vTaskDelay(10);
+    }
+}
+
+void handleConsoleInput(const String &buf) {
+    while (1) {
+        String inp(buf);
+        inp.trim();
+        if (inp.length() == 0) break;
+
+        if (inp == "reset") {
+            ESP_LOGW("main", "Reset in 1s!");
+            delay(1000);
+            for (auto &ec: energyCounters) {
+                ec.reset();
+            }
+        } else if (inp.startsWith("calibrate ")) {
+            std::string samplerName = inp.substring(10, inp.indexOf(' ', 10)).c_str();
+            size_t i = 10 + samplerName.size() + 1;
+
+            EnergyCounter *ec = nullptr;
+            for (auto &ec_: energyCounters) {
+                if (ec_.name == samplerName) {
+                    ec = &ec_;
+                    break;
+                }
+            }
+            if (!ec) {
+                ESP_LOGW("main", "Sampler with name %s not found", samplerName.c_str());
+                break;
+            }
+
+            auto dim = inp.substring(i, i + 1);
+            dim.toUpperCase();
+            i += 2;
+            bool multiply = (inp.charAt(i) == '*');
+            if (multiply)++i;
+            auto factor = inp.substring(i).toFloat();
+            if (!checkCalibrationFactorBounds(factor)) {
+                ESP_LOGW("main", "Calibration factor %.9f out of bounds, rejected", factor);
+                break;
+            }
+
+#if !APPLY_U_GAIN_CAL
+            if (dim == "U") {
+                ESP_LOGW("main", "U gain calibration is disabled (APPLY_U_GAIN_CAL=0)");
+                break;
+            }
+#endif
+            float was = dim == "U" ? ec->calibFactorU : ec->calibFactorI;
+            UART_LOG("%s: set calibration factor for [%s] = %.8f (was %.8f)", samplerName.c_str(), dim.c_str(),
+                     multiply ? (was * factor) : factor, was);
+            if (dim == "U") {
+                ec->setCalibrationFactors(factor, NAN, multiply);
+            } else if (dim == "I") {
+                ec->setCalibrationFactors(NAN, factor, multiply);
+            } else {
+                ESP_LOGW("main", "unknown dim %s", dim.c_str());
+            }
+        } else if (inp.startsWith("ina22x-resistor-range")) {
+            int devIdx = 0;
+            size_t i = strlen("ina22x-resistor-range");
+            if (inp.length() > i && (inp[i] >= '2' and inp[i] <= '3')) {
+                devIdx = 1 + (inp[i] - '2');
+                ++i;
+            }
+            auto resStr = inp.substring(i + 1, inp.indexOf(' ', i + 1));
+            i += resStr.length() + 1;
+            auto range = inp.substring(i).toFloat();
+            auto res = resStr.toFloat();
+
+            if (ina228_instance[devIdx]) {
+                UART_LOG("INA228[%i] setResistorRange(%.3fmOhm, %.3fA)", devIdx, res * 1e3f, range);
+                ina228_instance[devIdx]->setResistorRange(res, range);
+            } else if (devIdx == 1 && ina228_mux_instance) {
+                UART_LOG("INA228 mux setResistorRange(%.3fmOhm, %.3fA)", res * 1e3f, range);
+                ina228_mux_instance->setResistorRange(res, range);
+            } else {
+                ESP_LOGW("main", "No INA22x instance!");
+            }
+        } else if (inp == "aux" || inp.startsWith("aux ")) {
+            String arg = inp.substring(3);
+            arg.trim();
+            if (arg.length() == 0) {
+                UART_LOG("aux = %s", auxGet() ? "ON" : "off");
+            } else {
+                bool want;
+                if (!auxParseCommand((const uint8_t *) arg.c_str(), arg.length(), want)) {
+                    ESP_LOGW("aux", "expected: aux [on|off|toggle]");
+                } else {
+                    auxSet(want);
+                    UART_LOG("aux = %s", auxGet() ? "ON" : "off");
+                }
+            }
+        } else if (inp == "help") {
+            UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
+            UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
+            UART_LOG("aux [on|off|toggle]");
+            UART_LOG("reset   zero the energy counters");
+        } else {
+            UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());
+        }
+        break;
+    }
+}
+
+#else
+
 #include <InfluxDbClient.h>
 #include <map>
 
@@ -8,6 +298,7 @@
 #include "adc/adc_esp.h"
 #include "adc/ina226.h"
 #include "adc/ina228.h"
+#include "adc/ina228_mux.h"
 #include "adc/ads1220.h"
 #include "adc/ads1262.h"
 #include "adc/ads131.h"
@@ -40,8 +331,13 @@ PowerSampler_ADS131 ads131;
 
 PowerSampler_INA226 ina226;
 PowerSampler_INA228 ina228_40{0x40};
-PowerSampler_INA228 ina228_41{0x41};
-PowerSampler_INA228 ina228_42{0x42};
+
+// 0x41 drives a TMUX8612 mux for dual VBUS sampling (single-shot mode).
+// 0x42 is removed — its board is replaced by the mux's second channel.
+INA228MuxBackend muxBackend{0x41, settings.Pin_INA22x_ALERT2,
+                            settings.Pin_Mux_S1, settings.Pin_Mux_S2, settings.Pin_Mux_Zero};
+PowerSampler_MuxChannel mux_chA{muxBackend, INA228MuxBackend::Target::CH_A, /*storageId=*/3};
+PowerSampler_MuxChannel mux_chB{muxBackend, INA228MuxBackend::Target::CH_B, /*storageId=*/11};
 // PowerSampler_ESP32 esp_adc;
 
 // ADD0 -> GND / V+.  A part that is not fitted simply fails the DEVICE_ID check in
@@ -69,9 +365,9 @@ std::map<std::string, PowerSampler *> samplers{
 
     //{"ESP32_INA226", &ina226},
 
-    {"ESP32_INA228", &ina228_40},
-    {"ESP32_INA228_2", &ina228_41},
-    {"ESP32_INA228_3", &ina228_42},
+    {"ESP32_INA228",    &ina228_40},
+    {"ESP32_INA228_2A", &mux_chA},
+    {"ESP32_INA228_2B", &mux_chB},
     {"TMP117", &tmp117},
     {"TMP117_2", &tmp117_49},
     //{"dummy", &dummy},
@@ -261,13 +557,19 @@ void setup(void) {
     }
 
     bleSrv.begin();
-    if (sizeof(WireSample) != 56) {
+    if (sizeof(WireSample) != 64) {
         assert(false);
     }
-    if (sizeof(Sample) != 28) {
+    if (sizeof(Sample) != 32) {
         assert(false);
     }
 
+
+    // Initialize the mux backend before the samplers loop — both MuxChannels
+    // delegate to it and check its `initialized` flag in their init().
+    if (!muxBackend.init()) {
+        ESP_LOGW("main", "INA228 mux backend (0x41) init failed — mux channels will be skipped");
+    }
 
     for (auto p: samplers) {
         if (!p.second->init()) {
@@ -293,7 +595,8 @@ void setup(void) {
             .retryInterval(0) // 0=disable retry
         );
     }
-    // when multiplexing channels, TI recommnads single-shot mode
+    // Kick off sampling. For the mux backend, startReading() re-arms DIAG_ALRT;
+    // the first hasDataFor() call triggers the first single-shot conversion.
     for (auto &ec: energyCounters) {
         ec.sampler->startReading();
     }
@@ -446,6 +749,9 @@ void handleConsoleInput(const String &buf) {
             } else if (ina228_instance[devIdx]) {
                 UART_LOG("INA228[%i] setResistorRange(%.3fmΩ, %.3fA)", devIdx, res * 1e3f, range);
                 ina228_instance[devIdx]->setResistorRange(res, range);
+            } else if (devIdx == 1 && ina228_mux_instance) {
+                UART_LOG("INA228 mux setResistorRange(%.3fmΩ, %.3fA)", res * 1e3f, range);
+                ina228_mux_instance->setResistorRange(res, range);
             } else {
                 ESP_LOGW("main", "No INA22x instance!");
             }
@@ -780,3 +1086,5 @@ void vTaskGetRunTimeStats() {
     // The array is no longer needed, free the memory it consumes.
     vPortFree(pxTaskStatusArray);
 }
+
+#endif

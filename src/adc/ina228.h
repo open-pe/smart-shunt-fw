@@ -1,8 +1,12 @@
 #pragma once
 
-#include <SPI.h> // not sure why this is needed
-
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+#else
+#include <SPI.h>
 #include <INA226_WE.h>
+#endif
+
 #include "i2c.h"
 
 #include "settings.h"
@@ -133,6 +137,15 @@ class PowerSampler_INA228 : public PowerSampler {
     float current_LSB{};
     uint16_t adcConfig{0}; // last ADC_CONFIG written, replayed by startReading()
 
+    // Diagnostic state for implausible VBUS readings. The INA228's analog VBUS range is
+    // 0-85V; anything outside that is either ADC railing (code near 0x7FFFF from a real
+    // transient exceeding full-scale) or I2C corruption (e.g., all-0xFF from a NAK, which
+    // the sign extension turns into ~0V). These let us tell them apart from the serial log.
+    float lastVoltage{NAN};
+    uint32_t implausibleCount{0};
+    int64_t lastImplausibleLog{0};
+    uint32_t lastDiag{0}; // encoded: reason<<24 | sign<<20 | code&0xFFFFF; cleared by getSample()
+
     /**
      * when acFreq is != 0, it will sample current and voltage (no dietemp) at the lowest possible conversion time
      * and average samples over a full period. this rejects the ac signal, if it is periodic with the given frequency
@@ -204,6 +217,7 @@ public:
                 MODE_ContBusV_Temp = 0xD,
                 MODE_Cont_ShuntV_Temp = 0xE,
                 MODE_Cont_BusV_ShuntV_Temp = 0xF;
+        constexpr auto MODE_SingleShot_BusV = 0x1, MODE_SingleShot_BusV_Temp = 0x5;
         constexpr auto AVG_1 = 0x0, AVG_4 = 0x1, AVG_16 = 0x2;
 
         if (acFreq) {
@@ -461,17 +475,46 @@ public:
         float fBusVoltage;
         bool sign;
 
-        //i2c_read_buf(i2c_port, i2c_addr, INA228_VBUS, (uint8_t *) &iBusVoltage, 3);
-
         if (!readBuf(i2c_addr, INA228_VBUS, (uint8_t *) &iBusVoltage, 3)) {
-            ESP_LOGE("i2c", "err reading voltage");
+            ESP_LOGE("i2c", "0x%02hhX: err reading voltage", i2c_addr);
             return NAN;
         }
 
+        uint8_t rawBytes[3];
+        memcpy(rawBytes, &iBusVoltage, 3);
+
         sign = iBusVoltage & 0x80;
         iBusVoltage = __bswap32(iBusVoltage & 0xFFFFFF) >> 12;
+        uint32_t adcCode = (uint32_t)(iBusVoltage & 0xFFFFF);
         if (sign) iBusVoltage += 0xFFF00000;
         fBusVoltage = (iBusVoltage) * 0.0001953125;
+
+        // Diagnostic: log implausible VBUS readings to distinguish analog railing from
+        // I2C corruption. Rate-limited to 1/s to avoid flooding the serial console.
+        // raw=[7F FF F0] code=0x7FFFF sign=0 -> ADC max positive code (real railing)
+        // raw=[FF FF FF] code=0xFFFFF sign=1 -> I2C NAK (all-1s, sign-extended to ~0V)
+        const char *reason = nullptr;
+        uint8_t reasonCode = 0;
+        if (fBusVoltage > 85.0f || fBusVoltage < -1.0f) {
+            reason = "out-of-range";
+            reasonCode = 1;
+        } else if (!std::isnan(lastVoltage) && std::fabs(fBusVoltage - lastVoltage) > 10.0f) {
+            reason = "jump";
+            reasonCode = 2;
+        }
+        if (reason) {
+            lastDiag = (reasonCode << 24) | ((uint32_t)sign << 20) | (adcCode & 0xFFFFF);
+            int64_t now = esp_timer_get_time();
+            if (now - lastImplausibleLog > 1000000) {
+                lastImplausibleLog = now;
+                ++implausibleCount;
+                ESP_LOGW("ina228", "0x%02hhX VBUS %s: %.3fV (prev %.3fV) raw=[%02hhX %02hhX %02hhX] code=0x%05X sign=%d count=%lu",
+                         i2c_addr, reason, fBusVoltage, lastVoltage,
+                         rawBytes[0], rawBytes[1], rawBytes[2],
+                         adcCode, (int)sign, implausibleCount);
+            }
+        }
+        lastVoltage = fBusVoltage;
 
         return (fBusVoltage);
     }
@@ -582,6 +625,9 @@ public:
             lastSample.i = channelState.shunt ? read_current() : NAN;
             lastSample.temp = read_dietemp();
         }
+
+        lastSample.diag = lastDiag;
+        lastDiag = 0;
 
         //float busP = ina226.getBusPower();
         //float pErr = std::abs(lastSample.p() - busP) / busP;

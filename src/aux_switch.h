@@ -2,22 +2,15 @@
 
 #include <Arduino.h>
 #include <EEPROM.h>
+
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+constexpr uint8_t AUX_PIN = PA8;
+#else
 #include <driver/gpio.h>
 #include <esp_log.h>
-
-/*
- * Aux switch: one general-purpose GPIO output, driven from BLE or the console.
- *
- * GPIO 10 is free (undeclared in settings.h), not a strapping pin, not USB, not flash, and is
- * RTC-capable -- that last part is what lets it hold its level through deep sleep. Confirm the pin
- * is actually broken out on the module before wiring: hw/ documents the INA228 sensor board (whose
- * MCU sheet is an ESP-12F), not the ESP32-S3 module the firmware runs on.
- *
- * The pin FLOATS from reset until auxBegin() runs. Nothing in firmware can cover that window, so the
- * driver gate needs an external pulldown to keep the load off through boot.
- */
-
 constexpr gpio_num_t AUX_PIN = GPIO_NUM_10;
+#endif
 constexpr bool AUX_ACTIVE_HIGH = true;
 
 // Raw EEPROM/NVS byte offsets -- deliberately NOT slot indices. Calibration occupies bytes 16..111
@@ -38,21 +31,32 @@ inline bool auxGet() { return auxState; }
 /// any encoding where the *absence* of a record could mean "on" would energise a load on a blank
 /// device. Off is the only safe reading of "I don't know".
 inline bool auxReadPersisted() {
+#ifdef TARGET_STM32H5
+    uint8_t magic = EEPROM.read(AUX_NVS_MAGIC_ADDR);
+    uint8_t st = EEPROM.read(AUX_NVS_STATE_ADDR);
+    if (magic != AUX_NVS_MAGIC) return false;
+    return st == 1;
+#else
     EEPROM.begin(AUX_NVS_SIZE);
     uint8_t magic = EEPROM.read(AUX_NVS_MAGIC_ADDR);
     uint8_t st = EEPROM.read(AUX_NVS_STATE_ADDR);
     EEPROM.end();
     if (magic != AUX_NVS_MAGIC) return false;
     return st == 1;
+#endif
 }
 
-/// App-task only: EEPROM.commit() writes flash, which must never happen on the NimBLE host task.
 inline void auxWritePersisted(bool on) {
+#ifdef TARGET_STM32H5
+    EEPROM.write(AUX_NVS_MAGIC_ADDR, AUX_NVS_MAGIC);
+    EEPROM.write(AUX_NVS_STATE_ADDR, on ? 1 : 0);
+#else
     EEPROM.begin(AUX_NVS_SIZE);
     EEPROM.write(AUX_NVS_MAGIC_ADDR, AUX_NVS_MAGIC);
     EEPROM.write(AUX_NVS_STATE_ADDR, on ? 1 : 0);
     EEPROM.commit();
     EEPROM.end();
+#endif
 }
 
 inline void auxDrive(bool on) {
@@ -70,7 +74,11 @@ inline void auxBegin() {
     // of the load on every wake.
     pinMode(AUX_PIN, OUTPUT);
     auxDrive(auxState);
+#ifdef TARGET_STM32H5
+    // No deep-sleep pad hold on STM32H5 (Stop mode not implemented yet)
+#else
     gpio_hold_dis(AUX_PIN);
+#endif
 
     ESP_LOGI("aux", "aux switch on GPIO%d = %s (restored)", (int) AUX_PIN, auxState ? "ON" : "off");
 }
@@ -88,8 +96,12 @@ inline void auxSet(bool on) {
 /// Latch the pad so the level survives deep sleep and the wake reset. Without this the switch would
 /// drop out for the whole boot interval every time the idle sleep cycles -- every 15 minutes.
 inline void auxArmDeepSleepHold() {
+#ifdef TARGET_STM32H5
+    // No deep-sleep pad hold on STM32H5 yet
+#else
     gpio_hold_en(AUX_PIN);
     gpio_deep_sleep_hold_en();
+#endif
 }
 
 /// Parse a command payload. Accepts the ASCII digits and raw bytes a generic BLE app would send as

@@ -2,39 +2,97 @@
 
 #include <cmath>
 #include <Arduino.h>
-#include <InfluxData.h>
 #include <Wire.h>
 
 #include "adc/sampling.h"
 #include "settings.h"
-#include "secrets.h"
 
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+
+std::string timeStr() {
+    char buffer[26];
+    unsigned long long ms = millis();
+    unsigned long sec = (unsigned long)(ms / 1000);
+    unsigned long msec = (unsigned long)(ms % 1000);
+    snprintf(buffer, sizeof(buffer), "%02lu:%02lu:%02lu.%03lu",
+             (sec / 3600) % 24, (sec / 60) % 60, sec % 60, msec);
+    return std::string(buffer);
+}
+
+unsigned long long getTimeStamp(struct timeval *tv, int secFracDigits) {
+    unsigned long long ms = millis();
+    switch (secFracDigits) {
+        case 0:  return ms / 1000;
+        case 6:  return ms * 1000;
+        case 9:  return ms * 1000000;
+        case 3:
+        default: return ms;
+    }
+}
+
+void scan_i2c() {
+    const char *TAG = "scan_i2c";
+    byte error, address;
+    int nDevices;
+
+    ESP_LOGI(TAG, "Scanning I2C...");
+
+    nDevices = 0;
+    for (address = 1; address < 127; address++) {
+        Wire.beginTransmission(address);
+        error = Wire.endTransmission();
+
+        if (error == 0) {
+            ESP_LOGI(TAG, "Device found at address 0x%02hhX", address);
+            nDevices++;
+        } else if (error != 2) {
+            ESP_LOGW(TAG, "Unknown error %hhu at address 0x%02hhX", error, address);
+        }
+    }
+    if (nDevices == 0)
+        ESP_LOGI(TAG, "No I2C devices found");
+    else
+        ESP_LOGI(TAG, "I2C scan done, %d devices found", nDevices);
+
+    delay(5000);
+}
+
+void UART_LOG(const char *fmt, ...) {
+    static char UART_LOG_buf[384];
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(UART_LOG_buf, 380, fmt, args);
+    va_end(args);
+    auto l = strlen(UART_LOG_buf);
+    UART_LOG_buf[l] = '\n';
+    UART_LOG_buf[++l] = '\0';
+    Serial.print(UART_LOG_buf);
+}
+
+#else
+
+#include "secrets.h"
 #include <InfluxDbClient.h>
 #include <WiFiUDP.h>
 
-
 #if defined(ESP32)
-
 #include <WiFiMulti.h>
 #include <driver/uart.h>
-
 WiFiMulti wifiMulti;
-//#define DEVICE "ESP32"
 #elif defined(ESP8266)
 #include <ESP8266WiFiMulti.h>
 ESP8266WiFiMulti wifiMulti;
 #define DEVICE "ESP8266"
-#include <ESP8266WiFi.h>  // we need wifi to get internet access
+#include <ESP8266WiFi.h>
 #endif
 
 WiFiUDP udp;
 
-
 void connect_wifi_async() {
     WiFi.mode(WIFI_STA);
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
-    // Networks come from src/secrets.h, which is gitignored. They were literals here,
-    // and this remote is a public repository.
 #define ADD_AP(ssid, password) wifiMulti.addAP(ssid, password);
     WIFI_AP_LIST(ADD_AP)
 #undef ADD_AP
@@ -53,18 +111,13 @@ void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
         msg.clear();
         return;
     }
-
-    // bytesSent += asyncUdp.writeTo((uint8_t *) msg.c_str(), msg.length(), host, port);
-
     udp.beginPacket(host, port);
     udp.print(msg);
     udp.endPacket();
-
     msg.clear();
 }
 
 String influxMsgBuf;
-
 
 void influxWritePointsUDP(const Point *p, uint8_t len, bool flush) {
     for (uint8_t i = 0; i < len; ++i) {
@@ -73,21 +126,8 @@ void influxWritePointsUDP(const Point *p, uint8_t len, bool flush) {
 }
 
 void influxWritePointUDP(const Point &p, bool flush) {
-    constexpr int MTU = CONFIG_TCP_MSS; // TODO this does not apply for udp, udp messages can be much larger
-
-
-    // byte host[] = {192, 168, 0, 185};
-    //byte host[] = {192, 168, 178, 28};
+    constexpr int MTU = CONFIG_TCP_MSS;
     byte influxdbhost[] = {192, 168, 178, 180};
-    /*
-    static IPAddress host{};
-    if(uint32_t(host) == 0) {
-        ESP_LOGI("tele", "resolving hostname");
-        host = MDNS.queryHost("homeassistant.local");
-        ESP_LOGI("tele", "resolved to %s",host.toString());
-    }
-     */
-
     auto port = 8086;
 
     auto lp = p.toLineProtocol();
@@ -101,7 +141,6 @@ void influxWritePointUDP(const Point &p, bool flush) {
     }
 }
 
-
 std::string timeStr() {
     char buffer[26];
     int millisec;
@@ -109,30 +148,15 @@ std::string timeStr() {
 
     gettimeofday(&tv, NULL);
 
-    millisec = lrint(tv.tv_usec / 1000.0); // Round to nearest millisec
+    millisec = lrint(tv.tv_usec / 1000.0);
     if (millisec >= 1000) {
-        // Allow for rounding up to nearest second
         millisec -= 1000;
         tv.tv_sec++;
     }
 
     strftime(buffer, 26, "%H:%M:%S", localtime(&tv.tv_sec));
     return std::string(buffer);
-    // printf("%s.%03d\n", buffer, millisec);
-    //Serial0.print(buffer);
-    //Serial0.print('.');
-    //Serial0.print(millisec);
-    //Serial0.print(' ');
-
-    /*
-    char buff[100];
-      time_t now = time (0);
-      strftime (buff, 100, "%H:%M:%S.000", localtime (&now));
-      printf ("%s\n", buff);
-      return 0;
-    */
 }
-
 
 void pointFromSample(Point &p, const Sample &s, const char *device) {
     p.addTag("device", device);
@@ -142,7 +166,6 @@ void pointFromSample(Point &p, const Sample &s, const char *device) {
     p.addField("E", s.e, 3);
     p.setTime(s.t);
 }
-
 
 class PointDefaultConstructor : public Point {
 public:
@@ -160,50 +183,6 @@ public:
     }
 };
 
-
-/*
- * const int BUF_SIZE = 1024;
-char *uartBuf = (char *) malloc(BUF_SIZE);
-QueueHandle_t uart_queue;
-
-void uartInit(int port_num) {
-
-uart_config_t uart_config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // UART_HW_FLOWCTRL_CTS_RTS
-        .source_clk = UART_SCLK_APB,
-};
-int intr_alloc_flags = 0;
-
-// tx=34, rx=33, stack=2048
-
-
-#if CONFIG_IDF_TARGET_ESP32S3
-const int PIN_TX = 34, PIN_RX = 33;
-#else
-const int PIN_TX = 1, PIN_RX = 3;
-#endif
-
-ESP_ERROR_CHECK(uart_set_pin(port_num, PIN_TX, PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-ESP_ERROR_CHECK(uart_param_config(port_num, &uart_config));
-ESP_ERROR_CHECK(uart_driver_install(port_num, BUF_SIZE * 2, BUF_SIZE * 2, 10, &uart_queue, intr_alloc_flags));
-
-
-/* uart_intr_config_t uart_intr = {
-     .intr_enable_mask = (0x1 << 0) | (0x8 << 0),  // UART_INTR_RXFIFO_FULL | UART_INTR_RXFIFO_TOUT,
-     .rx_timeout_thresh = 1,
-     .txfifo_empty_intr_thresh = 10,
-     .rxfifo_full_thresh = 112,
-};
-uart_intr_config((uart_port_t) 0, &uart_intr);  // Zero is the UART number for Arduino Serial
-* /
-}
- */
-
-
 void scan_i2c() {
     const char *TAG = "scan_i2c";
     byte error, address;
@@ -216,13 +195,6 @@ void scan_i2c() {
     for (address = 1; address < 127; address++) {
         Wire.beginTransmission(address);
         error = Wire.endTransmission();
-        /*
-            0	success
-            1	data too long to fit in transmit buffer
-            2	received NACK on transmit of address
-            3	received NACK on transmit of data
-            4	other error
-         */
 
         if (error == 0) {
             ESP_LOGI(TAG, "Device found at address 0x%02hhX", address);
@@ -239,7 +211,6 @@ void scan_i2c() {
     delay(5000);
 }
 
-
 void UART_LOG(const char *fmt, ...) {
     static char UART_LOG_buf[384];
 
@@ -251,5 +222,6 @@ void UART_LOG(const char *fmt, ...) {
     UART_LOG_buf[l] = '\n';
     UART_LOG_buf[++l] = '\0';
     printf("%s", UART_LOG_buf);
-    //uart_write_bytes(0, UART_LOG_buf, l);
 }
+
+#endif

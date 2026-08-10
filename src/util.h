@@ -2,39 +2,36 @@
 
 #include <string>
 #include <cstdint>
-//#include
 
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+#include <FreeRTOS.h>
+#include <task.h>
+#else
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-
 #include "Point.h"
+#endif
 
 std::string timeStr();
 
-
+#ifndef TARGET_STM32H5
 void connect_wifi_async();
-
 void wait_for_wifi();
 
 class Point;
-
 void influxWritePointUDP(const Point &p, bool flush=false);
 void influxWritePointsUDP(const Point *p, uint8_t len, bool flush = false);
-
+void uartInit(int port_num);
+#endif
 
 void scan_i2c();
 
-void uartInit(int port_num);
-
-
-
 void UART_LOG(const char *fmt, ...);
 
-
+unsigned long long getTimeStamp(struct timeval *tv, int secFracDigits);
 
 class TaskNotification {
-    // https://www.freertos.org/Documentation/02-Kernel/02-Kernel-features/03-Direct-to-task-notifications/02-As-binary-semaphore
-    // notifications are faster than semaphores!
     TaskHandle_t readingTask = nullptr;
 public:
     inline void subscribe(bool updateTaskHandle = false) {
@@ -46,23 +43,14 @@ public:
         readingTask = nullptr;
     }
 
-    /***
-     *
-     * @param ms
-     * @return false on timeout
-     */
     inline bool wait(uint32_t ms) {
         void(this);
-        //assert(readingTask and readingTask == xTaskGetCurrentTaskHandle());
-        return ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(ms)) == 1; // pdTRUE: binary semaphore
+        return ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(ms)) == 1;
     }
 
-    /***
-     *
-     * @return true if a higher priority task has been woken
-     */
+#ifndef TARGET_STM32H5
     bool IRAM_ATTR notifyFromIsr() {
-        BaseType_t higherWokenTask; // = must yield
+        BaseType_t higherWokenTask;
         if (readingTask) {
             vTaskNotifyGiveFromISR(readingTask, &higherWokenTask);
             if (higherWokenTask) {
@@ -72,9 +60,19 @@ public:
         }
         return false;
     }
+#else
+    bool notifyFromIsr() {
+        if (readingTask) {
+            BaseType_t higherWokenTask = pdFALSE;
+            xTaskNotifyFromISR(readingTask, 1, eIncrement, &higherWokenTask);
+            portYIELD_FROM_ISR(higherWokenTask);
+            return (bool)higherWokenTask;
+        }
+        return false;
+    }
+#endif
 
     void notify() {
-        xTaskNotifyGive(readingTask);
-        //vTaskDelay();
+        if (readingTask) xTaskNotifyGive(readingTask);
     }
 };

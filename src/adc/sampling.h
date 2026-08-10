@@ -1,6 +1,10 @@
 #pragma once
 
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+#else
 #include <sys/time.h>
+#endif
 #include <cmath>
 
 
@@ -15,6 +19,7 @@ struct Sample {
   float u{NAN}, i{NAN}, p_{NAN}, e{NAN};
   unsigned long long t{0};  // 8byte
   float temp{NAN}; // adc die temperature
+  uint32_t diag{0}; // encoded diagnostic: reason<<24 | sign<<20 | adc_code&0xFFFFF; 0=none
 
   inline float p() const {
       if(std::isnan(p_)) return u * i;

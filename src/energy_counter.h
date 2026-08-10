@@ -9,6 +9,10 @@
 
 #include "readerwriterqueue.h"
 
+#ifdef TARGET_STM32H5
+#include "esp_compat.h"
+#endif
+
 /// Apply the stored per-device voltage gain factor (calibFactorU) to published samples.
 ///
 /// Disabled (0). The factor is keyed to the INA228's I2C address, not to the chip, so it
@@ -42,9 +46,10 @@ struct WireSample {
     char dev[16];
     Sample data;
     float i_max, u_max;
+    uint32_t diag; // encoded diagnostic from last implausible VBUS reading in this window
     uint16_t crc;
-    // numTimeouts, maxDt
 
+#ifndef TARGET_STM32H5
     Point getInfluxDbPoint() const {
         Point point("smart_shunt");
         point.addTag("device", dev);
@@ -69,6 +74,7 @@ struct WireSample {
         point.setTime(data.t);
         return point;
     }
+#endif
 
 
     static unsigned short compute_crc16(unsigned char buf[], int len) {
@@ -152,6 +158,8 @@ private:
     const uint8_t eePromIndex;
 
     unsigned long maxDtReported = 0;
+
+    uint32_t lastDiag = 0; // last non-zero diag from samples in this window
 
 public:
     EnergyCounter(PowerSampler *sampler, std::string name_, size_t eePromIndex_) : sampler(sampler),
@@ -269,6 +277,8 @@ public:
             winPoint.P.add(P);
             winPoint.Temp.add(s.temp);
 
+            if (s.diag) lastDiag = s.diag;
+
             winPrint.I.add(s.i);
             winPrint.U.add(s.u);
             winPrint.P.add(P);
@@ -301,6 +311,8 @@ public:
             .i_max = i_max,
             .u_max = u_max,
         };
+        ws.diag = lastDiag;
+        lastDiag = 0;
         name.copy(ws.dev, 16);
         Sample &s(ws.data);
         {
