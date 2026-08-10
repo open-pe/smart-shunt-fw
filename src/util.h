@@ -20,6 +20,7 @@ void connect_wifi_async();
 void wait_for_wifi();
 void wifi_tick();
 [[noreturn]] void wifiTask(void *);
+extern volatile int g_wifiRequest;
 
 class Point;
 void influxWritePointUDP(const Point &p, bool flush=false);

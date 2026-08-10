@@ -11,11 +11,10 @@
 
 #ifndef TARGET_STM32H5
 #include <esp_ota_ops.h>
-#include <WiFi.h>
 extern bool otaBleActive();
 extern bool disableWifi;
 extern bool wifiTimeSyncOnly;
-void connect_wifi_async();
+extern volatile int g_wifiRequest;
 #endif
 
 inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, BleTransport &ble) {
@@ -105,12 +104,12 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
         else if (inp == "wifi on") {
             disableWifi = false;
             wifiTimeSyncOnly = false;
-            connect_wifi_async();
-            UART_LOG("WiFi connecting (async, check status in app loop)...");
+            g_wifiRequest = 1;
+            UART_LOG("WiFi connect requested (async via wifiTask)");
         } else if (inp == "wifi off") {
             disableWifi = true;
-            WiFi.disconnect(true);
-            UART_LOG("WiFi disabled");
+            g_wifiRequest = 0;
+            UART_LOG("WiFi disconnect requested (async via wifiTask)");
         } else if (inp == "bootinfo") {
             const esp_partition_t *running = esp_ota_get_running_partition();
             esp_ota_img_states_t st;

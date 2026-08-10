@@ -105,20 +105,33 @@ void wait_for_wifi() {
     ESP_LOGI("util", "Connected to WiFi, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
 }
 
-extern bool disableWifi;
-extern bool wifiTimeSyncOnly;
+extern volatile int g_wifiRequest;
+volatile int g_wifiRequest = 0;
 
 [[noreturn]] void wifiTask(void *) {
+    bool apsAdded = false;
     while (true) {
-        if (disableWifi) {
+        if (g_wifiRequest == 0) {
+            if (WiFi.status() == WL_CONNECTED) {
+                WiFi.disconnect(true);
+                ESP_LOGI("wifi", "disconnected by request");
+            }
+            apsAdded = false;
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+
         if (WiFi.status() == WL_CONNECTED) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
-        ESP_LOGI("wifi", "wifiTask: running wifiMulti.run()...");
+
+        if (!apsAdded) {
+            connect_wifi_async();
+            apsAdded = true;
+            ESP_LOGI("wifi", "wifiTask: starting connect attempt");
+        }
+
         if (wifiMulti.run() == WL_CONNECTED) {
             ESP_LOGI("wifi", "Connected, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
         } else {
