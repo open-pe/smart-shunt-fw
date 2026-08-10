@@ -316,6 +316,7 @@ public:
         }
 
         //channelState.shunt
+#ifndef TARGET_STM32H5
         if (pinsAreShorted(7,8)) {
             sleep(1);
             ESP_LOGI("ina228", "pins 7 & 8 are shorted, measuring vbus only");
@@ -323,6 +324,7 @@ public:
             channelState.shunt = false;
             channelState.vbus = true;
         }
+#endif
 
 
 

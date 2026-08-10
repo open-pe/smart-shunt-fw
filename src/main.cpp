@@ -72,6 +72,8 @@ void setup(void) {
 
     ESP_LOGI("main", "SmartShunt STM32H5 started");
 
+    Wire.setSDA(settings.Pin_I2C_SDA);
+    Wire.setSCL(settings.Pin_I2C_SCL);
     Wire.begin();
     Wire.setClock(400000);
 
@@ -111,7 +113,7 @@ void setup(void) {
         for (auto &ec: energyCounters) {
             ec.update();
         }
-        taskYIELD();
+        vTaskDelay(1);
     }
 }
 
@@ -128,6 +130,12 @@ void update() {
     unsigned long nowTime = micros();
 
     bleBridge.tick();
+
+    static int8_t auxPublished = -1;
+    if (auxPublished != (auxGet() ? 1 : 0)) {
+        bleBridge.publishAux(auxGet());
+        auxPublished = auxGet() ? 1 : 0;
+    }
 
     for (auto &ec: energyCounters) {
         ec.consumeQueue();
@@ -166,6 +174,7 @@ void update() {
     }
 
     if (Serial.available()) {
+        Serial.setTimeout(10);
         auto r = Serial.readString();
         Serial.print(r);
         Serial.flush();
@@ -176,6 +185,21 @@ void update() {
             r = r.substring(lb + 1);
         }
         noteWakeEvent();
+    }
+
+    if (esp_timer_get_time() - timeLastWakeEvent > IDLE_SLEEP_AFTER_US) {
+        if (bleBridge.isConnected()) {
+            noteWakeEvent();
+        } else {
+            UART_LOG("Zero power for %llds, entering Stop mode (aux=%s)",
+                     (long long)(IDLE_SLEEP_AFTER_US / 1000000), auxGet() ? "ON" : "off");
+            Serial.flush();
+            auxArmDeepSleepHold();
+            HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+            SystemClock_Config();
+            noteWakeEvent();
+            ESP_LOGI("main", "Woke from Stop mode");
+        }
     }
 }
 

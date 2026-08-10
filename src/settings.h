@@ -11,7 +11,7 @@ struct settings_t {
     int8_t Pin_I2C_SCL = PB_8;
     uint8_t Pin_INA22x_ALERT = PA10;
     uint8_t Pin_INA22x_ALERT2 = PB3;
-    uint8_t Pin_INA22x_ALERT3 = PB4;
+    uint8_t Pin_INA22x_ALERT3 = PC7;
     uint8_t Pin_Mux_S1 = PB5;
     uint8_t Pin_Mux_S2 = PB4;
     uint8_t Pin_Mux_Zero = PB10;

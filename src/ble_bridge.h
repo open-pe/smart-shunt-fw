@@ -29,8 +29,15 @@ class BleBridge {
         switch (type) {
             case BLE_MSG_AUX_SET:
                 if (len >= 1) {
-                    bool want = payload[0] != 0;
-                    auxSet(want);
+                    if (payload[0] == 0xFF) {
+                        auxSet(!auxGet());
+                    } else {
+                        bool want;
+                        if (auxParseCommand(payload, len, want)) {
+                            auxSet(want);
+                        }
+                    }
+                    publishAux(auxGet());
                 }
                 break;
             case BLE_MSG_LINK_STATUS:

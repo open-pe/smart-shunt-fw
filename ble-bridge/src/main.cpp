@@ -1,24 +1,20 @@
 #include <Arduino.h>
-#include <Wire.h>
 
 #include <esp_log.h>
 #include <NimBLEDevice.h>
-#include <NimBLELocalValueAttribute.h>
 
 #include "ble_protocol.h"
 
 #define SERVICE_UUID        "e8308d3d-c3b4-45ff-ba58-9c0fb99d0ecb"
 #define CHARACTERISTIC_UUID "df51a73d-0b60-43a5-bc86-a043f3841152"
-#define OTA_CTRL_CHAR_UUID  "b0e0d1a4-7f52-4a3e-9c61-2d8f5b3ae741"
-#define OTA_DATA_CHAR_UUID  "b0e0d1a5-7f52-4a3e-9c61-2d8f5b3ae741"
 #define AUX_CHAR_UUID       "b952dad5-9541-4852-bab6-96b9cbc9131a"
 
 #define UART_BAUD 115200
 #define UART_RX_BUF 1024
 
-static BLEServer *pServer = nullptr;
-static BLECharacteristic *pTelemetryChar = nullptr;
-static BLECharacteristic *pAuxChar = nullptr;
+static NimBLEServer *pServer = nullptr;
+static NimBLECharacteristic *pTelemetryChar = nullptr;
+static NimBLECharacteristic *pAuxChar = nullptr;
 
 static volatile bool bleConnected = false;
 static volatile bool bleSubscribed = false;
@@ -63,12 +59,27 @@ static void sendFrameToSTM32(uint8_t type, const uint8_t *data, uint16_t len) {
     Serial1.write(txBuf, pos);
 }
 
+static bool parseAuxCommand(const uint8_t *data, size_t len, uint8_t &out) {
+    if (!data || !len) return false;
+    if (len == 1 && (data[0] == 0 || data[0] == 1)) { out = data[0]; return true; }
+
+    String s;
+    for (size_t i = 0; i < len; ++i) s += (char)data[i];
+    s.trim();
+    s.toLowerCase();
+
+    if (s == "1" || s == "on" || s == "true") { out = 1; return true; }
+    if (s == "0" || s == "off" || s == "false") { out = 0; return true; }
+    if (s == "toggle") { out = 0xFF; return true; }
+    return false;
+}
+
 static void processFrame(uint8_t type, const uint8_t *payload, uint16_t len) {
     switch (type) {
         case BLE_MSG_TELEMETRY:
             if (pTelemetryChar && bleSubscribed) {
                 pTelemetryChar->setValue((uint8_t *)payload, len);
-                pTelemetryChar->notify();
+                pTelemetryChar->indicate();
             }
             break;
         case BLE_MSG_AUX_STATE:
@@ -76,11 +87,9 @@ static void processFrame(uint8_t type, const uint8_t *payload, uint16_t len) {
                 if (len >= 1) {
                     uint8_t v = payload[0] ? '1' : '0';
                     pAuxChar->setValue(&v, 1);
-                    if (bleSubscribed) pAuxChar->notify(&v, 1);
+                    if (bleConnected) pAuxChar->notify(&v, 1);
                 }
             }
-            break;
-        case BLE_MSG_BOOTINFO:
             break;
         default:
             break;
@@ -147,46 +156,32 @@ static void processUartRx() {
     }
 }
 
-class ServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer *server) override {
+class ServerCallbacks : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer *server, NimBLEConnInfo &connInfo) override {
         bleConnected = true;
-        sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){1}, 1);
     }
-    void onDisconnect(BLEServer *server) override {
+    void onDisconnect(NimBLEServer *server, NimBLEConnInfo &connInfo, int reason) override {
         bleConnected = false;
         bleSubscribed = false;
-        sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){0}, 1);
         NimBLEDevice::startAdvertising();
     }
 };
 
-class TelemetryCallbacks : public BLECharacteristicCallbacks {
-    void onSubscribe(BLECharacteristic *chr, NimBLEConnInfo &connInfo) override {
-        bleSubscribed = true;
-        sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){1}, 1);
-    }
-    void onUnsubscribe(BLECharacteristic *chr, NimBLEConnInfo &connInfo) override {
-        bleSubscribed = false;
-        sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){0}, 1);
+class TelemetryCallbacks : public NimBLECharacteristicCallbacks {
+    void onSubscribe(NimBLECharacteristic *chr, NimBLEConnInfo &connInfo, uint16_t subValue) override {
+        if (subValue & NIMBLE_SUBSCRIBE_INDICATING) {
+            bleSubscribed = true;
+            sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){1}, 1);
+        }
     }
 };
 
-class AuxCallbacks : public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *chr) override {
+class AuxCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *chr, NimBLEConnInfo &connInfo) override {
         std::string val = chr->getValue();
-        if (val.length() >= 1) {
-            uint8_t v;
-            char c = val[0];
-            if (c == '1' || c == 1 || c == 'o' || c == 'O' || c == 't' || c == 'T') {
-                if (c == 't' || c == 'T') {
-                    v = 0xFF;
-                } else {
-                    v = (c == '1' || c == 1 || c == 'o' || c == 'O') ? 1 : 0;
-                }
-            } else {
-                v = (c == '0' || c == 0) ? 0 : 1;
-            }
-            sendFrameToSTM32(BLE_MSG_AUX_SET, &v, 1);
+        uint8_t cmd;
+        if (parseAuxCommand((const uint8_t *)val.data(), val.length(), cmd)) {
+            sendFrameToSTM32(BLE_MSG_AUX_SET, &cmd, 1);
         }
     }
 };
@@ -197,8 +192,9 @@ static AuxCallbacks auxCallbacks;
 
 void setup() {
     Serial.begin(115200);
-    Serial1.begin(UART_BAUD, SERIAL_8N1, 18, 17);
+
     Serial1.setRxBufferSize(UART_RX_BUF);
+    Serial1.begin(UART_BAUD, SERIAL_8N1, 18, 17);
 
     delay(500);
     ESP_LOGI("bridge", "BLE relay module starting");
@@ -209,7 +205,7 @@ void setup() {
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(&serverCallbacks);
 
-    BLEService *pService = pServer->createService(SERVICE_UUID);
+    NimBLEService *pService = pServer->createService(SERVICE_UUID);
 
     pTelemetryChar = pService->createCharacteristic(
         CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::INDICATE);
@@ -223,7 +219,7 @@ void setup() {
 
     pService->start();
 
-    BLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+    NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->enableScanResponse(true);
     pAdvertising->setAdvertisingInterval(800);

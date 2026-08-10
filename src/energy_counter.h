@@ -191,8 +191,12 @@ public:
         PowerSampler &ps(*sampler);
         if (ps.hasData()) {
             Sample s = ps.getSample();
-            int64_t now64 = esp_timer_get_time();      // capture timestamp after value capture
+            int64_t now64 = esp_timer_get_time();      // 64-bit clock for stall detection
+#ifdef TARGET_STM32H5
+            unsigned long nowTime = micros();            // true 1us resolution for energy integration
+#else
             unsigned long nowTime = (unsigned long) now64; // (micros() is this, truncated)
+#endif
             lastSampleTime = now64;
             retryNotBefore = 0;
 

@@ -29,8 +29,24 @@ typedef int esp_err_t;
 
 #define ESP_ERROR_CHECK(x) do { auto _r = (x); if (_r != ESP_OK) { Serial.printf("ESP_ERROR_CHECK failed: %d\r\n", _r); } } while(0)
 
-inline int64_t esp_timer_get_time() {
-    return (int64_t)millis() * 1000;
+#include <FreeRTOS.h>
+#include <task.h>
+#include <stm32h5xx_hal.h>
+
+extern "C" void SystemClock_Config(void);
+
+static inline int64_t esp_timer_get_time() {
+    static uint32_t last_us = 0;
+    static uint64_t base = 0;
+    taskENTER_CRITICAL();
+    uint32_t now = micros();
+    if (now < last_us) {
+        base += 0x100000000ULL;
+    }
+    last_us = now;
+    uint64_t result = base + now;
+    taskEXIT_CRITICAL();
+    return (int64_t)result;
 }
 
 #ifndef __bswap32
