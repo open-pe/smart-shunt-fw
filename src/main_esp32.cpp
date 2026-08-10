@@ -3,6 +3,7 @@
 
 #include <InfluxDbClient.h>
 #include <map>
+#include <vector>
 
 #include "adc/adc_ads.h"
 #include "adc/adc_esp.h"
@@ -50,9 +51,16 @@ PowerSampler_TMP117 tmp117_49{0x49};
 SamplerRegistry samplers;
 BleSrv bleSrv;
 
+volatile bool g_samplingHalted = false;
+bool disableWifi = true;
+bool wifiTimeSyncOnly = true;
+
 class EspTelemetry : public Telemetry {
 public:
     using Telemetry::Telemetry;
+
+    std::vector<WireSample> wireSampleBuf;
+
     void onIdleSleep() override {
         UART_LOG("Zero power for %llds, sleeping for %llds (aux=%s)",
                  (long long)(IDLE_SLEEP_AFTER_US / 1000000),
@@ -61,13 +69,57 @@ public:
         auxArmDeepSleepHold();
         ESP.deepSleep(IDLE_SLEEP_WAKE_US);
     }
+
+    void onSummary(const WireSample &ws) override {
+        if (!disableWifi) wireSampleBuf.push_back(ws);
+    }
+
+    void onTelemetryFlush() override {
+        if (!disableWifi) {
+            for (auto &ws : wireSampleBuf)
+                influxWritePointUDP(ws.getInfluxDbPoint());
+        }
+        wireSampleBuf.clear();
+    }
+
+    void processConsole() override {
+        const uart_port_t uart_num = UART_NUM_0;
+        static char buf[128];
+        static int buf_pos = 0;
+        int length = 0;
+        ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *) &length));
+        if (length > 0) {
+            length = uart_read_bytes(uart_num, buf + buf_pos, min(length, 127 - buf_pos), 20);
+            uart_write_bytes(uart_num, buf + buf_pos, length);
+            buf_pos += length;
+        }
+        auto eol = strchr(buf, '\n');
+        while (eol) {
+            *eol = 0;
+            buf_pos = 0;
+            handleConsoleInput(String(buf), registry, ble);
+            noteWakeEvent();
+            break;
+        }
+
+        static String serialBuf;
+        if (Serial.available()) {
+            auto r = Serial.readString();
+            serialBuf += r;
+            Serial.print(r);
+            Serial.flush();
+            int lb;
+            while ((lb = serialBuf.indexOf('\n')) != -1) {
+                String line = serialBuf.substring(0, lb);
+                handleConsoleInput(line, registry, ble);
+                serialBuf = serialBuf.substring(lb + 1);
+            }
+            noteWakeEvent();
+        }
+    }
 };
 
 EspTelemetry *telemetry = nullptr;
-
-volatile bool g_samplingHalted = false;
-bool disableWifi = true;
-bool wifiTimeSyncOnly = true;
 
 #ifdef WITH_LCD
 LCD lcd;
@@ -88,6 +140,7 @@ static void bootWatchdogArm() {
     args.name = "bootwd";
     args.dispatch_method = ESP_TIMER_TASK;
     if (esp_timer_create(&args, &bootWatchdog) != ESP_OK) {
+        ESP_LOGE("main", "boot watchdog could not be created -- a bad OTA will brick this device");
         bootWatchdog = nullptr;
         return;
     }
@@ -207,8 +260,12 @@ void loop() { vTaskDelay(1000); }
     (void)arg;
     while (1) {
         otaBleTick(millis());
-        telemetry->update();
-        if (otaBleActive()) telemetry->noteWakeEvent();
+        telemetry->update(false);
+        if (otaBleActive()) {
+            telemetry->noteWakeEvent();
+        } else {
+            telemetry->checkIdleSleep();
+        }
         markOtaValidIfHealthy();
         vTaskDelay(10);
     }

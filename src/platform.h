@@ -94,17 +94,25 @@ inline void eepromWrite(int idx, uint8_t val) {
 
 inline void createRealTimeTask(void (*fn)(void*), const char *name, uint32_t stack, int prio) {
 #ifdef TARGET_STM32H5
-    xTaskCreate(fn, name, stack, NULL, prio, NULL);
+    if (xTaskCreate(fn, name, stack, NULL, prio, NULL) != pdPASS) {
+        ESP_LOGE("platform", "xTaskCreate(%s) failed", name);
+    }
 #else
-    xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, 1);
+    if (xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, 1) != pdPASS) {
+        ESP_LOGE("platform", "xTaskCreatePinnedToCore(%s) failed", name);
+    }
 #endif
 }
 
 inline void createAppTask(void (*fn)(void*), const char *name, uint32_t stack, int prio) {
 #ifdef TARGET_STM32H5
-    xTaskCreate(fn, name, stack, NULL, prio, NULL);
+    if (xTaskCreate(fn, name, stack, NULL, prio, NULL) != pdPASS) {
+        ESP_LOGE("platform", "xTaskCreate(%s) failed", name);
+    }
 #else
-    xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, 0);
+    if (xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, 0) != pdPASS) {
+        ESP_LOGE("platform", "xTaskCreatePinnedToCore(%s) failed", name);
+    }
 #endif
 }
 

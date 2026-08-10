@@ -25,7 +25,7 @@ PowerSampler_TMP117 tmp117_49{0x49};
 
 SamplerRegistry samplers;
 StubBleTransport bleTransport;
-Telemetry *telemetry = nullptr;
+Telemetry telemetry(samplers, bleTransport);
 
 [[noreturn]] void realTimeTask(void *arg);
 [[noreturn]] void appTask(void *arg);
@@ -60,11 +60,11 @@ void setup(void) {
     samplers.initAll();
     samplers.startAll();
 
-    telemetry = new Telemetry(samplers, bleTransport);
-    telemetry->noteWakeEvent();
+    telemetry.noteWakeEvent();
 
-    platform::createRealTimeTask(realTimeTask, "rt", 2048, RT_PRIO);
-    platform::createAppTask(appTask, "nrt", 2048, 1);
+    platform::createRealTimeTask(realTimeTask, "rt", 1024, RT_PRIO);
+    platform::createAppTask(appTask, "nrt", 1024, 1);
+    vTaskStartScheduler();
 }
 
 [[noreturn]] void realTimeTask(void *arg) {
@@ -80,7 +80,7 @@ void loop() { vTaskDelay(1000); }
 [[noreturn]] void appTask(void *arg) {
     (void)arg;
     while (1) {
-        telemetry->update();
+        telemetry.update();
         vTaskDelay(10);
     }
 }

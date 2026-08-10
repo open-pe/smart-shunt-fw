@@ -178,12 +178,12 @@ public:
     /// Last value published to the characteristic, so tick() only notifies on an actual change.
     int8_t auxPublished = -1;
 
-    void publishAux(bool notify) override {
+    void publishAux(bool on) override {
         if (!pAuxChar) return;
-        const char v = auxGet() ? '1' : '0';
+        const char v = on ? '1' : '0';
         pAuxChar->setValue((uint8_t *) &v, 1); // keep a plain read truthful, connected or not
-        if (notify && isConnected()) pAuxChar->notify((uint8_t *) &v, 1);
-        auxPublished = auxGet() ? 1 : 0;
+        if (isConnected()) pAuxChar->notify((uint8_t *) &v, 1);
+        auxPublished = on ? 1 : 0;
     }
 
     void otaStatusAppend(const char *line) {
@@ -250,7 +250,7 @@ public:
         pAuxChar = pService->createCharacteristic(
             AUX_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
         pAuxChar->setCallbacks(&auxCallbacks);
-        publishAux(false); // the pin already has its restored state; make a read reflect it
+        publishAux(auxGet()); // the pin already has its restored state; make a read reflect it
 
         pService->start();
 
@@ -397,7 +397,7 @@ public:
             auxSet(auxReqValue);
         }
         // Covers the console path too, so `aux on` over UART notifies any subscribed client.
-        if (auxPublished != (auxGet() ? 1 : 0)) publishAux(true);
+        if (auxPublished != (auxGet() ? 1 : 0)) publishAux(auxGet());
 
         drainOtaTx();
     }
@@ -673,7 +673,7 @@ public:
                 ESP_LOGW("aux", "unparseable aux write (%u bytes), ignored", (unsigned) v.size());
                 // Re-publish so the characteristic value never reflects the garbage that was
                 // written into it, and the client can see the switch did not move.
-                srv->publishAux(false);
+                srv->publishAux(auxGet());
                 return;
             }
             srv->auxReqValue = want;

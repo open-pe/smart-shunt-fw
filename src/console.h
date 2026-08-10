@@ -9,6 +9,11 @@
 #include "adc/ina228.h"
 #include "adc/ina228_mux.h"
 
+#ifndef TARGET_STM32H5
+#include <esp_ota_ops.h>
+extern bool otaBleActive();
+#endif
+
 inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, BleTransport &ble) {
     while (1) {
         String inp(buf);
@@ -91,11 +96,37 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                     UART_LOG("aux = %s", auxGet() ? "ON" : "off");
                 }
             }
-        } else if (inp == "help") {
+        }
+#ifndef TARGET_STM32H5
+        else if (inp == "bootinfo") {
+            const esp_partition_t *running = esp_ota_get_running_partition();
+            esp_ota_img_states_t st;
+            const char *state = "unknown";
+            if (running && esp_ota_get_state_partition(running, &st) == ESP_OK) {
+                switch (st) {
+                    case ESP_OTA_IMG_NEW:            state = "NEW"; break;
+                    case ESP_OTA_IMG_PENDING_VERIFY: state = "PENDING_VERIFY"; break;
+                    case ESP_OTA_IMG_VALID:          state = "VALID"; break;
+                    case ESP_OTA_IMG_INVALID:        state = "INVALID"; break;
+                    case ESP_OTA_IMG_ABORTED:        state = "ABORTED"; break;
+                    case ESP_OTA_IMG_UNDEFINED:      state = "UNDEFINED"; break;
+                }
+            }
+            const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+            UART_LOG("running=%s state=%s next=%s slot=%u B, uptime=%lus, ota=%s",
+                     running ? running->label : "?", state, next ? next->label : "none",
+                     (unsigned) (next ? next->size : 0), (unsigned long) (millis() / 1000),
+                     otaBleActive() ? "ACTIVE" : "idle");
+        }
+#endif
+        else if (inp == "help") {
             UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
             UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
             UART_LOG("aux [on|off|toggle]");
             UART_LOG("reset   zero the energy counters");
+#ifndef TARGET_STM32H5
+            UART_LOG("bootinfo              running slot + OTA verify state");
+#endif
         } else {
             UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());
         }
