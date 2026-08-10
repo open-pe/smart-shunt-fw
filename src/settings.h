@@ -14,12 +14,18 @@
 */
 
 
-#define WAVESHARE_MINI 1
+#define XIAO_ESP32S3 1
+#define WAVESHARE_MINI 0
 #define GREEN_DAQ_BREAD_BOARD 0
 
 struct settings_t {
 #ifdef FMETAL
     uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
+#elif XIAO_ESP32S3
+    int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
+    uint8_t Pin_INA22x_ALERT = 1;
+    uint8_t Pin_INA22x_ALERT2 = 4;
+    uint8_t Pin_INA22x_ALERT3 = 5;
 #elif WAVESHARE_MINI
     int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
     uint8_t Pin_INA22x_ALERT = 1;

@@ -17,7 +17,7 @@
  * driver gate needs an external pulldown to keep the load off through boot.
  */
 
-constexpr gpio_num_t AUX_PIN = GPIO_NUM_10;
+constexpr gpio_num_t AUX_PIN = GPIO_NUM_9;
 constexpr bool AUX_ACTIVE_HIGH = true;
 
 // Raw EEPROM/NVS byte offsets -- deliberately NOT slot indices. Calibration occupies bytes 16..111
