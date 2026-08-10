@@ -119,7 +119,6 @@ volatile int g_wifiRequest = 0;
                 ESP_LOGI("wifi", "disconnected and radio off");
                 wasEnabled = false;
             }
-            apsAdded = false;
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
