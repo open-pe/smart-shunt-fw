@@ -20,9 +20,9 @@ I made this for precision power metering and testing DCDC converters.
 
 select the board:
 
-`pio run -e esp32`
-or
 `pio run -e esp32s3`
+or
+`pio run -e stm32h5`
 
 # TODO
 

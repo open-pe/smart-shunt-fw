@@ -323,7 +323,7 @@ public:
         name.copy(ws.dev, 16);
         Sample &s(ws.data);
         {
-            s.i = i_mean, s.u = u_mean, s.p_ = p_mean, s.t = windowTimestamp, s.temp = temp_mean;
+            s.i = i_mean, s.u = u_mean, s.p_ = p_mean, s.e = (float)energy, s.t = windowTimestamp, s.temp = temp_mean;
         }
         ws.crc = WireSample::compute_crc16((uint8_t *) &ws, (uint8_t *) &ws.crc - (uint8_t *) &ws);
 
