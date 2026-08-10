@@ -209,6 +209,9 @@ void setup(void) {
             WiFi.disconnect(true);
             WiFiClass::mode(WIFI_OFF);
             disableWifi = true;
+            g_wifiRequest = 0;
+        } else {
+            g_wifiRequest = 1;
         }
     }
 

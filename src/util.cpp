@@ -110,16 +110,21 @@ volatile int g_wifiRequest = 0;
 
 [[noreturn]] void wifiTask(void *) {
     bool apsAdded = false;
+    bool wasEnabled = false;
     while (true) {
         if (g_wifiRequest == 0) {
-            if (WiFi.status() == WL_CONNECTED) {
-                WiFi.disconnect(true);
-                ESP_LOGI("wifi", "disconnected by request");
+            if (wasEnabled) {
+                WiFi.disconnect(true, true);
+                WiFi.mode(WIFI_OFF);
+                ESP_LOGI("wifi", "disconnected and radio off");
+                wasEnabled = false;
             }
             apsAdded = false;
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+
+        wasEnabled = true;
 
         if (WiFi.status() == WL_CONNECTED) {
             vTaskDelay(pdMS_TO_TICKS(5000));
