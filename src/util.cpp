@@ -105,6 +105,10 @@ void wait_for_wifi() {
     ESP_LOGI("util", "Connected to WiFi, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
 }
 
+bool wifi_poll() {
+    return wifiMulti.run() == WL_CONNECTED;
+}
+
 void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {
     if (msg.length() > CONFIG_TCP_MSS) {
         ESP_LOGW("tele", "Payload len %d > TCP_MSS: %s", msg.length(), msg.substring(0, 200).c_str());

@@ -263,6 +263,9 @@ void loop() { vTaskDelay(1000); }
 [[noreturn]] void appTask(void *arg) {
     (void)arg;
     while (1) {
+        if (!disableWifi) {
+            wifi_poll();
+        }
         otaBleTick(millis());
         telemetry->update(false);
         if (otaBleActive()) {
