@@ -17,6 +17,7 @@ std::string timeStr();
 
 #ifndef TARGET_STM32H5
 void connect_wifi_async();
+void connect_wifi_async_once();
 void wait_for_wifi();
 void wifi_tick();
 [[noreturn]] void wifiTask(void *);

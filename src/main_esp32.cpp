@@ -202,7 +202,7 @@ void setup(void) {
     Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, 400000UL);
 
     if (!disableWifi) {
-        connect_wifi_async();
+        connect_wifi_async_once();
         wait_for_wifi();
         timeSync("CET-1CEST,M3.5.0,M10.5.0/3", "de.pool.ntp.org", "time.nis.gov");
         if (wifiTimeSyncOnly) {

@@ -98,6 +98,14 @@ void connect_wifi_async() {
 #undef ADD_AP
 }
 
+static bool wifiApsAdded = false;
+
+void connect_wifi_async_once() {
+    if (wifiApsAdded) return;
+    connect_wifi_async();
+    wifiApsAdded = true;
+}
+
 void wait_for_wifi() {
     while (wifiMulti.run() != WL_CONNECTED) {
         delay(50);
@@ -131,7 +139,7 @@ volatile int g_wifiRequest = 0;
         }
 
         if (!apsAdded) {
-            connect_wifi_async();
+            connect_wifi_async_once();
             apsAdded = true;
             ESP_LOGI("wifi", "wifiTask: starting connect attempt");
         }
