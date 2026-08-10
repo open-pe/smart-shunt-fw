@@ -1,3 +1,5 @@
+#pragma once
+
 #include <Arduino.h>
 
 #include <utility>
@@ -5,6 +7,7 @@
 #include "adc/sampling.h"
 #include <cmath>
 #include "util.h"
+#include "settings.h"
 #include "mean_window.h"
 
 #include "readerwriterqueue.h"

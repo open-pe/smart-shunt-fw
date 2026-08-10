@@ -98,7 +98,8 @@ public:
     }
 };
 #else
-class BleSrv {
+#include "ble_transport.h"
+class BleSrv : public BleTransport {
     BLEServer *pServer = nullptr;
     BLECharacteristic *pCharacteristic = nullptr;
 
@@ -177,7 +178,7 @@ public:
     /// Last value published to the characteristic, so tick() only notifies on an actual change.
     int8_t auxPublished = -1;
 
-    void publishAux(bool notify) {
+    void publishAux(bool notify) override {
         if (!pAuxChar) return;
         const char v = auxGet() ? '1' : '0';
         pAuxChar->setValue((uint8_t *) &v, 1); // keep a plain read truthful, connected or not
@@ -219,12 +220,12 @@ public:
 
     bool inTransmission() const { return waitingForAck > 0; }
 
-    bool isConnected() const { return pServer && pServer->getConnectedCount() > 0; }
+    bool isConnected() const override { return pServer && pServer->getConnectedCount() > 0; }
 
     BleSrv() : serverCallbacks{this}, chrCallbacks{this}, otaCtrlCallbacks{this}, auxCallbacks{this} {
     }
 
-    void begin() {
+    void begin() override {
         assert(pServer == nullptr);
         BLEDevice::init("smart-shunt");
         if (!NimBLEDevice::setMTU(MTU)) {
@@ -297,7 +298,7 @@ public:
         ackFailed = false;
     }
 
-    void send(const uint8_t *buf, size_t len) {
+    void send(const uint8_t *buf, size_t len) override {
         consumeSessionChange();
         if (otaBleActive()) {
             // Telemetry stands down for the duration of a firmware push: the sampler is halted
@@ -354,7 +355,7 @@ public:
     /// App-task pump for everything that must not run on the NimBLE host task: the deferred
     /// connection-parameter change and the OTA status stream. Call once per app-task pass, after
     /// otaBleTick() so the lines it produced go out in the same pass.
-    void tick() {
+    void tick() override {
         // Self-reconciling rather than hook-driven: an OTA wants a 7.5-15ms interval (the default
         // 30-60ms would stretch a 1.4MB image over minutes), and the link goes back to the relaxed
         // interval as soon as the transfer ends, however it ended.
@@ -425,7 +426,7 @@ public:
         }
     }
 
-    void flush() {
+    void flush() override {
         consumeSessionChange();
         if (otaBleActive()) return; // see send()
         if (acked || ackFailed) {

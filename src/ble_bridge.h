@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include "esp_compat.h"
+#include "ble_transport.h"
 #include "ble_protocol.h"
 #include "aux_switch.h"
 
@@ -12,7 +13,7 @@
 
 extern bool g_bleLinkConnected;
 
-class BleBridge {
+class BleBridge : public BleTransport {
     HardwareSerial *uart;
     uint8_t rxBuf[BLE_FRAME_MAX_PAYLOAD + 16];
     size_t rxLen = 0;
@@ -54,7 +55,7 @@ class BleBridge {
 public:
     BleBridge(HardwareSerial &port) : uart(&port) {}
 
-    void begin() {
+    void begin() override {
         uart->begin(BLE_UART_BAUD);
         ESP_LOGI("ble", "BLE bridge started on UART @ %d baud", BLE_UART_BAUD);
     }
@@ -84,24 +85,24 @@ public:
         uart->write(txBuf, pos);
     }
 
-    void send(const uint8_t *data, size_t len) {
+    void send(const uint8_t *data, size_t len) override {
         sendFrame(BLE_MSG_TELEMETRY, data, (uint16_t)len);
     }
 
-    void flush() {
+    void flush() override {
         uart->flush();
     }
 
-    void publishAux(bool on) {
+    void publishAux(bool on) override {
         uint8_t v = on ? 1 : 0;
         sendFrame(BLE_MSG_AUX_STATE, &v, 1);
     }
 
-    bool isConnected() const {
+    bool isConnected() const override {
         return g_bleLinkConnected;
     }
 
-    void tick() {
+    void tick() override {
         while (uart->available()) {
             uint8_t b = uart->read();
 
