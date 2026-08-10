@@ -396,8 +396,8 @@ public:
             auxReqPending = false;
             auxSet(auxReqValue);
         }
-        // Covers the console path too, so `aux on` over UART notifies any subscribed client.
-        if (auxPublished != (auxGet() ? 1 : 0)) publishAux(auxGet());
+        // Aux state-change notification is handled centrally in Telemetry::update(),
+        // which calls publishAux() for both BLE-originated and console-originated changes.
 
         drainOtaTx();
     }

@@ -64,6 +64,16 @@ void setup(void) {
 
     platform::createRealTimeTask(realTimeTask, "rt", 1024, RT_PRIO);
     platform::createAppTask(appTask, "nrt", 1024, 1);
+
+    size_t freeHeap = xPortGetFreeHeapSize();
+    ESP_LOGI("main", "Free heap before scheduler: %u bytes (min stack ~%u bytes)",
+             (unsigned)freeHeap, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
+    if (freeHeap < 4096) {
+        ESP_LOGW("main", "Low heap (%u bytes) — task stacks, queues, and timer allocation may fail",
+                 (unsigned)freeHeap);
+    }
+
     vTaskStartScheduler();
 }
 

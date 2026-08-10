@@ -177,6 +177,8 @@ static void markOtaValidIfHealthy() {
     if (esp_ota_get_state_partition(running, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
         if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
             ESP_LOGI("main", "OTA image confirmed valid (rollback cancelled)");
+        else
+            ESP_LOGE("main", "failed to confirm OTA image valid -- a reset will roll back");
     }
 }
 

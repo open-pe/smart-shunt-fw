@@ -11,7 +11,11 @@
 
 #ifndef TARGET_STM32H5
 #include <esp_ota_ops.h>
+#include <WiFi.h>
 extern bool otaBleActive();
+extern bool disableWifi;
+extern bool wifiTimeSyncOnly;
+void connect_wifi_async();
 #endif
 
 inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, BleTransport &ble) {
@@ -98,7 +102,16 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             }
         }
 #ifndef TARGET_STM32H5
-        else if (inp == "bootinfo") {
+        else if (inp == "wifi on") {
+            disableWifi = false;
+            wifiTimeSyncOnly = false;
+            connect_wifi_async();
+            UART_LOG("WiFi connecting...");
+        } else if (inp == "wifi off") {
+            disableWifi = true;
+            WiFi.disconnect(true);
+            UART_LOG("WiFi disabled");
+        } else if (inp == "bootinfo") {
             const esp_partition_t *running = esp_ota_get_running_partition();
             esp_ota_img_states_t st;
             const char *state = "unknown";
@@ -126,6 +139,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("reset   zero the energy counters");
 #ifndef TARGET_STM32H5
             UART_LOG("bootinfo              running slot + OTA verify state");
+            UART_LOG("wifi on|off           enable/disable WiFi + InfluxDB telemetry");
 #endif
         } else {
             UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());
