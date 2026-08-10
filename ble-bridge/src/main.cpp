@@ -163,15 +163,19 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     void onDisconnect(NimBLEServer *server, NimBLEConnInfo &connInfo, int reason) override {
         bleConnected = false;
         bleSubscribed = false;
+        sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){0}, 1);
         NimBLEDevice::startAdvertising();
     }
 };
 
 class TelemetryCallbacks : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic *chr, NimBLEConnInfo &connInfo, uint16_t subValue) override {
-        if (subValue & NIMBLE_SUBSCRIBE_INDICATING) {
+        if (subValue >= 2) {
             bleSubscribed = true;
             sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){1}, 1);
+        } else if (subValue == 0) {
+            bleSubscribed = false;
+            sendFrameToSTM32(BLE_MSG_LINK_STATUS, (uint8_t[]){0}, 1);
         }
     }
 };

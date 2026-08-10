@@ -191,14 +191,9 @@ void update() {
         if (bleBridge.isConnected()) {
             noteWakeEvent();
         } else {
-            UART_LOG("Zero power for %llds, entering Stop mode (aux=%s)",
+            UART_LOG("Zero power for %llds, idle (aux=%s) — Stop mode not yet implemented",
                      (long long)(IDLE_SLEEP_AFTER_US / 1000000), auxGet() ? "ON" : "off");
-            Serial.flush();
-            auxArmDeepSleepHold();
-            HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
-            SystemClock_Config();
             noteWakeEvent();
-            ESP_LOGI("main", "Woke from Stop mode");
         }
     }
 }

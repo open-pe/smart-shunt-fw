@@ -35,7 +35,7 @@ typedef int esp_err_t;
 
 extern "C" void SystemClock_Config(void);
 
-static inline int64_t esp_timer_get_time() {
+inline int64_t esp_timer_get_time() {
     static uint32_t last_us = 0;
     static uint64_t base = 0;
     taskENTER_CRITICAL();
