@@ -57,20 +57,18 @@ static bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
 
 #else
 
-#if CONFIG_IDF_TARGET_ESP32S3
-
 #define XIAO_ESP32S3 1
 #define WAVESHARE_MINI 0
 #define GREEN_DAQ_BREAD_BOARD 0
 
 struct settings_t {
 #ifdef FMETAL
-    uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41;
+    uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
 #elif XIAO_ESP32S3
-    int8_t Pin_I2C_SDA = 5, Pin_I2C_SCL = 6;
+    int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
     uint8_t Pin_INA22x_ALERT = 1;
-    uint8_t Pin_INA22x_ALERT2 = 2;
-    uint8_t Pin_INA22x_ALERT3 = 3;
+    uint8_t Pin_INA22x_ALERT2 = 4;
+    uint8_t Pin_INA22x_ALERT3 = 5;
     uint8_t Pin_Mux_S1 = 4;
     uint8_t Pin_Mux_S2 = 7;
     uint8_t Pin_Mux_Zero = 8;
@@ -107,12 +105,6 @@ struct settings_t {
     uint8_t Pin_ADS131_Drdy = 6;
     uint8_t Pin_ADS131_Rst = 9;
 };
-#else
-struct settings_t_01 {
-    uint8_t Pin_I2C_SDA = 21, Pin_I2C_SCL = 22;
-    uint8_t Pin_INA22x_ALERT = 19;
-};
-#endif
 
 static settings_t settings;
 

@@ -9,7 +9,20 @@ constexpr uint8_t AUX_PIN = PA8;
 #else
 #include <driver/gpio.h>
 #include <esp_log.h>
-constexpr gpio_num_t AUX_PIN = GPIO_NUM_10;
+
+/*
+ * Aux switch: one general-purpose GPIO output, driven from BLE or the console.
+ *
+ * GPIO 9 is free (undeclared in settings.h), not a strapping pin, not USB, not flash, and is
+ * RTC-capable -- that last part is what lets it hold its level through deep sleep. Confirm the pin
+ * is actually broken out on the module before wiring: hw/ documents the INA228 sensor board (whose
+ * MCU sheet is an ESP-12F), not the ESP32-S3 module the firmware runs on.
+ *
+ * The pin FLOATS from reset until auxBegin() runs. Nothing in firmware can cover that window, so the
+ * driver gate needs an external pulldown to keep the load off through boot.
+ */
+
+constexpr gpio_num_t AUX_PIN = GPIO_NUM_9;
 #endif
 constexpr bool AUX_ACTIVE_HIGH = true;
 
