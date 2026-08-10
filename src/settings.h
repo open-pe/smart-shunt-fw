@@ -69,7 +69,7 @@ struct settings_t {
     uint8_t Pin_INA22x_ALERT = 1;
     uint8_t Pin_INA22x_ALERT2 = 4;
     uint8_t Pin_INA22x_ALERT3 = 5;
-    uint8_t Pin_Mux_S1 = 4;
+    uint8_t Pin_Mux_S1 = 6;
     uint8_t Pin_Mux_S2 = 7;
     uint8_t Pin_Mux_Zero = 8;
 #elif WAVESHARE_MINI
