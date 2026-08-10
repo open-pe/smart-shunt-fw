@@ -6,9 +6,7 @@
 #include "esp_compat.h"
 #include <FreeRTOS.h>
 #include <task.h>
-#include <map>
 #include <vector>
-#include <String.h>
 
 #include "adc/ina228.h"
 #include "adc/ina228_mux.h"
@@ -21,9 +19,16 @@
 #include "aux_switch.h"
 
 #ifdef TARGET_STM32H5
-#include <HardwareSerial.h>
-HardwareSerial BleSerial(PB15, PB14);
-BleBridge bleBridge(BleSerial);
+class StubBleBridge {
+public:
+    void begin() { ESP_LOGI("ble", "BLE bridge stub (UART not yet configured)"); }
+    void send(const uint8_t *, size_t) {}
+    void flush() {}
+    void tick() {}
+    bool isConnected() const { return false; }
+    void publishAux(bool) {}
+};
+StubBleBridge bleBridge;
 #else
 BleBridge bleBridge;
 #endif
@@ -40,13 +45,15 @@ PowerSampler_TMP117 tmp117_49{0x49};
 
 PowerSampler_Dummy dummy{};
 
-std::map<std::string, PowerSampler *> samplers{
+struct SamplerEntry { const char *name; PowerSampler *sampler; };
+SamplerEntry samplers[] = {
     {"INA228",     &ina228_40},
     {"INA228_2A",  &mux_chA},
     {"INA228_2B",  &mux_chB},
     {"TMP117",     &tmp117},
     {"TMP117_2",   &tmp117_49},
 };
+constexpr size_t numSamplers = sizeof(samplers) / sizeof(samplers[0]);
 
 std::vector<EnergyCounter> energyCounters;
 
@@ -72,8 +79,6 @@ void setup(void) {
 
     ESP_LOGI("main", "SmartShunt STM32H5 started");
 
-    Wire.setSDA(settings.Pin_I2C_SDA);
-    Wire.setSCL(settings.Pin_I2C_SCL);
     Wire.begin();
     Wire.setClock(400000);
 
@@ -86,12 +91,12 @@ void setup(void) {
         ESP_LOGW("main", "INA228 mux backend (0x41) init failed");
     }
 
-    for (auto p: samplers) {
-        if (!p.second->init()) {
-            ESP_LOGI("main", "%s: Failed to initialize sampler.", p.first.c_str());
+    for (size_t i = 0; i < numSamplers; i++) {
+        if (!samplers[i].sampler->init()) {
+            ESP_LOGI("main", "%s: Failed to initialize sampler.", samplers[i].name);
         } else {
-            energyCounters.emplace_back(EnergyCounter{p.second, p.first, p.second->getStorageId()});
-            ESP_LOGI("main", "Initialized energy counter for %s", p.first.c_str());
+            energyCounters.emplace_back(EnergyCounter{samplers[i].sampler, samplers[i].name, samplers[i].sampler->getStorageId()});
+            ESP_LOGI("main", "Initialized energy counter for %s", samplers[i].name);
         }
     }
 
