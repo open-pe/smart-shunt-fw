@@ -398,6 +398,11 @@ public:
         }
         // Aux state-change notification is handled centrally in Telemetry::update(),
         // which calls publishAux() for both BLE-originated and console-originated changes.
+        // The one exception: on a reconnect (auxPublished == -1, set by onConnect), push
+        // the current state so the new client sees it immediately.
+        if (auxPublished == -1) {
+            publishAux(auxGet());
+        }
 
         drainOtaTx();
     }

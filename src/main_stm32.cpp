@@ -66,9 +66,7 @@ void setup(void) {
     platform::createAppTask(appTask, "nrt", 1024, 1);
 
     size_t freeHeap = xPortGetFreeHeapSize();
-    ESP_LOGI("main", "Free heap before scheduler: %u bytes (min stack ~%u bytes)",
-             (unsigned)freeHeap, (unsigned)uxTaskGetStackHighWaterMark(NULL));
-
+    ESP_LOGI("main", "Free heap before scheduler: %u bytes", (unsigned)freeHeap);
     if (freeHeap < 4096) {
         ESP_LOGW("main", "Low heap (%u bytes) — task stacks, queues, and timer allocation may fail",
                  (unsigned)freeHeap);

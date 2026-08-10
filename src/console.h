@@ -106,7 +106,8 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             disableWifi = false;
             wifiTimeSyncOnly = false;
             connect_wifi_async();
-            UART_LOG("WiFi connecting...");
+            wait_for_wifi();
+            UART_LOG("WiFi connected");
         } else if (inp == "wifi off") {
             disableWifi = true;
             WiFi.disconnect(true);
