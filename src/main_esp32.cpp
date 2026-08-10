@@ -59,8 +59,10 @@ class EspTelemetry : public Telemetry {
 public:
     using Telemetry::Telemetry;
 
+private:
     std::vector<WireSample> wireSampleBuf;
 
+public:
     void onIdleSleep() override {
         UART_LOG("Zero power for %llds, sleeping for %llds (aux=%s)",
                  (long long)(IDLE_SLEEP_AFTER_US / 1000000),

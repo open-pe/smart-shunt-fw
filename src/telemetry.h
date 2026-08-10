@@ -56,6 +56,7 @@ protected:
 
 public:
     Telemetry(SamplerRegistry &reg, BleTransport &b) : registry(reg), ble(b) {}
+    virtual ~Telemetry() = default;
     void noteWakeEvent() { timeLastWakeEvent = platform::micros64(); }
 
     void update(bool checkIdle = true) {
