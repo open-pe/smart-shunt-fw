@@ -105,8 +105,36 @@ void wait_for_wifi() {
     ESP_LOGI("util", "Connected to WiFi, RSSI %hhi IP=%s", WiFi.RSSI(), WiFi.localIP().toString().c_str());
 }
 
-bool wifi_poll() {
-    return wifiMulti.run() == WL_CONNECTED;
+extern bool disableWifi;
+static bool wifiConnecting = false;
+static unsigned long wifiLastAttempt = 0;
+static constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+
+void wifi_tick() {
+    if (disableWifi) {
+        if (wifiConnecting) {
+            WiFi.disconnect(true);
+            wifiConnecting = false;
+        }
+        return;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiConnecting = false;
+        return;
+    }
+
+    if (!wifiConnecting) {
+        wifiConnecting = true;
+        wifiLastAttempt = millis();
+        connect_wifi_async();
+        ESP_LOGI("wifi", "starting async connect attempt");
+        return;
+    }
+
+    if (millis() - wifiLastAttempt > WIFI_RETRY_INTERVAL_MS) {
+        wifiConnecting = false;
+    }
 }
 
 void udpFlushString(const IPAddress &host, uint16_t port, String &msg) {

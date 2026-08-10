@@ -18,7 +18,7 @@ std::string timeStr();
 #ifndef TARGET_STM32H5
 void connect_wifi_async();
 void wait_for_wifi();
-bool wifi_poll();
+void wifi_tick();
 
 class Point;
 void influxWritePointUDP(const Point &p, bool flush=false);
