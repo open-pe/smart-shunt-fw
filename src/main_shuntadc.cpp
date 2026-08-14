@@ -54,7 +54,22 @@ void setup() {
      * "something is holding it low". */
     Serial.println("--- line probe (before SPI init) ---");
     Ads1262ShuntAdc::probePinDrive("DOUT/DRDY", PIN_DOUT);
+    /* Outputs: can the ESP32 actually move each line? SCLK idles LOW in SPI
+     * mode 1, so a line stuck high is either a dead pad or a short. */
+    Ads1262ShuntAdc::probePinDriveOut("SCLK     ", PIN_SCLK);
+    Ads1262ShuntAdc::probePinDriveOut("DIN      ", PIN_DIN);
+    Ads1262ShuntAdc::probePinDriveOut("nCS      ", PIN_NCS);
+    Ads1262ShuntAdc::probePinDriveOut("START    ", PIN_START);
+    /* Arbiter: talk to the ADC with no SPI peripheral involved at all. */
+    Ads1262ShuntAdc::bitbangProbe(PIN_SCLK, PIN_DIN, PIN_DOUT, PIN_NCS);
     Serial.println("--- end line probe ---");
+
+#ifdef SHUNTADC_BUS_EXERCISER
+    /* Bench mode: clock the bus continuously so it can be traced with a meter.
+     * Never returns. Opt-in via -D SHUNTADC_BUS_EXERCISER, because it replaces
+     * normal operation entirely. */
+    Ads1262ShuntAdc::busExerciser(PIN_SCLK, PIN_DIN, PIN_DOUT, PIN_NCS, PIN_START);
+#endif
     Serial.println();
 }
 

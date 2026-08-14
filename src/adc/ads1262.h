@@ -421,6 +421,163 @@ public:
                       verdict);
     }
 
+    /// Can this pin actually pull its net LOW, and what holds it when released?
+    /// MUST run before SPI.begin() claims the pin.
+    ///
+    /// Open-drain on purpose: it can only pull down, so it cannot fight another
+    /// driver and cannot damage anything if the net is externally driven. If the
+    /// pin cannot drag the net low, either the pad's driver is dead or the net is
+    /// shorted to a supply.
+    static void probePinDriveOut(const char *name, int8_t pin) {
+        pinMode((uint8_t) pin, OUTPUT_OPEN_DRAIN);
+        digitalWrite((uint8_t) pin, LOW);
+        delay(2);
+        const int lo = digitalRead((uint8_t) pin);
+        digitalWrite((uint8_t) pin, HIGH);   // release
+        delay(2);
+        const int released = digitalRead((uint8_t) pin);
+        pinMode((uint8_t) pin, INPUT);
+
+        const char *verdict;
+        if (lo != LOW)
+            verdict = "CANNOT PULL LOW -- pad driver dead, or the net is shorted to a supply";
+        else if (released == HIGH)
+            verdict = "pulls low OK, floats/pulls HIGH when released (normal for a pulled-up net)";
+        else
+            verdict = "pulls low OK, sits LOW when released";
+        Serial.printf("  %s (GPIO%d): drive-low->%d released->%d : %s\n", name, pin, lo, released,
+                      verdict);
+    }
+
+    /// Reads the ID register by BIT-BANGING the bus, with no SPI peripheral
+    /// involved. MUST run before SPI.begin() claims the pins.
+    ///
+    /// This is the arbiter when the hardware bus reads all-zeros but every pin
+    /// tests good: if bit-banging works, the wiring and the ADC are fine and the
+    /// fault is in the SPI peripheral's configuration; if it also reads zeros,
+    /// the fault is off-board.
+    ///
+    /// SPI mode 1 (CPOL=0, CPHA=1) by hand: clock idles low, MOSI changes on the
+    /// rising edge, MISO is sampled on the falling edge. CS is held low
+    /// throughout, as this board requires (sec.9.4.5).
+    static void bitbangProbe(int8_t sck, int8_t mosi, int8_t miso, int8_t cs) {
+        pinMode((uint8_t) sck, OUTPUT);
+        pinMode((uint8_t) mosi, OUTPUT);
+        pinMode((uint8_t) miso, INPUT);
+        pinMode((uint8_t) cs, OUTPUT);
+
+        digitalWrite((uint8_t) sck, LOW);
+        digitalWrite((uint8_t) cs, LOW);     // held low for the whole session
+        delayMicroseconds(10);
+
+        auto xfer = [&](uint8_t out) -> uint8_t {
+            uint8_t in = 0;
+            for (int8_t b = 7; b >= 0; --b) {
+                digitalWrite((uint8_t) sck, HIGH);                 // leading edge
+                digitalWrite((uint8_t) mosi, (out >> b) & 1);      // CPHA=1: change here
+                delayMicroseconds(2);
+                digitalWrite((uint8_t) sck, LOW);                  // trailing edge
+                in = (uint8_t) ((in << 1) | (digitalRead((uint8_t) miso) & 1));
+                delayMicroseconds(2);
+            }
+            return in;
+        };
+
+        // RREG: opcode|addr, then (count-1), then one byte clocked out
+        auto readReg = [&](uint8_t addr) -> uint8_t {
+            xfer((uint8_t) (OPCODE_RREG + (addr & 0x1F)));
+            xfer(0x00);
+            return xfer(0x00);
+        };
+
+        const uint8_t id = readReg(REG_ADDR_ID);
+        const uint8_t iface = readReg(REG_ADDR_INTERFACE);
+        const uint8_t mode2 = readReg(REG_ADDR_MODE2);
+
+        Serial.printf("  bit-bang read: ID=0x%02x INTERFACE=0x%02x MODE2=0x%02x\n", id, iface,
+                      mode2);
+        if (id == 0x00 && iface == 0x00 && mode2 == 0x00)
+            Serial.println("    VERDICT: bit-bang also reads all zeros -- the fault is OFF-BOARD "
+                           "(wiring, isolator, or the ADC), not the SPI peripheral.");
+        else if (id == 0xFF && iface == 0xFF)
+            Serial.println("    VERDICT: bit-bang reads all ones -- MISO idle high, nothing "
+                           "driving it.");
+        else
+            Serial.println("    VERDICT: BIT-BANG WORKS. Wiring and ADC are fine; the hardware "
+                           "SPI peripheral is the problem.");
+
+        digitalWrite((uint8_t) cs, HIGH);
+        pinMode((uint8_t) sck, INPUT);
+        pinMode((uint8_t) mosi, INPUT);
+        pinMode((uint8_t) cs, INPUT);
+    }
+
+    /// Clocks the bus continuously so it can be traced with a plain multimeter.
+    ///
+    /// Normal operation clocks in ~300 us bursts inside a 2 s retry window --
+    /// about 0.01% duty, invisible without a triggered capture. Here SCLK and DIN
+    /// run at ~50% duty, so every node on a live path reads about half of 3.3 V
+    /// on a DMM, and a node that is stuck reads a hard 0 V or 3.3 V. Walk the
+    /// path and the first stuck node is the break:
+    ///     GPIO4 -> J2 SCLK -> U8 host-side in -> U8 isolated-side out -> U7 pin 11
+    ///     GPIO5 -> J2 DIN  -> ...                                    -> U7 pin 12
+    ///
+    /// Bit-banged rather than hardware SPI so the pattern is a clean square wave
+    /// with no idle gaps, and CS is held low as this board requires (sec.9.4.5).
+    /// Never returns.
+    [[noreturn]] static void busExerciser(int8_t sck, int8_t mosi, int8_t miso, int8_t cs,
+                                          int8_t start) {
+        pinMode((uint8_t) sck, OUTPUT);
+        pinMode((uint8_t) mosi, OUTPUT);
+        pinMode((uint8_t) miso, INPUT);
+        pinMode((uint8_t) cs, OUTPUT);
+        if (start >= 0) pinMode((uint8_t) start, OUTPUT);
+
+        digitalWrite((uint8_t) cs, LOW);       // asserted, as in normal operation
+        if (start >= 0) digitalWrite((uint8_t) start, HIGH);
+
+        Serial.println();
+        Serial.println("=== BUS EXERCISER -- continuous clocking, trace with a multimeter ===");
+        Serial.printf("  SCLK GPIO%d and DIN GPIO%d: ~50%% duty, expect ~1.65 V on a live node\n",
+                      sck, mosi);
+        Serial.printf("  nCS GPIO%d held LOW (0 V), START GPIO%d held HIGH (3.3 V)\n", cs, start);
+        Serial.println("  A node reading a hard 0 V or 3.3 V instead of ~1.65 V is the break.");
+        Serial.printf("  DOUT GPIO%d is an input here -- if it reads ~1.65 V it is following DIN,\n"
+                      "  which would mean U7 pins 12 and 13 are bridged.\n", miso);
+        Serial.println("  Reset the board to leave this mode.");
+        Serial.println();
+
+        uint32_t lastReport = millis();
+        uint32_t misoHigh = 0, samples = 0;
+        bool dinLevel = false;
+        for (;;) {
+            /* SCLK and DIN both toggle, but at different rates, so they can be
+             * told apart on a meter: SCLK ~50%, DIN ~50% at half the frequency. */
+            for (int i = 0; i < 2; i++) {
+                digitalWrite((uint8_t) sck, HIGH);
+                delayMicroseconds(2);
+                digitalWrite((uint8_t) sck, LOW);
+                delayMicroseconds(2);
+                misoHigh += (digitalRead((uint8_t) miso) == HIGH);
+                ++samples;
+            }
+            /* Track DIN's level locally -- reading back an output pin is not
+             * reliable on ESP32 once the input buffer is disabled. */
+            dinLevel = !dinLevel;
+            digitalWrite((uint8_t) mosi, dinLevel);
+
+            if ((uint32_t) (millis() - lastReport) >= 3000) {
+                lastReport = millis();
+                /* Report what DOUT is doing. Following DIN shows up as roughly
+                 * half the samples high; a stuck line shows as 0% or 100%. */
+                Serial.printf("  [exerciser] DOUT high in %lu%% of %lu samples\n",
+                              (unsigned long) (samples ? misoHigh * 100 / samples : 0),
+                              (unsigned long) samples);
+                misoHigh = samples = 0;
+            }
+        }
+    }
+
     /// Bench diagnosis for a failed init(). Requires ads126xHalBegin() to have
     /// run (init() does that before it can fail on readback).
     ///
@@ -567,19 +724,27 @@ public:
          *     says nothing about its FREQUENCY);
          *   - PGA bypassed removes the input-window constraint entirely. */
         Serial.println("  config sweep (3 s each, looking for ANY conversion):");
-        struct Try { const char *name; uint8_t mode1, mode2, inpmux; uint8_t gain; };
+        struct Try { const char *name; uint8_t mode1, mode2, inpmux, refmux; uint8_t gain; };
+        /* REFMUX 0x00 = internal 2.5 V reference; 0x24 = AVDD/AVSS as the
+         * reference, which bypasses the internal reference entirely. If a row
+         * converts ONLY with 0x24, the internal reference is dead -- REFOUT
+         * (pin 8) sits next to AVSS (pin 7) and note N3 wants 1 uF between
+         * them, so a short or a damaged cap there is the obvious cause. */
+        static constexpr uint8_t REF_INT = 0x00;
+        static constexpr uint8_t REF_AVDD =
+                (uint8_t) (REFMUX_RMUXP_INT_AVDD | REFMUX_RMUXN_INT_AVSS);
         static const Try tries[] = {
-                {"sinc1 38400SPS PGAbyp AVDDmon", MODE1_FILTER_SINC1,
+                {"sinc1 38400SPS PGAbyp AVDDmon REFint ", MODE1_FILTER_SINC1,
                  (uint8_t) (0x80 | MODE2_DR_38400_SPS),
-                 (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N), 1},
-                {"sinc1 20SPS   PGAbyp AVDDmon", MODE1_FILTER_SINC1,
+                 (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N), REF_INT, 1},
+                {"sinc1 38400SPS PGAbyp AVDDmon REFavdd", MODE1_FILTER_SINC1,
+                 (uint8_t) (0x80 | MODE2_DR_38400_SPS),
+                 (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N), REF_AVDD, 1},
+                {"sinc1 20SPS   PGAbyp AIN0/1  REFavdd", MODE1_FILTER_SINC1,
+                 (uint8_t) (0x80 | MODE2_DR_20_SPS), 0x01, REF_AVDD, 1},
+                {"sinc1 20SPS   PGAbyp TEMPmon REFavdd", MODE1_FILTER_SINC1,
                  (uint8_t) (0x80 | MODE2_DR_20_SPS),
-                 (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N), 1},
-                {"sinc1 20SPS   PGAbyp TEMPmon", MODE1_FILTER_SINC1,
-                 (uint8_t) (0x80 | MODE2_DR_20_SPS),
-                 (uint8_t) (INPMUX_MUXP_TEMP_P | INPMUX_MUXN_TEMP_N), 1},
-                {"sinc1 20SPS   PGAbyp AIN0/1 ", MODE1_FILTER_SINC1,
-                 (uint8_t) (0x80 | MODE2_DR_20_SPS), 0x01, 1},
+                 (uint8_t) (INPMUX_MUXP_TEMP_P | INPMUX_MUXN_TEMP_N), REF_AVDD, 1},
         };
 
         for (auto &t: tries) {
@@ -587,6 +752,7 @@ public:
             writeSingleRegister(REG_ADDR_MODE1, t.mode1);
             writeSingleRegister(REG_ADDR_MODE2, t.mode2);
             writeSingleRegister(REG_ADDR_INPMUX, t.inpmux);
+            writeSingleRegister(REG_ADDR_REFMUX, t.refmux);
             sendCommand(OPCODE_STOP1);
             setSTART(HIGH);
             sendCommand(OPCODE_START1);
