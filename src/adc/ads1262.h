@@ -294,13 +294,39 @@ public:
          *     stale INTERFACE entry silently desyncs the wire format.
          *
          * DO NOT trim this loop to "verification only, skip in release". */
+        bool readbackOk = true;
+        uint8_t all_and = 0xFF, all_or = 0x00;
         for (auto &r: regs) {
             uint8_t got = readSingleRegister(r.addr);
+            all_and &= got;
+            all_or |= got;
             if (got != r.val) {
-                ESP_LOGE("ads1262", "register readback mismatch at 0x%02x: wrote 0x%02x, read 0x%02x",
-                         r.addr, r.val, got);
-                return false;
+                /* Cap the per-register spam: when the line is stuck every one of
+                 * them mismatches, and 20 identical lines per retry bury the
+                 * verdict that actually tells the user what to do. */
+                if (readbackOk)
+                    ESP_LOGE("ads1262",
+                             "register readback mismatch at 0x%02x: wrote 0x%02x, read 0x%02x",
+                             r.addr, r.val, got);
+                readbackOk = false;
             }
+        }
+        if (!readbackOk) {
+            /* Say WHICH failure this is rather than leaving the user to guess.
+             * The two stuck-line cases are distinguishable and mean different
+             * things on this board. */
+            if (all_or == 0x00)
+                ESP_LOGE("ads1262", "every register reads 0x00 -- MISO is never driven. Either "
+                                    "the isolator's HOST side is unpowered (J2.1 is a 3V3 INPUT "
+                                    "fed by the host; there is no on-board source on that net) "
+                                    "or the DOUT wire is not landing on the MISO pin.");
+            else if (all_and == 0xFF)
+                ESP_LOGE("ads1262", "every register reads 0xFF -- DOUT idle high, which is what "
+                                    "an UNPOWERED ISOLATED SIDE looks like. Check J1's 5 V feed.");
+            else
+                ESP_LOGE("ads1262", "partial readback -- suspect SCLK integrity, SPI mode, or a "
+                                    "marginal connection.");
+            return false;
         }
 
         if (ads126xHalFaults()) {
@@ -322,6 +348,27 @@ public:
             isrAttached = true;
             ESP_LOGI("ads1262", "DRDY interrupt on MISO pin %d (shares DOUT, note N6)", pinMiso);
         }
+
+        /* Self-tests BEFORE the production configuration, in the order that
+         * gives the most specific diagnosis: the clock test terminates in
+         * bounded time whatever is wrong, and a bad clock would otherwise make
+         * the supply test look like a dead converter. */
+        if (!checkClock()) return false;
+        if (!checkSupplies()) return false;
+
+        /* Restore the production configuration the self-tests overwrote, and
+         * read it back -- upstream's writeSingleRegister() does not update the
+         * driver's shadow map, only readSingleRegister() does. */
+        setSTART(LOW);
+        writeSingleRegister(REG_ADDR_MODE0, 0x00);
+        writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);
+        writeSingleRegister(REG_ADDR_MODE2,
+                            (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
+        writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_IIN]);
+        (void) readSingleRegister(REG_ADDR_MODE0);
+        (void) readSingleRegister(REG_ADDR_MODE1);
+        (void) readSingleRegister(REG_ADDR_MODE2);
+        (void) readSingleRegister(REG_ADDR_INPMUX);
 
         pair = PAIR_IIN;
         discardsLeft = SETTLE_DISCARDS;
@@ -499,11 +546,11 @@ public:
                            "PIN -- the pin path is broken. Check GPIO16 -> J2.8 and its "
                            "forward isolator channel.");
         else if (!sawAdc1)
-            Serial.println("    VERDICT: registers OK, clock OK, but ADC1 NEVER reports new "
-                           "data by pin OR command. Registers are DVDD/digital; conversions "
-                           "need AVDD/AVSS. Check AVDD = +2.5 V and AVDD-AVSS = 4.75..5.25 V "
-                           "(datasheet Recommended Operating Conditions), i.e. U3 is the "
-                           "ADP7118-2.5 and is populated.");
+            Serial.println("    VERDICT: registers OK and EXTCLK=1, but ADC1 NEVER reports new "
+                           "data by pin OR command. EXTCLK only proves a clock EXISTS -- read "
+                           "the clock estimate below for its RATE before blaming anything else. "
+                           "If the rate is sane, suspect the analog rails (AVDD-AVSS must be "
+                           "4.75..5.25 V).");
         else if (!sawExtClk)
             Serial.println("    VERDICT: converting, but on the INTERNAL oscillator. "
                            "Check Y1, J8 and the clock path (schematic note N10).");
@@ -678,6 +725,164 @@ public:
     }
 
 private:
+    // --- init-time self-tests -------------------------------------------------
+    //
+    // These exist because EXTCLK=1 is NOT proof of a usable clock. It says an
+    // external clock was DETECTED; it says nothing about its FREQUENCY. On the
+    // bench a floating XTAL1 picking up ~30 kHz of noise read EXTCLK=1 and
+    // produced well-formed conversions at 1/240 the expected rate -- the exact
+    // "absence of evidence encodes absence of the problem" shape schematic note
+    // N10 warns about, in a form the note did not anticipate. Nothing in the
+    // STATUS byte catches it, so it has to be MEASURED.
+    //
+    // All three tests fail closed: any path that cannot complete a measurement
+    // returns false, never "fine".
+
+    /// Nominal data rate used by the self-tests. Fast enough that a healthy
+    /// clock yields plenty of conversions inside CLOCK_WINDOW_MS, slow enough
+    /// that the polling loop is not the bottleneck.
+    static constexpr uint8_t SELFTEST_DR = MODE2_DR_1200_SPS;
+    static constexpr float SELFTEST_NOMINAL_SPS = 1200.0f;
+    static constexpr uint32_t CLOCK_WINDOW_MS = 200;   ///< ~240 conversions when healthy
+    static constexpr uint32_t CLOCK_RETRY_MS = 2000;   ///< second chance for a very slow clock
+    /// Below this many conversions the rate estimate is too quantised to report.
+    static constexpr uint32_t CLOCK_MIN_SAMPLES = 20;
+    static constexpr uint32_t SELFTEST_CONV_TIMEOUT_MS = 500;
+
+    static constexpr float FCLK_NOMINAL_HZ = 7372800.0f;
+    static constexpr float FCLK_MIN_HZ = 1.0e6f;   ///< SBAS661C sec.7.3: 1..8 MHz external
+    static constexpr float FCLK_MAX_HZ = 8.0e6f;
+    static constexpr float FCLK_WARN_TOLERANCE = 0.05f;   ///< beyond this, log loudly
+
+    static constexpr float AVDD_AVSS_MIN = 4.75f, AVDD_AVSS_MAX = 5.25f;  ///< Recommended Op Cond
+    static constexpr float DVDD_MIN = 2.7f, DVDD_MAX = 5.25f;
+
+    /// Puts the ADC into the self-test configuration and restarts conversions.
+    /// sec.9.3.5 for the supply monitors: "enable the PGA, set gain = 1, and
+    /// disable chop mode".
+    void configureSelfTest(uint8_t inpmux) {
+        setSTART(LOW);
+        writeSingleRegister(REG_ADDR_MODE0, 0x00);                    // chop off
+        writeSingleRegister(REG_ADDR_MODE1, MODE1_FILTER_SINC1);      // zero latency
+        writeSingleRegister(REG_ADDR_MODE2, SELFTEST_DR);             // PGA on, gain 1
+        writeSingleRegister(REG_ADDR_INPMUX, inpmux);
+        sendCommand(OPCODE_STOP1);
+        setSTART(HIGH);
+        sendCommand(OPCODE_START1);
+    }
+
+    /// Waits for one genuine conversion. False on timeout -- never a fabricated code.
+    bool oneConversion(int32_t &code) {
+        for (uint32_t t0 = millis(); (uint32_t) (millis() - t0) < SELFTEST_CONV_TIMEOUT_MS;) {
+            uint8_t status = 0, checksum = 0, data[4] = {0};
+            const uint32_t faultsBefore = ads126xHalFaults();
+            const int32_t c = readData(&status, data, &checksum);
+            if (ads126xHalFaults() != faultsBefore) return false;
+            if (!(status & STATUS_ADC1)) continue;
+            if (checksum != calculateChecksum(data, 4)) continue;
+            code = c;
+            return true;
+        }
+        return false;
+    }
+
+    uint32_t countConversions(uint32_t windowMs) {
+        uint32_t n = 0;
+        for (uint32_t t0 = millis(); (uint32_t) (millis() - t0) < windowMs;) {
+            uint8_t status = 0, checksum = 0, data[4] = {0};
+            readData(&status, data, &checksum);
+            if (status & STATUS_ADC1) ++n;
+        }
+        return n;
+    }
+
+    /// Measures fCLK by timing real conversions. Every ADS1262 timing scales with
+    /// the clock, so measured_rate / nominal_rate is exactly fCLK / 7.3728 MHz.
+    bool checkClock() {
+        configureSelfTest((uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N));
+
+        uint32_t window = CLOCK_WINDOW_MS;
+        uint32_t n = countConversions(window);
+        /* Too few conversions to divide by. Covers both a dead converter (n=0)
+         * and a very slow clock, where 1-2 hits in the short window quantise the
+         * estimate so badly it reported 61440 Hz and 30720 Hz on consecutive
+         * runs of the same board. A healthy clock lands ~240 here and skips this
+         * entirely, so the retry costs nothing in the normal case. */
+        if (n < CLOCK_MIN_SAMPLES) {
+            window = CLOCK_RETRY_MS;
+            n = countConversions(window);
+        }
+        if (n == 0) {
+            ESP_LOGE("ads1262", "SELF-TEST FAIL: no conversions in %u ms at a nominal %.0f SPS. "
+                                "The converter is not running at all -- check AVDD/AVSS and that "
+                                "a clock reaches XTAL1.",
+                     (unsigned) window, SELFTEST_NOMINAL_SPS);
+            return false;
+        }
+
+        const float sps = (float) n * 1000.0f / (float) window;
+        const float fclk = FCLK_NOMINAL_HZ * (sps / SELFTEST_NOMINAL_SPS);
+
+        if (fclk < FCLK_MIN_HZ || fclk > FCLK_MAX_HZ) {
+            ESP_LOGE("ads1262",
+                     "SELF-TEST FAIL: fCLK ~ %.0f Hz, outside the %.0f..%.0f Hz the part accepts "
+                     "(expected %.0f). EXTCLK reads 1 because SOMETHING is on XTAL1, but it is "
+                     "not a valid clock -- check Y1 is oscillating, its supply and output enable, "
+                     "J8, and the isolator channel carrying the clock.",
+                     fclk, FCLK_MIN_HZ, FCLK_MAX_HZ, FCLK_NOMINAL_HZ);
+            return false;
+        }
+        if (fabsf(fclk - FCLK_NOMINAL_HZ) / FCLK_NOMINAL_HZ > FCLK_WARN_TOLERANCE)
+            ESP_LOGW("ads1262", "fCLK ~ %.0f Hz is more than %.0f%% off the expected %.0f Hz. "
+                                "Conversion timing and the 50/60 Hz filter nulls scale with it.",
+                     fclk, FCLK_WARN_TOLERANCE * 100.0f, FCLK_NOMINAL_HZ);
+        else
+            ESP_LOGI("ads1262", "fCLK ~ %.0f Hz (%lu conversions in %u ms)", fclk,
+                     (unsigned long) n, (unsigned) window);
+        return true;
+    }
+
+    /// Reads the ADC's own supply monitors. sec.9.3.5:
+    ///   V_ANLMON = (AVDD - AVSS) / 4,  V_DIGMON = (DVDD - DGND) / 4
+    /// Independent of any external wiring, so this is a true self-check.
+    bool checkSupplies() {
+        // gain = 1 in the self-test config, so volts = code * VREF / 2^31
+        constexpr float lsb1 = VREF / (float) (2u << 30);
+        int32_t code = 0;
+
+        configureSelfTest((uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N));
+        if (!oneConversion(code)) {
+            ESP_LOGE("ads1262", "SELF-TEST FAIL: no conversion for the analog supply monitor");
+            return false;
+        }
+        const float avddAvss = code * lsb1 * 4.0f;
+
+        configureSelfTest((uint8_t) (INPMUX_MUXP_DVDD_P | INPMUX_MUXN_DVDD_N));
+        if (!oneConversion(code)) {
+            ESP_LOGE("ads1262", "SELF-TEST FAIL: no conversion for the digital supply monitor");
+            return false;
+        }
+        const float dvdd = code * lsb1 * 4.0f;
+
+        ESP_LOGI("ads1262", "supplies: AVDD-AVSS = %.3f V, DVDD = %.3f V", avddAvss, dvdd);
+
+        bool ok = true;
+        if (avddAvss < AVDD_AVSS_MIN || avddAvss > AVDD_AVSS_MAX) {
+            ESP_LOGE("ads1262", "SELF-TEST FAIL: AVDD-AVSS = %.3f V, outside %.2f..%.2f V. "
+                                "Check U3 (+2.5 V) and U4 (-2.5 V) and their +/-5 V inputs.",
+                     avddAvss, AVDD_AVSS_MIN, AVDD_AVSS_MAX);
+            ok = false;
+        }
+        if (dvdd < DVDD_MIN || dvdd > DVDD_MAX) {
+            ESP_LOGE("ads1262", "SELF-TEST FAIL: DVDD = %.3f V, outside %.2f..%.2f V. "
+                                "Check U5 (+3.3 V) -- a 2.5 V part fitted there lands at 2.5 V, "
+                                "below the 2.7 V minimum.",
+                     dvdd, DVDD_MIN, DVDD_MAX);
+            ok = false;
+        }
+        return ok;
+    }
+
     /// True once EXTCLK reads 1 in a genuine conversion.
     ///
     /// Bounded by WALL CLOCK, not by an attempt count. waitForEdge() polls with a
