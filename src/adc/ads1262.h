@@ -152,6 +152,28 @@ public:
     /// real settling; this is paid once per configuration change, not per sample.
     static constexpr uint8_t ZERO_SETTLE_DISCARDS = 8;
 
+    /// Filter and rate for the ZERO-DRIFT channel only -- deliberately NOT the
+    /// production FIR @ 20 SPS, which stays as it is for the mux scan.
+    ///
+    /// Sinc4 @ 10 SPS wins on both axes that matter to a static measurement:
+    ///   noise (Table 8-1, gain 32): 0.013 uVRMS vs 0.030 for FIR @ 20 SPS.
+    ///     That is a genuine per-unit-time gain, not just a slower sample --
+    ///     two averaged FIR conversions cover the same 100 ms at 0.021 uVRMS.
+    ///   50 Hz rejection (Table 9-6): -136 dB vs -95 dB for sinc4 @ 20 SPS.
+    ///
+    /// The rate matters as much as the order: sinc notches sit at MULTIPLES OF
+    /// THE DATA RATE, so the rate has to divide the line frequency. 10 divides
+    /// 50; 20 does not, which is why sinc4 @ 20 SPS collapses to -72 dB at
+    /// 50 Hz. Do not "speed this up" to 20 SPS without re-reading Table 9-6.
+    ///
+    /// What it costs, and why this channel can pay it: conversion latency
+    /// td(STDR) (Table 9-13) is 400.4 ms against FIR's 52.22 ms. The production
+    /// scan pays that on EVERY mux change and could not afford it (4 pairs would
+    /// go from ~209 ms to 1.6 s). This channel never leaves AINCOM, so it pays
+    /// the settle once per configuration change and never again.
+    static constexpr uint8_t ZERO_MODE1_VALUE = MODE1_FILTER_SINC4;
+    static constexpr uint8_t ZERO_DATA_RATE_CODE = MODE2_DR_10_SPS;
+
     /// A missed conversion presents as a line stuck low with NO further edges
     /// (note N11 b), so an edge-only wait would hang forever. After this long
     /// without an edge we read anyway, which re-arms the pin. Must exceed
@@ -191,6 +213,8 @@ private:
     float dieTempC_ = NAN;   ///< ADS1262 internal temperature sensor, degC
     uint8_t tempSkip_ = TEMP_EVERY_N_SCANS;   ///< force a read on the first scan
     uint8_t zeroModeChop_ = 0xFF;   ///< chop bits currently programmed; 0xFF = not in zero mode
+    uint8_t zeroModeMode1_ = 0xFF;  ///< filter currently programmed in zero mode
+    uint8_t zeroModeDr_ = 0xFF;     ///< data rate currently programmed in zero mode
     uint8_t zeroSettleLeft_ = 0;
     float sd_[PAIR_COUNT] = {NAN, NAN, NAN, NAN};   ///< sample stddev of the last average
 
@@ -999,7 +1023,8 @@ public:
     }
 
     /// One averaged reading of the INTERNAL short (AINCOM/AINCOM) with chop
-    /// explicitly OFF, at the production gain and filter.
+    /// explicitly OFF, at the production GAIN but sinc4 @ 10 SPS rather than the
+    /// production FIR @ 20 SPS -- see ZERO_MODE1_VALUE for why.
     ///
     /// For characterising the ADC's own offset drift over time and temperature
     /// -- precisely the drift chop exists to remove, so chop must be off or
@@ -1010,7 +1035,8 @@ public:
     /// Returns false rather than partial statistics if the samples cannot be
     /// gathered.
     bool zeroDriftSample(uint16_t n, float &meanUv, float &sdUv, float &sps) {
-        return measureZero(MODE0_CHOP_OFF, n, meanUv, sdUv, sps);
+        return measureZero(MODE0_CHOP_OFF, n, meanUv, sdUv, sps,
+                           ZERO_MODE1_VALUE, ZERO_DATA_RATE_CODE);
     }
 
     /// Reads one conversion at most, advancing the mux when it is accepted.
@@ -1312,14 +1338,18 @@ private:
     /// consecutive readings, and a chop transition needs settling that two
     /// discarded conversions do not buy. That churn lands in the data as steps
     /// which look exactly like offset drift but are not.
-    void enterZeroMode(uint8_t chopBits) {
-        if (zeroModeChop_ == chopBits) return;   // already in this configuration
+    void enterZeroMode(uint8_t chopBits, uint8_t mode1, uint8_t drCode) {
+        /* Every field is compared, not just chop: the filter and rate are now
+         * caller-chosen, and keying the cache on a subset of what it programs
+         * would serve a stale configuration as if it were the requested one. */
+        if (zeroModeChop_ == chopBits && zeroModeMode1_ == mode1 && zeroModeDr_ == drCode)
+            return;   // already in this configuration
 
         setSTART(LOW);
         writeSingleRegister(REG_ADDR_MODE0, chopBits);
-        writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);           // production filter
+        writeSingleRegister(REG_ADDR_MODE1, mode1);
         writeSingleRegister(REG_ADDR_MODE2,
-                            (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
+                            (uint8_t) ((PGA_GAIN_CODE << 4) | drCode));
         writeSingleRegister(REG_ADDR_INPMUX,
                             (uint8_t) (INPMUX_MUXP_AINCOM | INPMUX_MUXN_AINCOM));
         /* Upstream writeSingleRegister() does not update the shadow map; only
@@ -1333,6 +1363,8 @@ private:
         setSTART(HIGH);
         sendCommand(OPCODE_START1);
         zeroModeChop_ = chopBits;
+        zeroModeMode1_ = mode1;
+        zeroModeDr_ = drCode;
         zeroSettleLeft_ = ZERO_SETTLE_DISCARDS;
     }
 
@@ -1340,11 +1372,22 @@ private:
     /// enterZeroMode(). Touches no registers, so the part is undisturbed between
     /// samples and only the settling right after a configuration CHANGE is
     /// discarded -- not after every sample.
-    bool measureZero(uint8_t chopBits, uint16_t n, float &meanUv, float &sdUv, float &sps) {
-        enterZeroMode(chopBits);
+    bool measureZero(uint8_t chopBits, uint16_t n, float &meanUv, float &sdUv, float &sps,
+                     uint8_t mode1 = MODE1_VALUE, uint8_t drCode = DATA_RATE_CODE) {
+        enterZeroMode(chopBits, mode1, drCode);
 
         constexpr float lsbUv = VREF / (float) PGA_GAIN / (float) (2u << 30) * 1e6f;
-        const uint32_t budgetMs = 2000 + (uint32_t) n * 400;
+
+        /* Budget scaled to the SLOWEST configuration this is called in, since a
+         * budget sized for 20 SPS would time out at 10 SPS and report failure
+         * for a part that is working correctly. Worst case is sinc4 @ 10 SPS:
+         * td(STDR) = 400 ms to the first conversion (Table 9-13), then
+         * ZERO_SETTLE_DISCARDS + n conversions at 100 ms, doubled again if chop
+         * is on (Equation 19). The 4x margin over that covers the chop case and
+         * leaves the timeout doing its real job -- catching a dead DRDY -- rather
+         * than firing on a slow but healthy filter. */
+        const uint32_t budgetMs =
+                2000 + (uint32_t) (ZERO_SETTLE_DISCARDS + n) * 400;
         double sum = 0, sumSq = 0;
         uint32_t got = 0, first = 0, last = 0;
 

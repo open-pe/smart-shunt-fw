@@ -79,7 +79,9 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
 /* Offset-drift characterisation: the ADC's INTERNAL short with chop OFF,
  * streamed through the normal sampler path. MUTUALLY EXCLUSIVE with shuntAdcIn
  * -- it parks the ADC in a different configuration -- so exactly one of the two
- * samplers.add() lines below may be active. 16 conversions per point, ~0.8 s. */
+ * samplers.add() lines below may be active. 16 conversions per point at sinc4
+ * 10 SPS, so ~1.6 s per point plus a one-time 400 ms settle (was ~0.8 s on the
+ * production FIR @ 20 SPS; see ZERO_MODE1_VALUE in adc/ads1262.h). */
 /* storageId 13: the ID indexes the shared EEPROM calibration slot
  * (settings.h: 16 + id*8). 6 aliased tmp117_49 -- tmp117.h computes
  * STORAGE_ID_BASE(5) + (0x49 - ADDR_MIN(0x48)) = 6 -- so both samplers would have

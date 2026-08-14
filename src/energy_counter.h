@@ -363,8 +363,15 @@ public:
             printSample.u = winPrint.U.pop();
             printSample.i = winPrint.I.pop();
             printSample.e = (float) energy;
-            UART_LOG("%s %s U=%7.4fV I=%7.4fA P=%6.3fW, E=%6.3fWh, T=%2.1f° N=%lu, sps=%.1f, maxDt=%.2fms",
-                     timeStr().c_str(), name.c_str(), printSample.u, printSample.i, winPrint.P.pop(), energy,
+            /* SI-prefixed, so this one line serves both a 1.2 kW load and the
+             * shunt-adc zero channel's 7 uV -- the old "%7.4fV" rendered the
+             * latter as a flat 0.0000 and made the console useless for it. */
+            UART_LOG("%s %s U=%s I=%s P=%s, E=%s, T=%2.1f° N=%lu, sps=%.1f, maxDt=%.2fms",
+                     timeStr().c_str(), name.c_str(),
+                     SiFmt(printSample.u, "V").c_str(),
+                     SiFmt(printSample.i, "A").c_str(),
+                     SiFmt(winPrint.P.pop(), "W").c_str(),
+                     SiFmt((float) energy, "Wh").c_str(),
                      winPrint.Temp.pop(), nSamples, sps, maxDt * 1e-3f);
 
             // Serial0.print(", T=");
