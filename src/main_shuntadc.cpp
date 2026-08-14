@@ -16,6 +16,25 @@
 #include <Arduino.h>
 
 #include "adc/ads1262.h"
+#include "util.h"
+#include "ble.h"
+#include "energy_counter.h"   // WireSample -- the same struct telemetry.h sends
+
+/* Stream the FIRST channel only, for now: J3 (IIN) raw differential volts plus
+ * the ADC die temperature, over BLE. NO WiFi: the radio is never started, and
+ * nothing here calls connect_wifi_async() or creates wifiTask.
+ *
+ * Sent as a WireSample, byte-identical to what telemetry.h pushes over the same
+ * characteristic, so an existing BLE client parses it unchanged. Field mapping,
+ * because it is NOT the usual one:
+ *     data.u    = raw DIFFERENTIAL VOLTS at the ADC input (not a scaled bus V)
+ *     data.i    = NAN -- shuntOhm is unknown, so there is no current to report
+ *     data.temp = ADS1262 die temperature, degC
+ * Publishing a made-up scale factor would put plausible wrong numbers on the
+ * wire; NAN says "not measured" and cannot be mistaken for a reading. */
+static constexpr Ads1262ShuntAdc::Pair STREAM_PAIR = Ads1262ShuntAdc::PAIR_IIN;
+static constexpr const char *STREAM_CHANNEL = "IIN";
+static constexpr const char *STREAM_DEVICE = "shunt-adc-IIN";
 
 // Wiring to J2 on the shunt-adc board. J2 pin 7 (the revA /DRDY position) is
 // left UNCONNECTED -- guard_host_header_pin7_open in the schematic notes.
@@ -26,6 +45,13 @@ static constexpr int8_t PIN_NCS = 7;    // J2 nCS   (held low for the whole sess
 static constexpr int8_t PIN_START = 16; // J2 START
 
 static Ads1262ShuntAdc dev;
+static BleSrv bleSrv;
+
+/* Declared extern in ble.h and set by BleSrv::otaQuiesceHook while an OTA-over-BLE
+ * transfer is running. Sampling must stop for the duration -- the transfer wants
+ * the CPU, and we would otherwise keep hammering the SPI bus throughout. */
+volatile bool g_samplingHalted = false;
+static uint8_t wireIdx = 0;
 
 static const char *pairName(uint8_t p) {
     switch (p) {
@@ -35,6 +61,37 @@ static const char *pairName(uint8_t p) {
         case Ads1262ShuntAdc::PAIR_VOUT: return "VOUT J6 AIN6/7";
         default: return "?";
     }
+}
+
+/// One InfluxDB point per completed scan. Fields are deliberately named for what
+/// they actually are: `v` is volts at the ADC input, not a scaled current.
+static uint32_t publishOk = 0, publishSkipped = 0;
+
+static void publish(float volts, float dieTempC) {
+    /* No subscriber means nothing to send. Counted rather than ignored --
+     * silence must not be mistakable for success. */
+    if (!bleSrv.isConnected()) {
+        ++publishSkipped;
+        return;
+    }
+
+    WireSample ws{};
+    ws.v = 1;
+    ws.idx = wireIdx++;
+    strncpy(ws.dev, STREAM_DEVICE, sizeof(ws.dev) - 1);
+    ws.data.u = volts;          // see the field-mapping note above
+    ws.data.i = NAN;
+    ws.data.p_ = NAN;
+    ws.data.e = NAN;
+    ws.data.temp = dieTempC;
+    ws.data.setTimeNow();
+    ws.u_max = volts;
+    ws.i_max = NAN;
+    ws.diag = dev.diag();
+    ws.crc = WireSample::compute_crc16((uint8_t *) &ws, (uint8_t *) &ws.crc - (uint8_t *) &ws);
+
+    bleSrv.send((uint8_t *) &ws, sizeof(ws));
+    ++publishOk;
 }
 
 void setup() {
@@ -64,6 +121,9 @@ void setup() {
     Ads1262ShuntAdc::bitbangProbe(PIN_SCLK, PIN_DIN, PIN_DOUT, PIN_NCS);
     Serial.println("--- end line probe ---");
 
+    bleSrv.begin();
+    Serial.println("BLE started -- advertising, telemetry as WireSample per scan");
+
 #ifdef SHUNTADC_BUS_EXERCISER
     /* Bench mode: clock the bus continuously so it can be traced with a meter.
      * Never returns. Opt-in via -D SHUNTADC_BUS_EXERCISER, because it replaces
@@ -91,7 +151,14 @@ void loop() {
             return;
         }
         Serial.println("init OK -- SPI readback matched and EXTCLK confirmed");
+        dev.chopExperiment();   // once, before normal scanning resumes
         lastReport = millis();
+        return;
+    }
+
+    bleSrv.tick();
+    if (g_samplingHalted) {   // OTA in progress: leave the bus and the CPU alone
+        delay(10);
         return;
     }
 
@@ -105,8 +172,12 @@ void loop() {
         Serial.printf("--- scan %u ---\n", (unsigned) lastGen);
         for (uint8_t p = 0; p < Ads1262ShuntAdc::PAIR_COUNT; p++) {
             const float v = dev.volts((Ads1262ShuntAdc::Pair) p);
-            Serial.printf("  %s : %+10.3f uV\n", pairName(p), v * 1e6f);
+            Serial.printf("  %s : %+10.3f uV%s\n", pairName(p), v * 1e6f,
+                          p == STREAM_PAIR ? "   <- streamed" : "");
         }
+        Serial.printf("  die temperature : %.3f C\n", dev.dieTempC());
+        publish(dev.volts(STREAM_PAIR), dev.dieTempC());
+
         const uint32_t diag = dev.diag();
         if (diag)
             Serial.printf("  diag=0x%08x (reason=%u sign=%u code=%u)\n", (unsigned) diag,
@@ -116,9 +187,26 @@ void loop() {
 
     if (millis() - lastReport >= 5000) {
         lastReport = millis();
-        Serial.printf("[health] scans=%u accepted=%u pumps=%u halFaults=%u\n",
-                      (unsigned) dev.generation(), (unsigned) accepted, (unsigned) pumpCalls,
-                      (unsigned) ads126xHalFaults());
+        /* Measured scan period, not modelled. This is the number that matters
+         * for multiplex skew: every pair restarts conversions, so a scan pays
+         * the FIRST-conversion latency four times, and chop doubles that
+         * (SBAS661C Eq.19) even though steady-state throughput barely moves
+         * (Eq.21: 19.15 vs 20.00 SPS). */
+        static uint32_t genAtLastReport = 0, tAtLastReport = 0;
+        const uint32_t gen = dev.generation(), now = millis();
+        const uint32_t dGen = gen - genAtLastReport, dT = now - tAtLastReport;
+        Serial.printf("[health] scans=%u accepted=%u pumps=%u halFaults=%u | ble=%s "
+                      "sent=%u skipped=%u",
+                      (unsigned) gen, (unsigned) accepted, (unsigned) pumpCalls,
+                      (unsigned) ads126xHalFaults(),
+                      bleSrv.isConnected() ? "CONNECTED" : "advertising",
+                      (unsigned) publishOk, (unsigned) publishSkipped);
+        if (dGen && tAtLastReport)
+            Serial.printf(" | scan=%.1f ms (%.1f ms/pair)", (float) dT / (float) dGen,
+                          (float) dT / (float) dGen / (float) Ads1262ShuntAdc::PAIR_COUNT);
+        Serial.println();
+        genAtLastReport = gen;
+        tAtLastReport = now;
         if (accepted == 0)
             Serial.println("[health] NO conversions accepted -- see the reason logged above; "
                            "a silent stall here is the DRDY-on-DOUT path, not the SPI path");

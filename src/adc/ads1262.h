@@ -107,10 +107,35 @@ public:
     static constexpr uint8_t SETTLE_DISCARDS = 0;
 
     /// MODE1 value: FILTER[2:0] = 100 => FIR.
+    /// MODE0: continuous run mode, no reference reversal, and CHOP ON.
+    ///
+    /// Chop measured on this board (internal shorted input, G=32): input-referred
+    /// offset 7.1331 uV -> 0.0082 uV, an 867x reduction. 7.13 uV is 204 ppm of a
+    /// 35 mV shunt signal, so without chop the offset term alone blows a 10 ppm
+    /// budget by 20x.
+    ///
+    /// Cost is far smaller than the doubled FIRST-conversion latency of
+    /// sec.9.4.2 suggests: steady-state throughput is Equation 21,
+    /// 1/td(STDR) = 19.15 SPS against 20.00, i.e. 4%. The per-pair restart in
+    /// selectPair() does pay the doubled latency, which is what sets scan
+    /// period -- see the health line for the measured value.
+    ///
+    /// NOTE: the temperature sensor and the supply monitors REQUIRE chop off
+    /// (sec.9.3.4/9.3.5). configureSelfTest() drops it and applyProductionConfig()
+    /// puts it back; do not write MODE0 anywhere else.
+    static constexpr uint8_t MODE0_VALUE = MODE0_CHOP_ON;
+
     static constexpr uint8_t MODE1_VALUE = 0x80;
     static_assert(SETTLE_DISCARDS > 0 || MODE1_VALUE == 0x80,
                   "SETTLE_DISCARDS=0 relies on the FIR filter's zero latency "
                   "(SBAS661C sec.9.4.2). A sinc2..sinc5 filter needs discards > 0.");
+
+    /// Conversions averaged per pair before a reading is published. Noise falls
+    /// as sqrt(N). Sized for the ~2.5 SPS on-air target: SBAS661C sec.9.4.2 says
+    /// only the FIRST conversion after a START costs td(STDR) = 52.22 ms; in
+    /// continuous mode the rest arrive at the nominal 20 SPS = 50 ms. So one pair
+    /// with N=8 is 52.22 + 7*50 = 402 ms => 2.49 SPS.
+    static constexpr uint8_t AVG_N = 8;
 
     /// A missed conversion presents as a line stuck low with NO further edges
     /// (note N11 b), so an edge-only wait would hang forever. After this long
@@ -148,6 +173,16 @@ private:
     uint32_t lastEdgeMs = 0;
 
     float volts_[PAIR_COUNT] = {NAN, NAN, NAN, NAN};
+    float dieTempC_ = NAN;   ///< ADS1262 internal temperature sensor, degC
+    float sd_[PAIR_COUNT] = {NAN, NAN, NAN, NAN};   ///< sample stddev of the last average
+
+    /* Running accumulation for the pair currently being averaged. */
+    double sum_ = 0, sumsq_ = 0;
+    uint8_t nAvg_ = 0;
+
+    /* When set, the mux stays on this pair instead of scanning. Costs no restart
+     * between conversions, so all of the time budget goes into averaging. */
+    int8_t onlyPair_ = -1;
     uint32_t generation_ = 0;      ///< bumped when all four pairs have a reading
 
     /* Two diag slots, because TWO facades read this one device. A single
@@ -181,6 +216,8 @@ private:
         setSTART(HIGH);
         pair = p;
         discardsLeft = SETTLE_DISCARDS;
+        sum_ = sumsq_ = 0;
+        nAvg_ = 0;
     }
 
 public:
@@ -197,6 +234,20 @@ public:
 
     /// Differential volts at the ADC input for a pair, NAN until first read.
     float volts(Pair p) const { return volts_[p]; }
+
+    /// Restrict the mux to ONE pair, or -1 to scan all four. Single-pair mode
+    /// avoids a mux restart between conversions, so every 50 ms goes into the
+    /// average rather than into re-settling.
+    void setOnlyPair(int8_t p) { onlyPair_ = p; }
+
+    /// Sample standard deviation of the conversions behind volts(p). This is the
+    /// measured noise, not an assumed one -- use it to choose AVG_N.
+    float voltsStdDev(Pair p) const { return sd_[p]; }
+
+    /// ADS1262 die temperature in degC, NAN until the first scan completes.
+    /// SBAS661C sec.9.3.4 notes the die runs ~0.7 degC above the surrounding
+    /// PCB from self-heating, so this tracks board temperature with an offset.
+    float dieTempC() const { return dieTempC_; }
 
     bool init(int8_t pinSck, int8_t pinMosi, int8_t pinMiso, int8_t pinCs, int8_t pinStart) {
         if (initialized) return true;
@@ -254,7 +305,7 @@ public:
                  * means the required clock check has nothing to read -- "the
                  * same silent-pass shape one level up". Checksum on as well. */
                 {REG_ADDR_INTERFACE, 0x05},
-                {REG_ADDR_MODE0,     0x00},  // continuous, no chop, no ref reversal
+                {REG_ADDR_MODE0,     MODE0_VALUE},  // continuous, CHOP ON, no ref reversal
                 {REG_ADDR_MODE1,     MODE1_VALUE},  // FIR (50/60 Hz nulls, note N10)
                 /* MODE2: PGA ENABLED (bit 7 = 0, unlike the breakout config) at
                  * G=32. Note N8 derives the +-1.6575 V input window from G=32
@@ -360,7 +411,7 @@ public:
          * read it back -- upstream's writeSingleRegister() does not update the
          * driver's shadow map, only readSingleRegister() does. */
         setSTART(LOW);
-        writeSingleRegister(REG_ADDR_MODE0, 0x00);
+        writeSingleRegister(REG_ADDR_MODE0, MODE0_VALUE);
         writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);
         writeSingleRegister(REG_ADDR_MODE2,
                             (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
@@ -821,6 +872,93 @@ public:
         Serial.println("--- end probe ---");
     }
 
+    /// Restores the measurement configuration the self-tests and the temperature
+    /// read overwrite. Reads every register back: upstream's writeSingleRegister()
+    /// does NOT update the driver's shadow map, only readSingleRegister() does.
+    void applyProductionConfig() {
+        setSTART(LOW);
+        writeSingleRegister(REG_ADDR_MODE0, MODE0_VALUE);
+        writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);
+        writeSingleRegister(REG_ADDR_MODE2, (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
+        writeSingleRegister(REG_ADDR_REFMUX, 0x00);
+        writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_IIN]);
+        (void) readSingleRegister(REG_ADDR_MODE0);
+        (void) readSingleRegister(REG_ADDR_MODE1);
+        (void) readSingleRegister(REG_ADDR_MODE2);
+        (void) readSingleRegister(REG_ADDR_REFMUX);
+        (void) readSingleRegister(REG_ADDR_INPMUX);
+    }
+
+    /// Reads the internal temperature sensor. SBAS661C Equation 9:
+    ///   T(degC) = [(reading_uV - 122400) / 420] + 25
+    /// sec.9.3.4 requires the PGA enabled at gain 1, chop disabled and the
+    /// internal reference powered -- configureSelfTest() does the first two and
+    /// POWER.INTREF stays set from the measurement configuration.
+    ///
+    /// Leaves dieTempC_ untouched on failure rather than writing a fabricated
+    /// value; the caller keeps publishing the last good reading, and NAN until
+    /// the first success.
+    bool readDieTemperature() {
+        configureSelfTest((uint8_t) (INPMUX_MUXP_TEMP_P | INPMUX_MUXN_TEMP_N));
+        int32_t code = 0;
+        const bool ok = oneConversion(code);
+        if (ok) {
+            constexpr float lsb1 = VREF / (float) (2u << 30);   // gain = 1 here
+            const float uV = (float) code * lsb1 * 1e6f;
+            dieTempC_ = (uV - 122400.0f) / 420.0f + 25.0f;
+        }
+        applyProductionConfig();
+        return ok;
+    }
+
+    /// Bench experiment: the ADC's own zero, chop OFF vs chop ON.
+    ///
+    /// Measured on the INTERNAL shorted input (AINCOM/AINCOM) at the production
+    /// gain, so it is input-referred exactly like the real channels and needs no
+    /// external wiring -- with J3..J6 open, a real channel would be measuring
+    /// floating-input drift rather than offset.
+    ///
+    /// Reports what the 10 ppm budget actually needs: mean (the offset that does
+    /// NOT cancel in the efficiency ratio), sigma (noise), and the achieved data
+    /// rate, since chop pays for its offset rejection in time -- SBAS661C
+    /// sec.9.4.2 doubles the first-conversion latency, and this scan restarts
+    /// conversions on every mux change.
+    void chopExperiment(uint16_t samples = 64) {
+        Serial.println();
+        Serial.println("=== chop experiment: internal shorted input, G=32 ===");
+        Serial.printf("  %u samples per mode; 10 ppm of a 35 mV signal is 0.35 uV\n",
+                      (unsigned) samples);
+
+        float offUv = NAN, offSd = NAN, offSps = NAN;
+        float onUv = NAN, onSd = NAN, onSps = NAN;
+        const bool okOff = measureZero(MODE0_CHOP_OFF, samples, offUv, offSd, offSps);
+        const bool okOn = measureZero(MODE0_CHOP_ON, samples, onUv, onSd, onSps);
+
+        Serial.println("  mode      mean(uV)   sigma(uV)   rate(SPS)");
+        if (okOff) Serial.printf("  chop off  %+9.4f  %9.4f  %9.2f\n", offUv, offSd, offSps);
+        else Serial.println("  chop off  MEASUREMENT FAILED");
+        if (okOn) Serial.printf("  chop on   %+9.4f  %9.4f  %9.2f\n", onUv, onSd, onSps);
+        else Serial.println("  chop on   MEASUREMENT FAILED");
+
+        if (okOff && okOn) {
+            Serial.printf("  offset |mean| %.4f -> %.4f uV  (%.1fx)\n", fabsf(offUv),
+                          fabsf(onUv), fabsf(onUv) > 0 ? fabsf(offUv) / fabsf(onUv) : INFINITY);
+            Serial.printf("  noise  sigma  %.4f -> %.4f uV  (%.2fx, datasheet says 1.4x)\n",
+                          offSd, onSd, onSd > 0 ? offSd / onSd : INFINITY);
+            Serial.printf("  rate          %.2f -> %.2f SPS  (%.2fx)\n", offSps, onSps,
+                          onSps > 0 ? offSps / onSps : INFINITY);
+            /* The scan restarts conversions per pair, so each pair pays the
+             * first-conversion latency -- that is what sets multiplex skew. */
+            Serial.printf("  => 4-pair scan ~%.0f ms -> ~%.0f ms, so multiplex skew %.1fx\n",
+                          4000.0f / offSps, 4000.0f / onSps,
+                          onSps > 0 ? offSps / onSps : INFINITY);
+        }
+        Serial.println("=== end chop experiment ===");
+        Serial.println();
+
+        applyProductionConfig();
+    }
+
     /// Reads one conversion at most, advancing the mux when it is accepted.
     /// Returns true if a reading was stored.
     bool pump() {
@@ -874,9 +1012,39 @@ public:
 
         // bipolar 32-bit: LSB = VREF / (gain * 2^31)
         constexpr float lsb = VREF / (float) PGA_GAIN / (float) (2u << 30);
-        volts_[pair] = lsb * (float) count;
+        const double v = (double) lsb * (double) count;
+        sum_ += v;
+        sumsq_ += v * v;
+        if (++nAvg_ < AVG_N) return true;   // keep dwelling on this pair
+
+        const double mean = sum_ / nAvg_;
+        /* Sample variance; clamped at 0 because catastrophic cancellation in the
+         * sum-of-squares form can make it very slightly negative. */
+        const double var = nAvg_ > 1 ? (sumsq_ - sum_ * mean) / (nAvg_ - 1) : 0.0;
+        volts_[pair] = (float) mean;
+        sd_[pair] = (float) sqrt(var > 0 ? var : 0.0);
+        sum_ = sumsq_ = 0;
+        nAvg_ = 0;
+
+        if (onlyPair_ >= 0) {
+            /* Single-pair mode: do NOT touch INPMUX, so conversions keep arriving
+             * at the nominal rate with no restart latency. */
+            readDieTemperature();
+            applyProductionConfig();
+            selectPair((uint8_t) onlyPair_);
+            diagPublished_ = diag_;
+            diag_ = 0;
+            ++generation_;
+            return true;
+        }
 
         if (pair + 1 >= PAIR_COUNT) {
+            /* One die-temperature reading per scan. It needs a different gain
+             * and input, so it runs at the scan boundary rather than inside it,
+             * and restores the measurement configuration afterwards. At sinc1
+             * 1200 SPS it costs about a millisecond against a ~209 ms scan. */
+            readDieTemperature();
+
             /* A full scan of all four pairs is complete. Latch whatever
              * diagnostics accumulated during it so every facade reading this
              * generation sees the same value, then start the next scan clean. */
@@ -1049,6 +1217,55 @@ private:
         return ok;
     }
 
+    /// Collects `n` conversions of the internal shorted input at the production
+    /// gain and returns mean, standard deviation (both input-referred µV) and the
+    /// achieved rate. False if it could not gather the samples -- never partial
+    /// statistics dressed up as a result.
+    bool measureZero(uint8_t chopBits, uint16_t n, float &meanUv, float &sdUv, float &sps) {
+        setSTART(LOW);
+        writeSingleRegister(REG_ADDR_MODE0, chopBits);
+        writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);           // production filter
+        writeSingleRegister(REG_ADDR_MODE2,
+                            (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
+        writeSingleRegister(REG_ADDR_INPMUX,
+                            (uint8_t) (INPMUX_MUXP_AINCOM | INPMUX_MUXN_AINCOM));
+        sendCommand(OPCODE_STOP1);
+        setSTART(HIGH);
+        sendCommand(OPCODE_START1);
+
+        constexpr float lsbUv = VREF / (float) PGA_GAIN / (float) (2u << 30) * 1e6f;
+        /* Chop doubles the first-conversion latency, so allow generously and
+         * discard the settling conversions rather than assuming a count. */
+        const uint32_t budgetMs = 2000 + (uint32_t) n * 400;
+        double sum = 0, sumSq = 0;
+        uint32_t got = 0, first = 0, last = 0, discard = 2;
+
+        for (uint32_t t0 = millis(); (uint32_t) (millis() - t0) < budgetMs && got < n;) {
+            uint8_t status = 0, checksum = 0, data[4] = {0};
+            const uint32_t faultsBefore = ads126xHalFaults();
+            const int32_t code = readData(&status, data, &checksum);
+            if (ads126xHalFaults() != faultsBefore) return false;
+            if (!(status & STATUS_ADC1)) continue;
+            if (checksum != calculateChecksum(data, 4)) continue;
+            if (discard) { --discard; continue; }
+
+            const double uv = (double) code * (double) lsbUv;
+            const uint32_t now = millis();
+            if (!got) first = now;
+            last = now;
+            sum += uv;
+            sumSq += uv * uv;
+            ++got;
+        }
+        if (got < n || last == first) return false;
+
+        meanUv = (float) (sum / got);
+        const double var = sumSq / got - (sum / got) * (sum / got);
+        sdUv = (float) sqrt(var > 0 ? var : 0);
+        sps = (float) (got - 1) * 1000.0f / (float) (last - first);
+        return true;
+    }
+
     /// True once EXTCLK reads 1 in a genuine conversion.
     ///
     /// Bounded by WALL CLOCK, not by an attempt count. waitForEdge() polls with a
@@ -1194,6 +1411,7 @@ public:
         lastSample.setTimeNow();
         lastSample.u = vU * dividerRatio;
         lastSample.i = vI / shuntOhm;
+        lastSample.temp = dev.dieTempC();
         /* Non-consuming: the other facade sharing this device must see the same
          * diagnostic rather than a zero because we got here first. */
         lastSample.diag = dev.diag();
