@@ -6,6 +6,7 @@
 
 #include "adc/sampling.h"
 #include <cmath>
+#include <cstring>   // memcpy/strstr in getInfluxDbPoint()
 #include "util.h"
 #include "settings.h"
 #include "mean_window.h"
@@ -54,12 +55,35 @@ struct WireSample {
 
 #ifndef TARGET_STM32H5
     Point getInfluxDbPoint() const {
+        /* `dev` is a FIXED 16 bytes filled by name.copy(), which does NOT append a
+         * terminator. A name of exactly 16 characters or more therefore fills the
+         * field with no NUL, and every C string function walks straight on into
+         * i_max. "BLE_SHUNT_ADC_ZERO" is 18 characters and truncates to exactly
+         * "BLE_SHUNT_ADC_ZE" -- precisely that case. Copy into a terminated
+         * buffer once and use it for both the tag and the matching below. */
+        char devz[sizeof(dev) + 1];
+        memcpy(devz, dev, sizeof(dev));
+        devz[sizeof(dev)] = '\0';
+
         Point point("smart_shunt");
-        point.addTag("device", dev);
+        point.addTag("device", devz);
         //if (nSamples != NSamplesLastSummary) // TODO
             {
-            point.addField("I", data.i, 8);
-            point.addField("U", data.u, 8);
+            /* 12 decimal places, not the original 8. This is the resolution floor
+             * of every published series: 8 places quantises a volt to 10 nV, which
+             * is the SAME ORDER as the ADS1262 offset drift the shunt-adc channel
+             * exists to characterise -- the effect was the quantisation step.
+             *
+             * 12 is where it stops being worth going further, not an arbitrary
+             * pick: Sample::u is a float, and float32 carries ~7 significant
+             * digits, so a 7 uV reading is already only good to ~0.4 pV. Past 12
+             * places the extra digits are float noise, not measurement.
+             *
+             * For volt-scale channels the trailing digits are meaningless for the
+             * same reason -- harmless, but do not read them as precision. Cost is
+             * a few characters per field on the wire. */
+            point.addField("I", data.i, 12);
+            point.addField("U", data.u, 12);
             point.addField("I_max", i_max, 3);
             point.addField("U_max", u_max, 3);
             point.addField("P", data.p_, 7);

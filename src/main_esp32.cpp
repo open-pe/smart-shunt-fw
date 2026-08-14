@@ -48,6 +48,46 @@ PowerSampler_MuxChannel mux_chB{muxBackend, INA228MuxBackend::Target::CH_B, 11};
 PowerSampler_TMP117 tmp117{0x48};
 PowerSampler_TMP117 tmp117_49{0x49};
 
+/* pwr-metering shunt-adc board (ADS1262) on J2. Pins are the wiring, not
+ * settings.h, because settings.h has no SPI entries for this board.
+ *
+ * WARNING: on the XIAO these five collide with the INA228 alerts and the mux
+ * (GPIO4=ALERT2, 5=ALERT3, 6=Mux_S1, 7=Mux_S2). This wiring is the Feather
+ * bring-up map; pick one or the other per board before enabling both. */
+static constexpr int8_t SHUNTADC_SCLK = 4, SHUNTADC_DIN = 5, SHUNTADC_DOUT = 6,
+                        SHUNTADC_NCS = 7, SHUNTADC_START = 16;
+
+Ads1262ShuntAdc shuntAdc;
+/* Input side: u from J5 (VIN), i from J3 (IIN). shuntOhm/dividerRatio are 0 =
+ * unknown, so u reports raw ADC volts and i reports NAN until they are measured.
+ * storageId 5 continues past the existing samplers. */
+PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
+                                 Ads1262ShuntAdc::PAIR_CH2, Ads1262ShuntAdc::PAIR_CH0,
+                                 /* shuntOhm, dividerRatio: 0 = unknown, so u is raw ADC
+                                  * volts and i is NAN until they are measured. */
+                                 0.0f, 0.0f,
+                                 /* storageId is a namespace shared by EVERY registered
+                                  * sampler -- it indexes the EEPROM calibration slot
+                                  * (settings.h: 16 + id*8). Taken: 0 (ADS/ADS131),
+                                  * 2 (INA228 0x40), 3/11 (mux A/B), 5/6 (TMP117 0x48/0x49,
+                                  * see STORAGE_ID_BASE in tmp117.h), 15 (Dummy). 5 aliased
+                                  * TMP117 and would have silently shared its calibration. */
+                                 12,
+                                 SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
+                                 SHUNTADC_NCS, SHUNTADC_START};
+
+/* Offset-drift characterisation: the ADC's INTERNAL short with chop OFF,
+ * streamed through the normal sampler path. MUTUALLY EXCLUSIVE with shuntAdcIn
+ * -- it parks the ADC in a different configuration -- so exactly one of the two
+ * samplers.add() lines below may be active. 16 conversions per point, ~0.8 s. */
+/* storageId 13: the ID indexes the shared EEPROM calibration slot
+ * (settings.h: 16 + id*8). 6 aliased tmp117_49 -- tmp117.h computes
+ * STORAGE_ID_BASE(5) + (0x49 - ADDR_MIN(0x48)) = 6 -- so both samplers would have
+ * silently overwritten each other's calibration. Taken: 0, 2, 3, 5, 6, 11, 12, 15. */
+PowerSampler_ShuntAdcZero shuntAdcZero{shuntAdc, 16, 13,
+                                       SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
+                                       SHUNTADC_NCS, SHUNTADC_START};
+
 SamplerRegistry samplers;
 BleSrv bleSrv;
 
@@ -199,7 +239,15 @@ void setup(void) {
 
     ESP_LOGI("main", "SmartShunt ESP32-S3 started");
 
+    /* SHUNT_ADC_ONLY: the ADS1262 bring-up board on an Adafruit Feather ESP32-S3.
+     * settings.h hardcodes `#define XIAO_ESP32S3 1`, so settings_t always carries
+     * the XIAO pin map -- where I2C is GPIO3/2 and the INA228 alerts and mux sit
+     * on GPIO4/5/6/7, exactly the pins the ADS1262 SPI uses here. There are no
+     * INA228s or TMP117s on the Feather anyway, so the whole I2C side is skipped
+     * rather than repinned. */
+#ifndef SHUNT_ADC_ONLY
     Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, 400000UL);
+#endif
 
     if (!disableWifi) {
         connect_wifi_async_once();
@@ -220,15 +268,26 @@ void setup(void) {
     if (sizeof(WireSample) != 64) assert(false);
     if (sizeof(Sample) != 32) assert(false);
 
+#ifndef SHUNT_ADC_ONLY
     samplers.add("ESP32_INA228", &ina228_40);
     samplers.add("ESP32_INA228_2A", &mux_chA);
     samplers.add("ESP32_INA228_2B", &mux_chB);
     samplers.add("TMP117", &tmp117);
     samplers.add("TMP117_2", &tmp117_49);
+#endif
+    /* ONE of these two, never both: they share the ADS1262 and configure it
+     * differently. SHUNT_ADC_ZERO is the offset-drift characterisation run
+     * (internal short, chop off); SHUNT_ADC is normal measurement. */
+    /* The bridge prefixes the sampler name with "BLE_", so these appear as
+     * BLE_SHUNT_ADC and BLE_SHUNT_ADC_ZERO. Extra channels: SHUNT_ADC_ch1, ... */
+    //samplers.add("SHUNT_ADC", &shuntAdcIn);
+    samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
 
+#ifndef SHUNT_ADC_ONLY
     if (!muxBackend.init()) {
         ESP_LOGW("main", "INA228 mux backend (0x41) init failed");
     }
+#endif
 
     samplers.initAll();
     samplers.startAll();

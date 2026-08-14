@@ -65,11 +65,14 @@ void IRAM_ATTR ads1262_bus_busy(bool busy);
 class Ads1262ShuntAdc {
 public:
     /// Input pairs, in scan order. Ports per the schematic's J3..J6 notes.
+    /// Numbered, not named after an assumed role: J3..J6 are four generic
+    /// differential ports (note N11), and which one carries a shunt versus a
+    /// divided voltage is a bench decision, not a property of the board.
     enum Pair : uint8_t {
-        PAIR_IIN = 0,   ///< J3 J_IIN,  AIN0(+)/AIN1(-)
-        PAIR_IOUT,      ///< J4 J_IOUT, AIN2(+)/AIN3(-)
-        PAIR_VIN,       ///< J5 J_VIN,  AIN4(+)/AIN5(-)
-        PAIR_VOUT,      ///< J6 J_VOUT, AIN6(+)/AIN7(-)
+        PAIR_CH0 = 0,   ///< J3, AIN0(+)/AIN1(-)
+        PAIR_CH1,       ///< J4, AIN2(+)/AIN3(-)
+        PAIR_CH2,       ///< J5, AIN4(+)/AIN5(-)
+        PAIR_CH3,       ///< J6, AIN6(+)/AIN7(-)
         PAIR_COUNT
     };
 
@@ -135,7 +138,19 @@ public:
     /// only the FIRST conversion after a START costs td(STDR) = 52.22 ms; in
     /// continuous mode the rest arrive at the nominal 20 SPS = 50 ms. So one pair
     /// with N=8 is 52.22 + 7*50 = 402 ms => 2.49 SPS.
-    static constexpr uint8_t AVG_N = 8;
+    /// 1 = no device-level averaging. EnergyCounter/MeanWindow already averages
+    /// every sample in the summary window, so averaging here too would duplicate
+    /// existing plumbing AND slow the scan (N=8 makes a 4-pair scan ~1.6 s).
+    /// Raise it only if you need per-sample noise reduction the window cannot give.
+    static constexpr uint8_t AVG_N = 1;
+
+    /// Scans between die-temperature reads. It is one value for the whole chip,
+    /// not per channel, and it drifts slowly.
+    static constexpr uint8_t TEMP_EVERY_N_SCANS = 8;
+
+    /// Conversions discarded after ENTERING zero mode. A chop transition needs
+    /// real settling; this is paid once per configuration change, not per sample.
+    static constexpr uint8_t ZERO_SETTLE_DISCARDS = 8;
 
     /// A missed conversion presents as a line stuck low with NO further edges
     /// (note N11 b), so an edge-only wait would hang forever. After this long
@@ -174,6 +189,9 @@ private:
 
     float volts_[PAIR_COUNT] = {NAN, NAN, NAN, NAN};
     float dieTempC_ = NAN;   ///< ADS1262 internal temperature sensor, degC
+    uint8_t tempSkip_ = TEMP_EVERY_N_SCANS;   ///< force a read on the first scan
+    uint8_t zeroModeChop_ = 0xFF;   ///< chop bits currently programmed; 0xFF = not in zero mode
+    uint8_t zeroSettleLeft_ = 0;
     float sd_[PAIR_COUNT] = {NAN, NAN, NAN, NAN};   ///< sample stddev of the last average
 
     /* Running accumulation for the pair currently being averaged. */
@@ -214,6 +232,12 @@ private:
         setSTART(LOW);
         writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[p]);
         setSTART(HIGH);
+        /* This is an INPMUX writer, so the zero-mode cache no longer describes
+         * the part. Every other writer (applyProductionConfig, configureSelfTest,
+         * init's self-test restore) clears it; omitting it here let a subsequent
+         * enterZeroMode() with unchanged chop bits skip reconfiguration and
+         * average whatever production pair is selected, published as "offset uV". */
+        zeroModeChop_ = 0xFF;
         pair = p;
         discardsLeft = SETTLE_DISCARDS;
         sum_ = sumsq_ = 0;
@@ -312,7 +336,7 @@ public:
                  * and 35 mV full scale; changing the gain invalidates that
                  * window and the bipolar rail choice that follows from it. */
                 {REG_ADDR_MODE2,     (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE)},
-                {REG_ADDR_INPMUX,    INPMUX_FOR[PAIR_IIN]},
+                {REG_ADDR_INPMUX,    INPMUX_FOR[PAIR_CH0]},
                 {REG_ADDR_OFCAL0,    0x00},
                 {REG_ADDR_OFCAL1,    0x00},
                 {REG_ADDR_OFCAL2,    0x00},
@@ -415,13 +439,13 @@ public:
         writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);
         writeSingleRegister(REG_ADDR_MODE2,
                             (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
-        writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_IIN]);
+        writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_CH0]);
         (void) readSingleRegister(REG_ADDR_MODE0);
         (void) readSingleRegister(REG_ADDR_MODE1);
         (void) readSingleRegister(REG_ADDR_MODE2);
         (void) readSingleRegister(REG_ADDR_INPMUX);
 
-        pair = PAIR_IIN;
+        pair = PAIR_CH0;
         discardsLeft = SETTLE_DISCARDS;
         lastEdgeMs = millis();
         setSTART(HIGH);             // begin continuous conversions
@@ -642,6 +666,11 @@ public:
     ///   - scratch pattern lost       -> no working command path to the ADC.
     void diagnose() {
         Serial.println("--- ADS1262 probe ---");
+        /* The config sweep below rewrites MODE1/MODE2/INPMUX/REFMUX and leaves
+         * the part in the LAST row's configuration, restoring nothing. Invalidate
+         * the zero-mode cache up front so a later enterZeroMode() reprograms
+         * instead of averaging the sweep's leftover mux as "internal short". */
+        zeroModeChop_ = 0xFF;
 
         /* Who owns each pin? A MISO pin that is not registered as
          * SPI_MASTER_MISO is not being sampled by the controller at all, and the
@@ -876,17 +905,27 @@ public:
     /// read overwrite. Reads every register back: upstream's writeSingleRegister()
     /// does NOT update the driver's shadow map, only readSingleRegister() does.
     void applyProductionConfig() {
+        zeroModeChop_ = 0xFF;   // configuration changed; zero mode must be re-entered
         setSTART(LOW);
         writeSingleRegister(REG_ADDR_MODE0, MODE0_VALUE);
         writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);
         writeSingleRegister(REG_ADDR_MODE2, (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
         writeSingleRegister(REG_ADDR_REFMUX, 0x00);
-        writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_IIN]);
+        writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_CH0]);
         (void) readSingleRegister(REG_ADDR_MODE0);
         (void) readSingleRegister(REG_ADDR_MODE1);
         (void) readSingleRegister(REG_ADDR_MODE2);
         (void) readSingleRegister(REG_ADDR_REFMUX);
         (void) readSingleRegister(REG_ADDR_INPMUX);
+
+        /* Leave the ADC CONVERTING. This function drops START to write the
+         * registers, and every caller wants the measurement configuration back
+         * in its running state -- a restore that leaves the converter stopped is
+         * not a restore. Omitting this stalled the sampler after the chop
+         * comparison: START stayed low, conversions stopped, and pump() consumed
+         * one stale DRDY and then silently saw STATUS_ADC1 clear forever
+         * (scans=0, accepted=1). */
+        setSTART(HIGH);
     }
 
     /// Reads the internal temperature sensor. SBAS661C Equation 9:
@@ -959,6 +998,21 @@ public:
         applyProductionConfig();
     }
 
+    /// One averaged reading of the INTERNAL short (AINCOM/AINCOM) with chop
+    /// explicitly OFF, at the production gain and filter.
+    ///
+    /// For characterising the ADC's own offset drift over time and temperature
+    /// -- precisely the drift chop exists to remove, so chop must be off or
+    /// there is nothing to see. This measures the ADC ONLY: an internal short
+    /// excludes the external path, so it says nothing about the system offset
+    /// (delta-epsilon) that needs the terminals shorted at the shunt.
+    ///
+    /// Returns false rather than partial statistics if the samples cannot be
+    /// gathered.
+    bool zeroDriftSample(uint16_t n, float &meanUv, float &sdUv, float &sps) {
+        return measureZero(MODE0_CHOP_OFF, n, meanUv, sdUv, sps);
+    }
+
     /// Reads one conversion at most, advancing the mux when it is accepted.
     /// Returns true if a reading was stored.
     bool pump() {
@@ -1029,7 +1083,14 @@ public:
         if (onlyPair_ >= 0) {
             /* Single-pair mode: do NOT touch INPMUX, so conversions keep arriving
              * at the nominal rate with no restart latency. */
-            readDieTemperature();
+            /* Die temperature moves far slower than the scan rate, and each read
+             * costs a mux change, a gain switch and two START restarts. Reading
+             * it every scan was both redundant and a measurable part of why the
+             * achieved rate fell short of the budget. */
+            if (++tempSkip_ >= TEMP_EVERY_N_SCANS) {
+                tempSkip_ = 0;
+                readDieTemperature();
+            }
             applyProductionConfig();
             selectPair((uint8_t) onlyPair_);
             diagPublished_ = diag_;
@@ -1043,7 +1104,14 @@ public:
              * and input, so it runs at the scan boundary rather than inside it,
              * and restores the measurement configuration afterwards. At sinc1
              * 1200 SPS it costs about a millisecond against a ~209 ms scan. */
-            readDieTemperature();
+            /* Die temperature moves far slower than the scan rate, and each read
+             * costs a mux change, a gain switch and two START restarts. Reading
+             * it every scan was both redundant and a measurable part of why the
+             * achieved rate fell short of the budget. */
+            if (++tempSkip_ >= TEMP_EVERY_N_SCANS) {
+                tempSkip_ = 0;
+                readDieTemperature();
+            }
 
             /* A full scan of all four pairs is complete. Latch whatever
              * diagnostics accumulated during it so every facade reading this
@@ -1051,7 +1119,7 @@ public:
             diagPublished_ = diag_;
             diag_ = 0;
             ++generation_;
-            selectPair(PAIR_IIN);
+            selectPair(PAIR_CH0);
         } else {
             selectPair(pair + 1);
         }
@@ -1095,6 +1163,7 @@ private:
     /// sec.9.3.5 for the supply monitors: "enable the PGA, set gain = 1, and
     /// disable chop mode".
     void configureSelfTest(uint8_t inpmux) {
+        zeroModeChop_ = 0xFF;   // configuration changed; zero mode must be re-entered
         setSTART(LOW);
         writeSingleRegister(REG_ADDR_MODE0, 0x00);                    // chop off
         writeSingleRegister(REG_ADDR_MODE1, MODE1_FILTER_SINC1);      // zero latency
@@ -1114,6 +1183,18 @@ private:
             if (ads126xHalFaults() != faultsBefore) return false;
             if (!(status & STATUS_ADC1)) continue;
             if (checksum != calculateChecksum(data, 4)) continue;
+            /* A reset since configureSelfTest() means the mux/gain we just
+             * programmed are gone, so this conversion is of some other input.
+             * Refuse rather than hand back a code the caller will scale into a
+             * plausible temperature or supply voltage. The flag is sticky until
+             * POWER is rewritten (cleared in init()'s register table), so this
+             * cannot false-fire on a healthy part after init. */
+            if (status & STATUS_RESET) {
+                diag_ = encodeDiag(DIAG_DEVICE_RESET, 0);
+                ESP_LOGE("ads1262", "device reset during self-test conversion -- refusing value");
+                initialized = false;
+                return false;
+            }
             code = c;
             return true;
         }
@@ -1221,7 +1302,19 @@ private:
     /// gain and returns mean, standard deviation (both input-referred µV) and the
     /// achieved rate. False if it could not gather the samples -- never partial
     /// statistics dressed up as a result.
-    bool measureZero(uint8_t chopBits, uint16_t n, float &meanUv, float &sdUv, float &sps) {
+    /// Puts the ADC into the zero-measurement configuration and leaves it there:
+    /// inputs internally shorted to AINCOM, production filter and gain, chop as
+    /// asked. Idempotent -- re-entering an identical configuration is a no-op, so
+    /// consecutive samples do NOT restart conversions or re-settle.
+    ///
+    /// Holding one configuration is the whole point. Reconfiguring per sample
+    /// walked the part through chop OFF->ON->OFF and gain 32->1->32 between
+    /// consecutive readings, and a chop transition needs settling that two
+    /// discarded conversions do not buy. That churn lands in the data as steps
+    /// which look exactly like offset drift but are not.
+    void enterZeroMode(uint8_t chopBits) {
+        if (zeroModeChop_ == chopBits) return;   // already in this configuration
+
         setSTART(LOW);
         writeSingleRegister(REG_ADDR_MODE0, chopBits);
         writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);           // production filter
@@ -1229,16 +1322,31 @@ private:
                             (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
         writeSingleRegister(REG_ADDR_INPMUX,
                             (uint8_t) (INPMUX_MUXP_AINCOM | INPMUX_MUXN_AINCOM));
+        /* Upstream writeSingleRegister() does not update the shadow map; only
+         * readSingleRegister() does, and readData() sizes its transfer from it. */
+        (void) readSingleRegister(REG_ADDR_MODE0);
+        (void) readSingleRegister(REG_ADDR_MODE1);
+        (void) readSingleRegister(REG_ADDR_MODE2);
+        (void) readSingleRegister(REG_ADDR_INPMUX);
+
         sendCommand(OPCODE_STOP1);
         setSTART(HIGH);
         sendCommand(OPCODE_START1);
+        zeroModeChop_ = chopBits;
+        zeroSettleLeft_ = ZERO_SETTLE_DISCARDS;
+    }
+
+    /// Accumulates n conversions in the configuration already established by
+    /// enterZeroMode(). Touches no registers, so the part is undisturbed between
+    /// samples and only the settling right after a configuration CHANGE is
+    /// discarded -- not after every sample.
+    bool measureZero(uint8_t chopBits, uint16_t n, float &meanUv, float &sdUv, float &sps) {
+        enterZeroMode(chopBits);
 
         constexpr float lsbUv = VREF / (float) PGA_GAIN / (float) (2u << 30) * 1e6f;
-        /* Chop doubles the first-conversion latency, so allow generously and
-         * discard the settling conversions rather than assuming a count. */
         const uint32_t budgetMs = 2000 + (uint32_t) n * 400;
         double sum = 0, sumSq = 0;
-        uint32_t got = 0, first = 0, last = 0, discard = 2;
+        uint32_t got = 0, first = 0, last = 0;
 
         for (uint32_t t0 = millis(); (uint32_t) (millis() - t0) < budgetMs && got < n;) {
             uint8_t status = 0, checksum = 0, data[4] = {0};
@@ -1247,7 +1355,22 @@ private:
             if (ads126xHalFaults() != faultsBefore) return false;
             if (!(status & STATUS_ADC1)) continue;
             if (checksum != calculateChecksum(data, 4)) continue;
-            if (discard) { --discard; continue; }
+            /* The part reset under us: its registers are back at POR defaults
+             * (chop off, gain 1, AIN0/AIN1) while zeroModeChop_ still claims the
+             * zero configuration is programmed. Without this, enterZeroMode()
+             * no-ops on the next call and we publish raw AIN0/AIN1 at gain 1 as
+             * "internal short, gain 32" -- plausible numbers, no diagnostic, for
+             * as long as it takes the periodic temp read to rewrite the
+             * registers by accident. pump() has always checked this; this loop
+             * did not. Invalidate the cache so the next call reprograms. */
+            if (status & STATUS_RESET) {
+                diag_ = encodeDiag(DIAG_DEVICE_RESET, 0);
+                ESP_LOGE("ads1262", "device reset during zero measurement -- configuration lost");
+                zeroModeChop_ = 0xFF;
+                initialized = false;
+                return false;
+            }
+            if (zeroSettleLeft_) { --zeroSettleLeft_; continue; }
 
             const double uv = (double) code * (double) lsbUv;
             const uint32_t now = millis();
@@ -1337,6 +1460,117 @@ inline bool Ads1262ShuntAdc::waitForEdge() {
 }
 
 
+/// Streams the ADC's INTERNAL short with chop OFF, through the normal sampler
+/// path, so its offset drift can be tracked against die temperature alongside
+/// everything else instead of via a bespoke bench loop.
+///
+/// MUTUALLY EXCLUSIVE with PowerSampler_ShuntAdc on the same device: this mode
+/// reconfigures the ADC (chop off, INPMUX to AINCOM/AINCOM) and leaves it there,
+/// so a production scan interleaved with it would read the wrong thing. Register
+/// one or the other, never both.
+///
+/// Measures the ADC ONLY. An internal short excludes the external path, so this
+/// is NOT the system offset (delta-epsilon) the shunt sizing depends on -- that
+/// needs the terminals shorted at the shunt, with chop ON.
+///
+/// FIELD MAPPING -- this channel overloads Sample/InfluxDB fields, because the
+/// quantities it produces are not U/I/P. Units are VOLTS throughout, like every
+/// other channel -- there is no per-channel scaling in the publish path.
+///   U ("U")     offset of the shorted input, volts at the ADC input
+///   I ("I")     within-burst standard deviation of the avgN conversions, volts
+///               -- the white-noise floor, NOT a current
+///   I_max       largest such deviation in the window; 3 decimals, so it stores
+///               as 0.000 for this channel -- use I, not I_max
+///   P ("P")     always 0; there is no power on a shorted input
+///   T ("T")     ADC die temperature, the x-axis for the drift
+class PowerSampler_ShuntAdcZero : public PowerSampler {
+    Ads1262ShuntAdc &dev;
+    const uint16_t avgN;
+
+    /// Data samples between die-temperature reads. One sensor, slow-moving, and
+    /// each read costs the zero path a configuration change plus a re-settle.
+    static constexpr uint8_t TEMP_EVERY_N_SAMPLES = 8;
+    uint8_t tempSkip = TEMP_EVERY_N_SAMPLES;   ///< force a read on the first sample
+
+    const uint8_t storageId;
+    const int8_t pinSck, pinMosi, pinMiso, pinCs, pinStart;
+    Sample lastSample{};
+
+public:
+    PowerSampler_ShuntAdcZero(Ads1262ShuntAdc &dev, uint16_t avgN, uint8_t storageId,
+                              int8_t pinSck, int8_t pinMosi, int8_t pinMiso, int8_t pinCs,
+                              int8_t pinStart)
+            : dev(dev), avgN(avgN), storageId(storageId), pinSck(pinSck), pinMosi(pinMosi),
+              pinMiso(pinMiso), pinCs(pinCs), pinStart(pinStart) {}
+
+    uint8_t getStorageId() const override { return storageId; }
+
+    /// Diagnostic channel, not a power channel. Opting out matters: sampling.h
+    /// notes that a sampler whose mean power is NaN by construction would
+    /// otherwise pin the board permanently awake.
+    bool measuresPower() const override { return false; }
+
+    bool init() override { return dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart); }
+
+    void startReading() override {}
+
+    bool hasData() override {
+        float meanUv = NAN, sdUv = NAN, sps = NAN;
+        if (!dev.zeroDriftSample(avgN, meanUv, sdUv, sps)) return false;
+        /* Every 8th sample only. A temperature read needs INPMUX=0xBB and gain 1,
+         * so it leaves zero mode and the next sample pays the re-settle. Doing it
+         * per sample meant every reading carried that disturbance; at 1-in-8 the
+         * other seven stay in one undisturbed configuration, and the perturbed
+         * one is predictable rather than everywhere. */
+        if (++tempSkip >= TEMP_EVERY_N_SAMPLES) {
+            tempSkip = 0;
+            dev.readDieTemperature();
+        }
+
+        lastSample.setTimeNow();
+
+        /* VOLTS, like every other channel -- no per-channel unit special case
+         * anywhere in the publish path.
+         *
+         * This relies on getInfluxDbPoint() publishing U and I at 12 decimal
+         * places. At the original 8 the quantum was 10 nV, the same order as the
+         * offset drift being characterised, so the effect WAS the quantisation
+         * step. If that precision is ever reduced this channel goes blind
+         * silently -- the series keeps arriving, it just stops moving.
+         *
+         * Known cost: EnergyCounter::summary()'s shared "%7.4f" console format
+         * renders 7 uV as 0.0000. The console is unusable for this channel; the
+         * stored series is the readout. */
+        lastSample.u = meanUv * 1e-6f;
+
+        /* NOT a current: the WITHIN-BURST standard deviation of the avgN
+         * conversions, in volts at the ADC input, riding the `i` field so it
+         * reaches InfluxDB (as "I", with "I_max" as its window max) through the
+         * existing averaging path -- Sample is packed and shared with the BLE
+         * WireSample, so a dedicated member would cost RAM on every channel and
+         * bump the wire format for one diagnostic series.
+         *
+         * Why it is worth carrying: `u` scatter is noise PLUS drift and cannot
+         * separate them. `sd` is the white-noise floor alone (SBAS661C Table 8-1
+         * gives 0.030 uVRMS at 20 SPS / FIR / gain 32). If `u` wanders while
+         * `sd` stays flat, that is drift, measured rather than inferred. */
+        lastSample.i = sdUv * 1e-6f;
+
+        /* Explicit 0, NOT NaN. Sample::p() falls back to u*i when p_ is NaN, so
+         * leaving it NaN would now publish u*sd as a power; and EnergyCounter
+         * integrates p() into Energy, where a single NaN is sticky and would
+         * make E NaN for the rest of the run. There is no power on a shorted
+         * input, so 0 is both true and finite. */
+        lastSample.p_ = 0.0f;
+        lastSample.temp = dev.dieTempC();   // single dedicated sampler: no duplication
+        lastSample.diag = dev.diag();
+        return true;
+    }
+
+    Sample getSample() override { return lastSample; }
+};
+
+
 /// One half of the efficiency measurement: a voltage pair and a current pair.
 /// Two of these share the single Ads1262ShuntAdc.
 class PowerSampler_ShuntAdc : public PowerSampler {
@@ -1350,6 +1584,11 @@ class PowerSampler_ShuntAdc : public PowerSampler {
     const float shuntOhm;      ///< current  = V_adc / shuntOhm
     const float dividerRatio;  ///< voltage  = V_adc * dividerRatio
 
+    /// Whether THIS channel carries the die temperature. There is ONE sensor on
+    /// the chip, so reporting it from every registered channel would put N copies
+    /// of the same number in telemetry. Default false: opt exactly one channel in.
+    const bool reportDieTemp;
+
     const uint8_t storageId;
     const int8_t pinSck, pinMosi, pinMiso, pinCs, pinStart;
 
@@ -1362,18 +1601,31 @@ public:
     PowerSampler_ShuntAdc(Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair uPair,
                           Ads1262ShuntAdc::Pair iPair, float shuntOhm, float dividerRatio,
                           uint8_t storageId, int8_t pinSck, int8_t pinMosi, int8_t pinMiso,
-                          int8_t pinCs, int8_t pinStart)
+                          int8_t pinCs, int8_t pinStart, bool reportDieTemp = false)
             : dev(dev), uPair(uPair), iPair(iPair), shuntOhm(shuntOhm),
-              dividerRatio(dividerRatio), storageId(storageId), pinSck(pinSck), pinMosi(pinMosi),
-              pinMiso(pinMiso), pinCs(pinCs), pinStart(pinStart) {}
+              dividerRatio(dividerRatio), reportDieTemp(reportDieTemp), storageId(storageId),
+              pinSck(pinSck), pinMosi(pinMosi), pinMiso(pinMiso), pinCs(pinCs),
+              pinStart(pinStart) {}
 
     uint8_t getStorageId() const override { return storageId; }
 
+    /// Opt OUT of the idle-sleep vote while the scale is unset. With shuntOhm
+    /// unset this sampler reports i = NAN forever, so its mean power is NaN
+    /// forever -- and looksActive() reads a non-finite mean power as "cannot
+    /// judge, stay awake". Left at the default true, one uncalibrated channel
+    /// would silently pin the board awake for good. Same reason TMP117 opts out.
+    bool measuresPower() const override { return shuntOhm > 0 && dividerRatio > 0; }
+
     bool init() override {
-        if (!(shuntOhm > 0) || !(dividerRatio > 0)) {
-            ESP_LOGE("ads1262", "shuntOhm/dividerRatio not configured");
-            return false;
-        }
+        /* An unconfigured scale factor is allowed and reported as NAN rather than
+         * refusing to start: NAN means "not measured" and cannot be mistaken for
+         * a reading, whereas a placeholder ohm value would put plausible wrong
+         * currents on the wire. Set them and the same channel becomes amps/volts
+         * with no other change. */
+        if (!(shuntOhm > 0))
+            ESP_LOGW("ads1262", "shuntOhm unset: reporting raw ADC volts in u, i=NAN");
+        if (!(dividerRatio > 0))
+            ESP_LOGW("ads1262", "dividerRatio unset: u is raw ADC volts, unscaled");
         // idempotent: whichever facade initialises first brings up the shared ADC
         return dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart);
     }
@@ -1409,9 +1661,9 @@ public:
         if (std::isnan(vU) || std::isnan(vI)) return false;
 
         lastSample.setTimeNow();
-        lastSample.u = vU * dividerRatio;
-        lastSample.i = vI / shuntOhm;
-        lastSample.temp = dev.dieTempC();
+        lastSample.u = (dividerRatio > 0) ? vU * dividerRatio : vU;
+        lastSample.i = (shuntOhm > 0) ? vI / shuntOhm : NAN;
+        if (reportDieTemp) lastSample.temp = dev.dieTempC();
         /* Non-consuming: the other facade sharing this device must see the same
          * diagnostic rather than a zero because we got here first. */
         lastSample.diag = dev.diag();
