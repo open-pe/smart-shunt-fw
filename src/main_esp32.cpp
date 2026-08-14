@@ -86,7 +86,15 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
  * (settings.h: 16 + id*8). 6 aliased tmp117_49 -- tmp117.h computes
  * STORAGE_ID_BASE(5) + (0x49 - ADDR_MIN(0x48)) = 6 -- so both samplers would have
  * silently overwritten each other's calibration. Taken: 0, 2, 3, 5, 6, 11, 12, 15. */
-PowerSampler_ShuntAdcZero shuntAdcZero{shuntAdc, 16, 13,
+/* avgN = 4: at ZERO_DATA_RATE_CODE (10 SPS) this is 400 ms per published
+ * sample, i.e. the 2.5 SPS target. avgN = 16 was 1.6 s -> 0.625 SPS, which is
+ * exactly the rate measured on the bench. Averaging deeper here also duplicates
+ * work EnergyCounter/MeanWindow already does downstream; what the device-level
+ * average buys is a sigma estimate over conversions taken in ONE undisturbed
+ * configuration, and 4 is enough for that. The mean's uncertainty goes from
+ * sd/4 to sd/2 -- about 3 nV to 7 nV at the measured 13 nV per-conversion
+ * sigma, against a budget of 350 nV (10 ppm of 35 mV). */
+PowerSampler_ShuntAdcZero shuntAdcZero{shuntAdc, 4, 13,
                                        SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
                                        SHUNTADC_NCS, SHUNTADC_START};
 

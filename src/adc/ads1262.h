@@ -148,9 +148,33 @@ public:
     /// not per channel, and it drifts slowly.
     static constexpr uint8_t TEMP_EVERY_N_SCANS = 8;
 
-    /// Conversions discarded after ENTERING zero mode. A chop transition needs
-    /// real settling; this is paid once per configuration change, not per sample.
-    static constexpr uint8_t ZERO_SETTLE_DISCARDS = 8;
+    /// Conversions discarded after ENTERING zero mode, paid once per
+    /// configuration change rather than per sample.
+    ///
+    /// MEASURED, not assumed. Instrumenting the discard loop on the bench
+    /// (2026-08-15, temp-read -> zero-mode re-entry, 6 re-entries) printed every
+    /// discarded conversion: settle[0] averaged 7.1419 uV and settle[7] averaged
+    /// 7.1421 uV, with ±15 nV of scatter across all eight positions -- i.e. the
+    /// per-conversion noise and NO transient. The first conversion after re-entry
+    /// is already good, because DRDY/STATUS_ADC1 is hardware-gated on settled
+    /// data and the part simply does not flag a conversion before it is valid.
+    ///
+    /// The previous value of 8 was a guess ("more than the 2 it replaced") and
+    /// cost 800 ms at ZERO_DATA_RATE_CODE's 10 SPS on every temperature read --
+    /// the single largest term in the sample period. One is kept rather than
+    /// zero as margin for the analog step this measurement covers only in one
+    /// direction (temp sensor at 125 mV/gain 1 -> shorted input at gain 32) and
+    /// for chopExperiment()'s chop ON/OFF transition, which was not measured.
+    ///
+    /// This discard is also effectively FREE. Timestamping conversions against
+    /// the zero-mode restart (same bench run) showed the first arrives at
+    /// +400 ms and the rest every 100 ms: td(STDR) for sinc4 is FOUR conversion
+    /// periods of filter refill, and the discarded conversion is the one that
+    /// ends that refill. Dropping to 0 would save 100 ms, not 400. The refill
+    /// is the price of ZERO_DATA_RATE_CODE, and 10 SPS is what puts sinc notches
+    /// on BOTH 50 and 60 Hz -- raising the rate to shorten it would trade mains
+    /// rejection for throughput.
+    static constexpr uint8_t ZERO_SETTLE_DISCARDS = 1;
 
     /// Filter and rate for the ZERO-DRIFT channel only -- deliberately NOT the
     /// production FIR @ 20 SPS, which stays as it is for the mux scan.
@@ -1532,7 +1556,18 @@ class PowerSampler_ShuntAdcZero : public PowerSampler {
 
     /// Data samples between die-temperature reads. One sensor, slow-moving, and
     /// each read costs the zero path a configuration change plus a re-settle.
-    static constexpr uint8_t TEMP_EVERY_N_SAMPLES = 8;
+    /// A temperature read costs a full zero-mode re-entry: sinc4's td(STDR) is
+    /// 400 ms of filter refill (Table 9-13, and measured to the millisecond on
+    /// the bench), which lands on the sample that follows it. That is the whole
+    /// reason the interval is this long.
+    ///
+    /// 32 is oversampling by a wide margin, not a compromise. The die's thermal
+    /// time constant is MINUTES -- the warm-up after a reflash took ~7 min to
+    /// settle -- so at ~2.4 SPS this still reads the temperature every ~13 s,
+    /// two orders of magnitude faster than the signal can physically move.
+    /// Sampling it every 8 samples bought no information and cost 400 ms four
+    /// times as often.
+    static constexpr uint8_t TEMP_EVERY_N_SAMPLES = 32;
     uint8_t tempSkip = TEMP_EVERY_N_SAMPLES;   ///< force a read on the first sample
 
     const uint8_t storageId;
