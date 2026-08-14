@@ -510,6 +510,101 @@ public:
         else
             Serial.println("    VERDICT: converting on the external clock -- healthy.");
 
+        /* Config sweep. Each row reaches the converter by a different route, so
+         * whichever rows convert localises the fault:
+         *   - the internal AVDD/DVDD monitors need NO external input wiring, so
+         *     they separate "the analog core is dead" from "our inputs are bad";
+         *   - sinc1 at 38400 SPS makes a conversion ~26 us nominal instead of
+         *     52 ms, so it still completes quickly even if fCLK is far slower
+         *     than the 7.3728 MHz we assume (EXTCLK=1 proves a clock EXISTS, it
+         *     says nothing about its FREQUENCY);
+         *   - PGA bypassed removes the input-window constraint entirely. */
+        Serial.println("  config sweep (3 s each, looking for ANY conversion):");
+        struct Try { const char *name; uint8_t mode1, mode2, inpmux; uint8_t gain; };
+        static const Try tries[] = {
+                {"sinc1 38400SPS PGAbyp AVDDmon", MODE1_FILTER_SINC1,
+                 (uint8_t) (0x80 | MODE2_DR_38400_SPS),
+                 (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N), 1},
+                {"sinc1 20SPS   PGAbyp AVDDmon", MODE1_FILTER_SINC1,
+                 (uint8_t) (0x80 | MODE2_DR_20_SPS),
+                 (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N), 1},
+                {"sinc1 20SPS   PGAbyp TEMPmon", MODE1_FILTER_SINC1,
+                 (uint8_t) (0x80 | MODE2_DR_20_SPS),
+                 (uint8_t) (INPMUX_MUXP_TEMP_P | INPMUX_MUXN_TEMP_N), 1},
+                {"sinc1 20SPS   PGAbyp AIN0/1 ", MODE1_FILTER_SINC1,
+                 (uint8_t) (0x80 | MODE2_DR_20_SPS), 0x01, 1},
+        };
+
+        for (auto &t: tries) {
+            setSTART(LOW);
+            writeSingleRegister(REG_ADDR_MODE1, t.mode1);
+            writeSingleRegister(REG_ADDR_MODE2, t.mode2);
+            writeSingleRegister(REG_ADDR_INPMUX, t.inpmux);
+            sendCommand(OPCODE_STOP1);
+            setSTART(HIGH);
+            sendCommand(OPCODE_START1);
+
+            uint32_t hits = 0;
+            int32_t lastCode = 0;
+            uint8_t lastStatus = 0;
+            for (uint32_t t0 = millis(); (uint32_t) (millis() - t0) < 3000;) {
+                uint8_t status = 0, checksum = 0, data[4] = {0};
+                const int32_t code = readData(&status, data, &checksum);
+                lastStatus = status;
+                if (status & STATUS_ADC1) { ++hits; lastCode = code; }
+                delay(5);
+            }
+            const float v = (float) lastCode * (VREF / (float) t.gain) / (float) (2u << 30);
+            Serial.printf("    %s : ADC1=%lu STATUS=0x%02x code=%ld v=%+.4f V",
+                          t.name, (unsigned long) hits, lastStatus, (long) lastCode, v);
+            /* The analog supply monitor reads (AVDD-AVSS)/4 [SBAS661C sec.9.3.4]. */
+            if (t.inpmux == (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N) && hits)
+                Serial.printf("  => AVDD-AVSS = %.3f V", v * 4.0f);
+            Serial.println();
+        }
+        Serial.println("  (if EVERY row shows ADC1=0 the converter itself is not running; "
+                       "if only the fast row converts, fCLK is far below 7.3728 MHz)");
+
+        /* Time real conversions to infer fCLK. Every ADS1262 timing scales with
+         * the clock, so measured_rate / nominal_rate is exactly fCLK / 7.3728 MHz.
+         * EXTCLK only proves a clock EXISTS -- this is what proves its RATE. */
+        Serial.println("  clock estimate (sinc1 @ nominal 38400 SPS, 6 s):");
+        setSTART(LOW);
+        writeSingleRegister(REG_ADDR_MODE1, MODE1_FILTER_SINC1);
+        writeSingleRegister(REG_ADDR_MODE2, (uint8_t) (0x80 | MODE2_DR_38400_SPS));
+        writeSingleRegister(REG_ADDR_INPMUX,
+                            (uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N));
+        sendCommand(OPCODE_STOP1);
+        setSTART(HIGH);
+        sendCommand(OPCODE_START1);
+
+        uint32_t first = 0, last = 0, count = 0;
+        for (uint32_t t0 = millis(); (uint32_t) (millis() - t0) < 6000;) {
+            uint8_t status = 0, checksum = 0, data[4] = {0};
+            readData(&status, data, &checksum);
+            if (status & STATUS_ADC1) {
+                const uint32_t now = millis();
+                if (!count) first = now;
+                last = now;
+                ++count;
+            }
+        }
+        if (count >= 2) {
+            const float sps = (float) (count - 1) * 1000.0f / (float) (last - first);
+            const float fclk = 7.3728e6f * (sps / 38400.0f);
+            Serial.printf("    %lu conversions, measured %.3f SPS vs 38400 nominal\n",
+                          (unsigned long) count, sps);
+            Serial.printf("    => fCLK ~ %.0f Hz (expected 7372800 Hz, ratio 1/%.0f)\n", fclk,
+                          38400.0f / sps);
+            if (fclk < 1.0e6f)
+                Serial.println("    VERDICT: the clock reaching XTAL1 is FAR below the 1 MHz "
+                               "minimum (SBAS661C sec.7.3 allows 1..8 MHz). Check Y1 is "
+                               "oscillating, its +3V3P supply, J8, and isolator channel E.");
+        } else {
+            Serial.printf("    only %lu conversions in 6 s -- too few to time\n",
+                          (unsigned long) count);
+        }
+
         Serial.println("--- end probe ---");
     }
 
