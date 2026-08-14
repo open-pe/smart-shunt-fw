@@ -1,0 +1,17 @@
+{
+  "name": "ti_ads126x",
+  "version": "1.0.0",
+  "description": "Texas Instruments ADS1262/ADS1263 example driver (vendored, upstream ads1263.c/.h unmodified) with an Arduino SPI HAL.",
+  "keywords": ["adc", "ads1262", "ads1263", "delta-sigma", "spi", "ti"],
+  "license": "BSD-3-Clause",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "dependencies": [
+    {
+      "name": "SPI"
+    }
+  ],
+  "build": {
+    "srcDir": "src"
+  }
+}
