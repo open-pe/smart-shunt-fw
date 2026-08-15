@@ -60,8 +60,23 @@ public:
     static constexpr uint16_t DEVICE_ID = 0x0117;
     static constexpr float RESOLUTION = 7.8125e-3f; // degC per LSB
 
-    // MOD=00 (continuous), CONV=001 (125 ms), AVG=01 (8 samples), alert pin unused.
-    static constexpr uint16_t CONFIG = (0u << 10) | (1u << 7) | (1u << 5);
+    /* MOD=00 (continuous), CONV=100, AVG=01 (8 samples), alert pin unused.
+     *
+     * CONV=100 with AVG=01 is a 1 s conversion cycle (datasheet Table "Conversion
+     * Cycle Time in CC Mode"), down from the 125 ms of CONV=001.
+     *
+     * 125 ms was 8 published samples per second PER PART. With three parts on the
+     * bus that saturated the BLE telemetry link -- the transport that actually
+     * carries this data to InfluxDB -- and it started dropping:
+     *   [ble] buffer full with a subscriber attached, dropping sample (448 queued)
+     * measured with the ADS1262 not even publishing, so the TMP117s filled it
+     * alone. Dropped samples hit every sampler sharing the link, so an over-fast
+     * temperature channel costs the shunt measurement its data.
+     *
+     * 1 s is still far faster than any thermal effect this board is used to
+     * characterise (the ADS1262 zero channel itself publishes at 2.45 SPS), and it
+     * keeps the 8x averaging, so each reading is no noisier than before. */
+    static constexpr uint16_t CONFIG = (0u << 10) | (4u << 7) | (1u << 5);
     // Bits 15..12 are read-only status (HIGH/LOW alert, DRDY, EEPROM busy).
     static constexpr uint16_t CONFIG_RW_MASK = 0x0FFF;
 
@@ -72,9 +87,12 @@ public:
     // (0x8000, the reset/invalid pattern, lands at -256).
     static constexpr float TEMP_MIN = -60.f, TEMP_MAX = 160.f;
 
-    // Conversion cycle is 125 ms, so this bounds DRDY latency to +25 ms while
-    // keeping the poll off the bus for the rest of the cycle.
-    static constexpr unsigned long POLL_INTERVAL_US = 25000;
+    // Conversion cycle is 1 s (see CONFIG), so this bounds DRDY latency to +100 ms
+    // -- 10% of a cycle, the same proportion the old 25 ms held against 125 ms --
+    // while keeping the poll off the bus for the rest of it. Each poll is a real
+    // I2C transaction on a bus shared with the other parts, so it scales with the
+    // conversion cycle rather than staying at a rate the data can no longer use.
+    static constexpr unsigned long POLL_INTERVAL_US = 100000;
 
     // ADD0 -> GND / V+ / SDA / SCL.  Four parts per bus.
     static constexpr uint8_t ADDR_MIN = 0x48, ADDR_MAX = 0x4B;
@@ -82,6 +100,13 @@ public:
     // 2 + addr - 0x40), so start above that.  An INA228 at 0x43 would also compute
     // 5 -- not used today, but do not add one without moving this.
     static constexpr uint8_t STORAGE_ID_BASE = 5;
+    // ...but the base+offset run ends at 8 for 0x4B, and slot 8 is ALSO where
+    // PowerSampler_INA228::setResistorRange() stores the 0x40 part's resistor/range
+    // (ina228.h: storeCalibrationFactors(8 + addr - 0x40)).  Two writers, one slot,
+    // silent mutual overwrite -- the collision aux_switch.h already flags.  16 is the
+    // last index the assert in settings.h admits (bytes 144..151, ending right below
+    // AUX_NVS_MAGIC_ADDR = 152) and is the only free one left, so 0x4B goes there.
+    static constexpr uint8_t STORAGE_ID_4B = 16;
 
     explicit PowerSampler_TMP117(uint8_t addr) : address(addr) {
     }
@@ -98,8 +123,9 @@ public:
     /// Distinct per part, so several TMP117s do not alias onto one EEPROM
     /// calibration slot.  init() rejects an address outside [ADDR_MIN, ADDR_MAX]
     /// and the caller only reaches this after init() succeeds, so the result is
-    /// always within STORAGE_ID_BASE..STORAGE_ID_BASE+3.
+    /// always 5, 6, 7 or STORAGE_ID_4B.
     uint8_t getStorageId() const override {
+        if (address == ADDR_MAX) return STORAGE_ID_4B; // see STORAGE_ID_4B
         return STORAGE_ID_BASE + (address - ADDR_MIN);
     }
 

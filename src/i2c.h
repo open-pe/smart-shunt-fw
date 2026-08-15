@@ -30,6 +30,72 @@
  * a repeated-start read is not three independent operations.
  */
 
+/// Physical-layer check of the two bus pins, BEFORE Wire claims them.
+///
+/// Exists because every electrical fault on this bus reaches the driver as the same
+/// opaque ESP_ERR_INVALID_STATE (259) on every transfer, which reads nothing like
+/// the NACK an absent device produces -- shorted lines, a line stuck low and a part
+/// with no supply are indistinguishable from firmware once the driver is running.
+/// These four assertions separate them while the pins are still plain GPIOs.
+///
+/// Returns true only if every check actually ran and passed. It never returns true
+/// for "could not tell": there is no such path here, since each step is a direct
+/// GPIO read. A failure is logged and reported, not fatal -- on the shunt-adc board
+/// the ADS1262 is on SPI and must still come up with the I2C harness unplugged.
+///
+/// What it CANNOT see: a device with no supply that is phantom-powered through its
+/// ESD diodes. That part still lets both lines idle high and still ACKs its address,
+/// so it passes every check here and then fails every real transfer. If this passes
+/// and transfers still fail with 259, measure V+ at the device -- see i2c_read_buf.
+inline bool i2c_check_pins(uint8_t sda, uint8_t scl) {
+    const char *TAG = "i2c";
+    bool ok = true;
+
+    // 1. Both lines idle high on the internal pull-ups. Low here = short to GND, a
+    //    device holding the line, or a wire on the wrong pin.
+    pinMode(sda, INPUT_PULLUP);
+    pinMode(scl, INPUT_PULLUP);
+    delayMicroseconds(50); // ~45k against line capacitance
+    const int sdaIdle = digitalRead(sda), sclIdle = digitalRead(scl);
+    if (!sdaIdle || !sclIdle) {
+        ESP_LOGE(TAG, "STUCK LOW: SDA(%hhu)=%d SCL(%hhu)=%d -- short to GND, or a device "
+                      "holding the line", sda, sdaIdle, scl, sclIdle);
+        ok = false;
+    }
+
+    // 2/3. Drive each line low in turn; the OTHER must stay high. If it follows, the
+    //      two are shorted together -- the classic swapped/bridged-pin fault, which
+    //      otherwise looks exactly like a dead bus.
+    struct { uint8_t drive, watch; const char *dn, *wn; } pairs[2] = {
+        {sda, scl, "SDA", "SCL"}, {scl, sda, "SCL", "SDA"},
+    };
+    for (auto &p : pairs) {
+        pinMode(p.drive, OUTPUT);
+        digitalWrite(p.drive, LOW);
+        delayMicroseconds(50);
+        const int driven = digitalRead(p.drive), other = digitalRead(p.watch);
+        pinMode(p.drive, INPUT_PULLUP);
+        delayMicroseconds(50);
+
+        // 4. The driven line must actually reach 0. If it cannot, something is
+        //    holding it high -- a short to 3V3, or a push-pull driver on the net.
+        if (driven != 0) {
+            ESP_LOGE(TAG, "%s(%hhu) will not go low -- short to 3V3 or a push-pull "
+                          "driver on the net", p.dn, p.drive);
+            ok = false;
+        }
+        if (other == 0) {
+            ESP_LOGE(TAG, "%s(%hhu) and %s(%hhu) are SHORTED -- pulling %s low pulls "
+                          "%s with it", p.dn, p.drive, p.wn, p.watch, p.dn, p.wn);
+            ok = false;
+        }
+    }
+
+    if (ok) ESP_LOGI(TAG, "pin check ok: SDA=%hhu SCL=%hhu idle high, independent, "
+                          "both drivable low (internal pullups)", sda, scl);
+    return ok;
+}
+
 class I2cLock {
     static SemaphoreHandle_t mutex() {
         static SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
@@ -82,6 +148,29 @@ inline esp_err_t i2c_write_short(uint8_t port, uint8_t address, uint8_t command,
 }
 
 /// Register read: write the pointer, repeated start, read `len` bytes.
+///
+/// A STOP-separated fallback (pointer write closed with a STOP, then a separate
+/// read) lived here briefly and was REMOVED after measurement. Recorded because the
+/// symptom is misleading enough to invite the same fix again:
+///
+/// During TMP117 bring-up every combined transfer failed immediately -- ~1 ms, so
+/// not a timeout -- with ESP_ERR_INVALID_STATE, for every address, while
+/// i2c_master_probe() ACKed two of the parts and plain writes also failed. That
+/// looks like a driver quirk, and lowering the clock 400k -> 100k -> 20k changed
+/// nothing, which seems to rule out the wiring too. It was in fact a MISSING
+/// GROUND: the parts were phantom-powered through their ESD diodes off the
+/// pull-ups, with enough current to ACK an address but not to carry a data byte.
+/// i2c_check_pins() above cannot see that, and says so.
+///
+/// With the ground connected, repeated start works. Instrumented to log whenever
+/// the fallback succeeded where repeated start had failed, it fired ZERO times
+/// across hundreds of reads from three TMP117s, and was entered only for the
+/// address with no part on it. So the fallback bought nothing measurable and cost a
+/// second doomed transaction on every read from an absent or failing device --
+/// exactly the bus load the header of this file warns about, and on the INA228
+/// boards that would sit on the continuously-sampled path.
+///
+/// If this failure is ever seen again: check the ground before changing this code.
 inline esp_err_t i2c_read_buf(uint8_t, uint8_t address, uint8_t command, uint8_t *buffer, uint8_t len) {
     I2cLock lock;
     if (!lock) return ESP_ERR_TIMEOUT;
