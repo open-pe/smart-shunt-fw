@@ -1030,6 +1030,63 @@ public:
         Serial.println("--- end probe ---");
     }
 
+    /// Decodes the STATUS byte to the console.
+    ///
+    /// Worth having precisely when nothing else works: the status byte rides every
+    /// RDATA1 response, so it is readable WITHOUT a successful conversion. When
+    /// the converter is producing nothing, this is the only thing the part will
+    /// still tell us about its own state.
+    ///
+    /// EXTCLK (bit 5) answers "which clock is it actually using", which is not the
+    /// same question as "is a clock present at XTAL1" -- sec.9.4.9 switches to the
+    /// internal oscillator automatically when no external clock is detected, so
+    /// EXTCLK = 0 means the external clock is gone AND the part is coping. The PGA
+    /// and reference alarms are the useful ones for a dead converter: they are
+    /// driven by the ANALOG rails and are set without any conversion having to
+    /// succeed.
+    void reportStatusByte(const char *who) {
+        uint8_t status = 0, checksum = 0, data[4] = {0};
+        (void) readData(&status, data, &checksum);
+        ESP_LOGE("ads1262", "%s: STATUS=0x%02x -- clock is %s%s%s%s%s%s%s", who, status,
+                 /* The PAIRING with "no conversions" is what diagnoses, not the bit
+                  * alone -- and the two cases point in OPPOSITE directions:
+                  *
+                  *   EXTCLK=0 + no conversions: cannot happen. sec.9.4.9 selects the
+                  *     internal 7.3728 MHz automatically when no external clock is
+                  *     detected, so the part would be converting. Suspect the part.
+                  *   EXTCLK=1 + no conversions: a clock IS present and the part has
+                  *     latched onto it, and it is NOT USABLE. Frequency or levels at
+                  *     XTAL1 -- not the supplies.
+                  *
+                  * Measured twice on this board (2026-08-15): STATUS=0x20 with zero
+                  * conversions, supplies healthy at AVDD-AVSS = 5.013 V, and the fault
+                  * was the crystal. EXTCLK=1 is the STRONGER clock indictment of the
+                  * two, which is the opposite of how it reads. */
+                 (status & STATUS_EXTCLK)
+                         ? "EXTERNAL -- if there are NO CONVERSIONS this indicts the CLOCK, not "
+                           "the supplies: the part latched onto something at XTAL1 that is not a "
+                           "usable clock. Check frequency and levels there"
+                         : "INTERNAL (no external clock detected; sec.9.4.9 fell back "
+                           "automatically -- conversions should still run, so a missing clock "
+                           "is NOT why they stopped)",
+                 (status & STATUS_REF_ALM) ? ", REF_ALM: VREF <= 0.4 V" : "",
+                 (status & STATUS_PGAL_ALM) ? ", PGAL_ALM: PGA output below AVSS+0.2 V" : "",
+                 (status & STATUS_PGAH_ALM) ? ", PGAH_ALM: PGA output above AVDD-0.2 V" : "",
+                 (status & STATUS_PGAD_ALM) ? ", PGAD_ALM: differential over-range" : "",
+                 (status & STATUS_RESET) ? ", RESET: device has reset since this bit was cleared"
+                                         : "",
+                 (status & (STATUS_REF_ALM | STATUS_PGAL_ALM | STATUS_PGAH_ALM | STATUS_PGAD_ALM))
+                         ? " <- an ANALOG rail or the reference is the suspect"
+                         /* NOT "no alarms, rails are fine". sec.9.2: the reference and
+                          * PGA alarms are "latched during the conversion phase and
+                          * appended to the conversion data" -- with no conversions they
+                          * CANNOT be set, so clear bits here are unevaluated, not good
+                          * news. Reporting them as reassurance would hide a dead rail
+                          * exactly when the converter has stopped. */
+                         : ", alarm bits UNEVALUATED (they latch during a conversion; "
+                           "with none they cannot set -- this is not a clean bill of health)");
+    }
+
     /// Logs the filter, rate, chop state and gain ACTUALLY IN FORCE, decoded from
     /// register values -- never from a literal, and never from what we intended
     /// to write.
@@ -1471,9 +1528,18 @@ private:
         }
         if (n == 0) {
             ESP_LOGE("ads1262", "SELF-TEST FAIL: no conversions in %u ms at a nominal %.0f SPS. "
-                                "The converter is not running at all -- check AVDD/AVSS and that "
-                                "a clock reaches XTAL1.",
+                                "The converter is not running at all.",
                      (unsigned) window, SELFTEST_NOMINAL_SPS);
+            /* Do NOT tell the user to check the clock here.  SBAS661C sec.9.4.9:
+             * "If no external clock is detected, the ADC automatically selects the
+             * internal oscillator."  The fallback is automatic and needs no
+             * command, so a dead, absent or out-of-spec external clock CANNOT stop
+             * conversions -- the part would run on its own 7.3728 MHz instead.
+             * Zero conversions therefore points at the ANALOG SUPPLIES or the part,
+             * not at Y1, R88 or isolator channel E.  The message used to say
+             * "check AVDD/AVSS and that a clock reaches XTAL1" and sent us chasing
+             * the clock path for an hour. */
+            reportStatusByte("no conversions");
             return false;
         }
 
