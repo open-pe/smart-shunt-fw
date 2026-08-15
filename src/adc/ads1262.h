@@ -198,10 +198,18 @@ public:
     static constexpr uint8_t ZERO_MODE1_VALUE = MODE1_FILTER_SINC4;
     static constexpr uint8_t ZERO_DATA_RATE_CODE = MODE2_DR_10_SPS;
 
+    /// td(STDR) for the zero channel's filter and rate (sinc4 @ 10 SPS),
+    /// Table 9-13. With chop this is ALSO the conversion period, not just the
+    /// first-conversion latency -- Equation 21 makes the chopped data rate
+    /// 1/td(STDR).
+    static constexpr uint32_t ZERO_TD_STDR_MS = 401;
+
     /// A missed conversion presents as a line stuck low with NO further edges
     /// (note N11 b), so an edge-only wait would hang forever. After this long
-    /// without an edge we read anyway, which re-arms the pin. Must exceed
-    /// FIRST_CONVERSION_MS or a healthy start looks like a stall.
+    /// without an edge we read anyway, which re-arms the pin. Must exceed the
+    /// first-conversion latency of the CURRENT configuration, or a healthy start
+    /// looks like a stall -- so it is a runtime value (drdyTimeoutMs_), not one
+    /// constant. This is the production default, for FIR @ 20 SPS.
     static constexpr uint32_t DRDY_TIMEOUT_MS = 4 * FIRST_CONVERSION_MS;
 
     /// Budget for confirming EXTCLK at init. Several conversion periods, so a
@@ -236,6 +244,15 @@ private:
     float volts_[PAIR_COUNT] = {NAN, NAN, NAN, NAN};
     float dieTempC_ = NAN;   ///< ADS1262 internal temperature sensor, degC
     uint8_t tempSkip_ = TEMP_EVERY_N_SCANS;   ///< force a read on the first scan
+    /// DRDY stall timeout for the configuration currently programmed. Tracks the
+    /// config because a fixed value cannot serve both: 212 ms is right for the
+    /// production FIR @ 20 SPS, and would fire on EVERY conversion of the chopped
+    /// sinc4 zero channel, whose conversions are 400 ms apart with the first at
+    /// 800 ms. A stall timeout that trips on healthy hardware is worse than none,
+    /// because the re-arm read it triggers disturbs the very conversion it was
+    /// wrongly told to rescue.
+    uint32_t drdyTimeoutMs_ = DRDY_TIMEOUT_MS;
+
     uint8_t zeroModeChop_ = 0xFF;   ///< chop bits currently programmed; 0xFF = not in zero mode
     uint8_t zeroModeMode1_ = 0xFF;  ///< filter currently programmed in zero mode
     uint8_t zeroModeDr_ = 0xFF;     ///< data rate currently programmed in zero mode
@@ -442,13 +459,37 @@ public:
                 ESP_LOGE("ads1262", "every register reads 0x00 -- MISO is never driven. Either "
                                     "the isolator's HOST side is unpowered (J2.1 is a 3V3 INPUT "
                                     "fed by the host; there is no on-board source on that net) "
-                                    "or the DOUT wire is not landing on the MISO pin.");
+                                    "or the DOUT wire is not landing on the MISO pin. "
+                                    "IF Y1 IS OSCILLATING, +3V3P IS PRESENT and the host side is "
+                                    "powered -- Y1 runs off that same rail -- so it is the DOUT "
+                                    "path (J2.5 -> MISO, or isolator channel F), not the supply.");
             else if (all_and == 0xFF)
                 ESP_LOGE("ads1262", "every register reads 0xFF -- DOUT idle high, which is what "
                                     "an UNPOWERED ISOLATED SIDE looks like. Check J1's 5 V feed.");
             else
                 ESP_LOGE("ads1262", "partial readback -- suspect SCLK integrity, SPI mode, or a "
                                     "marginal connection.");
+
+            /* The message above lists candidates; these two narrow them, and cost
+             * nothing because init has already failed.
+             *
+             * They probe the SAME wire in two different ways, which is the point:
+             * DOUT and DRDY share one pin on this board (J2.5), so there is no
+             * second path to cross-check against.
+             *   checkClock()    AC: does the converter produce DRDY EDGES at all?
+             *                       Edges with a dead readback would mean the link
+             *                       carries transitions but not valid data --
+             *                       SPI mode or timing, not a broken wire.
+             *   probePinDrive() DC: is the line DRIVEN at all, or floating? This
+             *                       is the one that separates "chip is dead" from
+             *                       "wire is not connected", which the 0x00 alone
+             *                       cannot.
+             * Order matters: probePinDrive() calls pinMode() on the MISO pin,
+             * which detaches it from the SPI peripheral (esp32-hal-gpio.c
+             * perimanClearPinBus), so nothing may use SPI after it. */
+            ESP_LOGW("ads1262", "link diagnostics (init has already failed):");
+            (void) checkClock();
+            probePinDrive("DOUT/DRDY/MISO", pinMiso);
             return false;
         }
 
@@ -954,6 +995,7 @@ public:
     /// does NOT update the driver's shadow map, only readSingleRegister() does.
     void applyProductionConfig() {
         zeroModeChop_ = 0xFF;   // configuration changed; zero mode must be re-entered
+        drdyTimeoutMs_ = DRDY_TIMEOUT_MS;   // back to the FIR @ 20 SPS figure
         setSTART(LOW);
         writeSingleRegister(REG_ADDR_MODE0, MODE0_VALUE);
         writeSingleRegister(REG_ADDR_MODE1, MODE1_VALUE);
@@ -1047,19 +1089,34 @@ public:
     }
 
     /// One averaged reading of the INTERNAL short (AINCOM/AINCOM) with chop
-    /// explicitly OFF, at the production GAIN but sinc4 @ 10 SPS rather than the
+    /// explicitly ON, at the production GAIN but sinc4 @ 10 SPS rather than the
     /// production FIR @ 20 SPS -- see ZERO_MODE1_VALUE for why.
     ///
-    /// For characterising the ADC's own offset drift over time and temperature
-    /// -- precisely the drift chop exists to remove, so chop must be off or
-    /// there is nothing to see. This measures the ADC ONLY: an internal short
-    /// excludes the external path, so it says nothing about the system offset
-    /// (delta-epsilon) that needs the terminals shorted at the shunt.
+    /// Measures the ADC ONLY: an internal short excludes the external path, so it
+    /// says nothing about the system offset (delta-epsilon) that needs the
+    /// terminals shorted at the shunt.
+    ///
+    /// CHOP WAS OFF until 2026-08-15. That run answered its question: the offset
+    /// took ~2 h to settle onto 7.2525 uV, rising 104 nV, and the die temperature
+    /// could not explain it -- the same 0.6 C change produced 104 nV during the
+    /// transient and 2.4 nV after it. 104 nV is ~3 ppm of a 35 mV full scale,
+    /// nearly a third of the 10 ppm budget, spent before the first reading.
+    /// Chop is the term that removes it (VOS +-0.1/G uV typ, i.e. +-3.1 nV at
+    /// G=32, and drift 1 nV/C against 30/G+10 = 10.9). Chop ON now measures what
+    /// is LEFT after that correction.
+    ///
+    /// THROUGHPUT COST, and it is not small here: SBAS661C Equation 21 makes the
+    /// chopped data rate 1/td(STDR), so it is settling time -- not the nominal
+    /// rate -- that sets throughput. sinc4 @ 10 SPS has td(STDR) = 400.4 ms, so
+    /// this runs at 2.5 SPS, not 10. FIR @ 20 SPS (td 52.22 ms -> 19.15 SPS)
+    /// would give BETTER noise per unit time under chop, 6.9 nV/sqrt(s) against
+    /// 8.2 -- the sinc4 choice only wins with chop OFF. Kept on sinc4 so this run
+    /// differs from the previous one in exactly one variable.
     ///
     /// Returns false rather than partial statistics if the samples cannot be
     /// gathered.
     bool zeroDriftSample(uint16_t n, float &meanUv, float &sdUv, float &sps) {
-        return measureZero(MODE0_CHOP_OFF, n, meanUv, sdUv, sps,
+        return measureZero(MODE0_CHOP_ON, n, meanUv, sdUv, sps,
                            ZERO_MODE1_VALUE, ZERO_DATA_RATE_CODE);
     }
 
@@ -1390,6 +1447,12 @@ private:
         zeroModeMode1_ = mode1;
         zeroModeDr_ = drCode;
         zeroSettleLeft_ = ZERO_SETTLE_DISCARDS;
+
+        /* Chop doubles the first-conversion latency (Equation 19) AND makes the
+         * steady-state period td(STDR) rather than 1/DR (Equation 21), so both
+         * cases are covered by scaling the same figure. 3x leaves the timeout
+         * catching a genuinely dead DRDY without firing on a slow healthy one. */
+        drdyTimeoutMs_ = 3u * (chopBits ? 2u : 1u) * ZERO_TD_STDR_MS;
     }
 
     /// Accumulates n conversions in the configuration already established by
@@ -1403,15 +1466,22 @@ private:
         constexpr float lsbUv = VREF / (float) PGA_GAIN / (float) (2u << 30) * 1e6f;
 
         /* Budget scaled to the SLOWEST configuration this is called in, since a
-         * budget sized for 20 SPS would time out at 10 SPS and report failure
-         * for a part that is working correctly. Worst case is sinc4 @ 10 SPS:
-         * td(STDR) = 400 ms to the first conversion (Table 9-13), then
-         * ZERO_SETTLE_DISCARDS + n conversions at 100 ms, doubled again if chop
-         * is on (Equation 19). The 4x margin over that covers the chop case and
-         * leaves the timeout doing its real job -- catching a dead DRDY -- rather
-         * than firing on a slow but healthy filter. */
+         * budget sized for the fast case times out on a part that is working
+         * correctly -- a timeout that fires on healthy hardware is worse than no
+         * timeout, because it reports a fault that is not there.
+         *
+         * Worst case is sinc4 @ 10 SPS WITH CHOP. The chopped rate is NOT the
+         * nominal rate: Equation 21 makes it 1/td(STDR), so with td(STDR) =
+         * 400.4 ms (Table 9-13) conversions arrive every 400 ms, not 100, and
+         * Equation 19 doubles the first one to 800 ms. That is
+         * 800 + (ZERO_SETTLE_DISCARDS + n - 1) x 400 = 5.2 s at n = 4.
+         *
+         * The previous 2000 + count x 400 gave 6.8 s against that -- 1.3x, not
+         * the 4x its comment claimed, because the comment assumed 100 ms
+         * conversions and chop had been off when it was written. 1200 ms per
+         * conversion restores a genuine ~3x. */
         const uint32_t budgetMs =
-                2000 + (uint32_t) (ZERO_SETTLE_DISCARDS + n) * 400;
+                3000 + (uint32_t) (ZERO_SETTLE_DISCARDS + n) * 1200;
         double sum = 0, sumSq = 0;
         uint32_t got = 0, first = 0, last = 0;
 
@@ -1517,9 +1587,9 @@ inline bool Ads1262ShuntAdc::waitForEdge() {
     /* No edge. A conversion we failed to read leaves the pin low with no
      * further edges at all, which looks identical to "never ready" (note
      * N11 b) -- so after the timeout, read anyway to re-arm it. */
-    if ((uint32_t) (millis() - lastEdgeMs) >= DRDY_TIMEOUT_MS) {
+    if ((uint32_t) (millis() - lastEdgeMs) >= drdyTimeoutMs_) {
         ESP_LOGW("ads1262", "no DRDY edge for %u ms -- reading to re-arm",
-                 (unsigned) DRDY_TIMEOUT_MS);
+                 (unsigned) drdyTimeoutMs_);
         lastEdgeMs = millis();
         return true;
     }
@@ -1570,6 +1640,9 @@ class PowerSampler_ShuntAdcZero : public PowerSampler {
     static constexpr uint8_t TEMP_EVERY_N_SAMPLES = 32;
     uint8_t tempSkip = TEMP_EVERY_N_SAMPLES;   ///< force a read on the first sample
 
+    uint32_t lastReinitMs = 0;
+    static constexpr uint32_t REINIT_INTERVAL_MS = 2000;
+
     const uint8_t storageId;
     const int8_t pinSck, pinMosi, pinMiso, pinCs, pinStart;
     Sample lastSample{};
@@ -1593,6 +1666,26 @@ public:
     void startReading() override {}
 
     bool hasData() override {
+        /* Recover from a device reset. measureZero() reports one by clearing
+         * `initialized`, and ONLY init() rewrites the POWER register -- which is
+         * what clears the ADC's sticky RESET flag. Without this the detector
+         * wedged the channel permanently: every later conversion still carried
+         * STATUS_RESET, so the check re-tripped forever, and EnergyCounter's
+         * "re-arming sampler" was inert because startReading() does nothing here.
+         * Observed on the bench 2026-08-15: 82 consecutive re-arms over 22
+         * minutes, board otherwise healthy. A detector whose failure verdict has
+         * no recovery path turns a transient fault into a permanent outage.
+         *
+         * Rate-limited, so a board that is genuinely gone does not spin. Mirrors
+         * PowerSampler_ShuntAdc::hasData(), which had this from the start. */
+        if (dev.needsReinit()) {
+            const uint32_t now = millis();
+            if ((uint32_t) (now - lastReinitMs) < REINIT_INTERVAL_MS) return false;
+            lastReinitMs = now;
+            ESP_LOGW("ads1262", "zero channel: re-initialising after device reset");
+            if (!dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart)) return false;
+        }
+
         float meanUv = NAN, sdUv = NAN, sps = NAN;
         if (!dev.zeroDriftSample(avgN, meanUv, sdUv, sps)) return false;
         /* Every 8th sample only. A temperature read needs INPMUX=0xBB and gain 1,
