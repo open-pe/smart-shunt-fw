@@ -221,6 +221,14 @@ public:
     static constexpr uint8_t DIAG_DEVICE_RESET = 4;
     static constexpr uint8_t DIAG_HAL_FAULT = 5;
     static constexpr uint8_t DIAG_NO_EXTCLK = 6;
+    static constexpr uint8_t DIAG_CLOCK_DEGRADED = 7;
+
+    /// Fractional deviation of the running fCLK estimate that raises
+    /// DIAG_CLOCK_DEGRADED. Wide, because the estimate is derived from only a few
+    /// conversion intervals and millisecond timestamps -- this exists to catch
+    /// the GROSS failure seen on 2026-08-15 (the clock fell to a quarter speed
+    /// and the channel ran on for 35 minutes before dying), not to police drift.
+    static constexpr float FCLK_ALARM_TOLERANCE = 0.20f;
 
 private:
     static constexpr uint8_t INPMUX_FOR[PAIR_COUNT] = {
@@ -236,6 +244,26 @@ private:
      * own tasks this needs a real guard. */
     bool initialized = false;
     bool everInitialized = false;  ///< distinguishes "not yet up" from "lost it"
+
+    /* Health telemetry. fCLK is NOT re-measured with checkClock(): that costs a
+     * 200 ms window plus a full configuration round trip. Every ADS1262 timing
+     * scales with the clock, so the conversion rate measureZero() already
+     * computes IS a clock measurement -- ratio against a healthy reference gives
+     * fCLK for free, every sample, with no mux excursion at all. */
+    float fclkInitHz_ = NAN;   ///< measured by checkClock() while init still trusted the part
+    float zeroSpsRef_ = NAN;   ///< zero-mode conversion rate when the clock was known good
+    /* The configuration zeroSpsRef_ was captured under. The reference is keyed on
+     * the CONFIGURATION, not on the register cache: every temperature read
+     * poisons the cache (configureSelfTest sets zeroModeChop_=0xFF) and forces a
+     * re-entry with IDENTICAL settings, so keying on the cache re-anchored the
+     * reference roughly every 13-50 s. A sustained degradation was then absorbed
+     * into the reference within one cycle -- the alarm fired once, went quiet,
+     * and fclkEstHz_ returned to nominal while the part ran at quarter speed.
+     * That is a guard that disappears exactly when the fault is real. */
+    uint8_t refChop_ = 0xFF, refMode1_ = 0xFF, refDr_ = 0xFF;
+    float fclkEstHz_ = NAN;    ///< running estimate; NAN until a reference exists
+    float avddAvss_ = NAN;     ///< refreshed by refreshHealth(), NAN until first success
+    float dvdd_ = NAN;
     bool isrAttached = false;      ///< attachInterrupt() is not idempotent; do it once
     uint8_t pair = 0;              ///< pair currently selected in INPMUX
     uint8_t discardsLeft = SETTLE_DISCARDS;
@@ -337,6 +365,15 @@ public:
     /// SBAS661C sec.9.3.4 notes the die runs ~0.7 degC above the surrounding
     /// PCB from self-heating, so this tracks board temperature with an offset.
     float dieTempC() const { return dieTempC_; }
+
+    /// Best available fCLK: the running estimate once a reference exists, else
+    /// the value checkClock() measured at init. NAN if the part never came up --
+    /// never a nominal stand-in, which would report a healthy clock for a board
+    /// that was never checked.
+    float fclkHz() const { return std::isfinite(fclkEstHz_) ? fclkEstHz_ : fclkInitHz_; }
+
+    float avddAvss() const { return avddAvss_; }
+    float dvdd() const { return dvdd_; }
 
     bool init(int8_t pinSck, int8_t pinMosi, int8_t pinMiso, int8_t pinCs, int8_t pinStart) {
         if (initialized) return true;
@@ -499,10 +536,13 @@ public:
             return false;
         }
 
+        /* Identity only. The configuration is reported by logConfig() from
+         * registers that have been read back, at every point that programs it --
+         * this line used to assert "G=32, FIR @ 20 SPS" as a literal and was
+         * wrong within a second of boot whenever a sampler reprogrammed the part. */
         uint8_t id = readSingleRegister(REG_ADDR_ID);
-        ESP_LOGI("ads1262", "found %s (ID=0x%02x), G=%u, %s",
-                 (id & ID_DEV_MASK) == ID_DEV_ADS1262 ? "ADS1262" : "ADS1263", id,
-                 PGA_GAIN, "FIR @ 20 SPS");
+        ESP_LOGI("ads1262", "found %s (ID=0x%02x)",
+                 (id & ID_DEV_MASK) == ID_DEV_ADS1262 ? "ADS1262" : "ADS1263", id);
 
         /* DRDY is the MISO pin. ads126xHalBegin() left it as the SPI
          * peripheral's; attaching an interrupt to it is additive on ESP32 --
@@ -990,6 +1030,36 @@ public:
         Serial.println("--- end probe ---");
     }
 
+    /// Logs the filter, rate, chop state and gain ACTUALLY IN FORCE, decoded from
+    /// register values -- never from a literal, and never from what we intended
+    /// to write.
+    ///
+    /// The init banner used to print the fixed string "FIR @ 20 SPS". That was a
+    /// statement about the production default, not about the hardware:
+    /// PowerSampler_ShuntAdcZero reprograms the part to sinc4 @ 10 SPS chopped
+    /// within a second of boot, so the single line the log offered about the
+    /// converter's configuration named the one configuration it was NOT running.
+    /// Pass registers that have been READ BACK, so this cannot repeat.
+    static void logConfig(const char *who, uint8_t mode0, uint8_t mode1, uint8_t mode2) {
+        static const char *const kFilter[8] = {"sinc1", "sinc2", "sinc3", "sinc4",
+                                               "FIR", "?5", "?6", "?7"};
+        static const float kSps[16] = {2.5f, 5, 10, 16.6f, 20, 50, 60, 100,
+                                       400, 1200, 2400, 4800, 7200, 14400, 19200, 38400};
+        const uint8_t filt = (uint8_t) ((mode1 >> 5) & 0x07);
+        const uint8_t dr = (uint8_t) (mode2 & 0x0F);
+        const uint8_t gainCode = (uint8_t) ((mode2 >> 4) & 0x07);
+        const bool chop = (mode0 & MODE0_CHOP_ON) != 0;
+
+        /* With chop the NOMINAL rate is not the throughput: Equation 21 makes the
+         * chopped data rate 1/td(STDR), which for sinc4 @ 10 SPS is 2.5, not 10.
+         * Say so rather than print a rate the part will not deliver -- computing
+         * it would need the whole of Table 9-13 in flash. */
+        ESP_LOGI("ads1262", "%s: %s @ %.1f SPS%s, chop %s, G=%u%s", who, kFilter[filt], kSps[dr],
+                 chop ? " nominal (chopped throughput = 1/td(STDR), Table 9-13)" : "",
+                 chop ? "ON" : "off", (unsigned) (1u << gainCode),
+                 (mode2 & 0x80) ? " -- PGA BYPASSED" : "");
+    }
+
     /// Restores the measurement configuration the self-tests and the temperature
     /// read overwrite. Reads every register back: upstream's writeSingleRegister()
     /// does NOT update the driver's shadow map, only readSingleRegister() does.
@@ -1002,11 +1072,12 @@ public:
         writeSingleRegister(REG_ADDR_MODE2, (uint8_t) ((PGA_GAIN_CODE << 4) | DATA_RATE_CODE));
         writeSingleRegister(REG_ADDR_REFMUX, 0x00);
         writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[PAIR_CH0]);
-        (void) readSingleRegister(REG_ADDR_MODE0);
-        (void) readSingleRegister(REG_ADDR_MODE1);
-        (void) readSingleRegister(REG_ADDR_MODE2);
+        const uint8_t m0 = readSingleRegister(REG_ADDR_MODE0);
+        const uint8_t m1 = readSingleRegister(REG_ADDR_MODE1);
+        const uint8_t m2 = readSingleRegister(REG_ADDR_MODE2);
         (void) readSingleRegister(REG_ADDR_REFMUX);
         (void) readSingleRegister(REG_ADDR_INPMUX);
+        logConfig("production config", m0, m1, m2);
 
         /* Leave the ADC CONVERTING. This function drops START to write the
          * registers, and every caller wants the measurement configuration back
@@ -1027,16 +1098,80 @@ public:
     /// Leaves dieTempC_ untouched on failure rather than writing a fabricated
     /// value; the caller keeps publishing the last good reading, and NAN until
     /// the first success.
-    bool readDieTemperature() {
-        configureSelfTest((uint8_t) (INPMUX_MUXP_TEMP_P | INPMUX_MUXN_TEMP_N));
+    bool readDieTemperature() { return refreshHealth(); }
+
+    /// Reads die temperature AND both internal supply monitors in ONE excursion.
+    ///
+    /// The expensive part of reading an internal monitor is the round trip out of
+    /// and back into the measurement configuration -- on the zero channel that is
+    /// sinc4's ~400 ms filter refill (800 ms chopped), measured on the bench. The
+    /// conversions themselves are ~0.83 ms each at SELFTEST_DR. So once we are
+    /// out here, two more monitors cost ~2 ms and NO additional refill; reading
+    /// them separately would have cost a second full round trip.
+    ///
+    /// Each field is left untouched on its own failure rather than being written
+    /// with a fabricated value: a stale reading is visibly stale in the series,
+    /// while a plausible invented one is not. Returns false if ANY read failed.
+    bool refreshHealth() {
+        constexpr float lsb1 = VREF / (float) (2u << 30);   // gain = 1 in self-test config
         int32_t code = 0;
-        const bool ok = oneConversion(code);
-        if (ok) {
-            constexpr float lsb1 = VREF / (float) (2u << 30);   // gain = 1 here
+        bool ok = true;
+
+        /* Captured BEFORE the first configureSelfTest(), which invalidates the
+         * zero-mode cache -- by the end of this function these members no longer
+         * say what the caller was running. */
+        const uint8_t wasChop = zeroModeChop_;
+        const uint8_t wasMode1 = zeroModeMode1_;
+        const uint8_t wasDr = zeroModeDr_;
+
+        configureSelfTest((uint8_t) (INPMUX_MUXP_TEMP_P | INPMUX_MUXN_TEMP_N));
+        if (oneConversion(code)) {
             const float uV = (float) code * lsb1 * 1e6f;
-            dieTempC_ = (uV - 122400.0f) / 420.0f + 25.0f;
+            dieTempC_ = (uV - 122400.0f) / 420.0f + 25.0f;   // SBAS661C Equation 9
+        } else ok = false;
+
+        /* V_ANLMON = (AVDD - AVSS)/4 and V_DIGMON = (DVDD - DGND)/4, hence x4.
+         * This is the monitoring the board cannot do any other way -- there is no
+         * independent sense path, so when the converter dies these go with it.
+         * Recording them continuously gives the APPROACH to a failure even though
+         * the failure itself is unmeasurable. */
+        /* Stop on the first failure. oneConversion() returns false on a device
+         * reset (having cleared `initialized`), and there is no point programming
+         * the mux of a part that has just told us its configuration is gone --
+         * the re-init will rewrite everything anyway. */
+        if (ok) {
+            configureSelfTest((uint8_t) (INPMUX_MUXP_AVDD_P | INPMUX_MUXN_AVDD_N));
+            if (oneConversion(code)) avddAvss_ = (float) code * lsb1 * 4.0f; else ok = false;
         }
-        applyProductionConfig();
+        if (ok) {
+            configureSelfTest((uint8_t) (INPMUX_MUXP_DVDD_P | INPMUX_MUXN_DVDD_N));
+            if (oneConversion(code)) dvdd_ = (float) code * lsb1 * 4.0f; else ok = false;
+        }
+
+        /* Restore unconditionally -- even after a partial failure, or the next
+         * measurement runs in the self-test configuration (gain 1, sinc1, temp
+         * mux) and reads nonsense -- but restore the configuration the CALLER was
+         * in, not always the production one.
+         *
+         * A zero-channel caller used to get applyProductionConfig(): FIR @ 20 SPS
+         * programmed and started, in a configuration nothing reads, only for the
+         * next sample to reprogram zero mode. Two full register rounds per sample
+         * where one will do, and visible in the log as a
+         * "production config" / "zero mode" pair after every reading.
+         *
+         * The settling discards are NOT saved and must not be: the self-test
+         * excursion really did change gain, mux and filter, so sinc4's filter has
+         * to refill either way. What is saved is programming and running a third
+         * configuration in between. */
+        if (wasChop != 0xFF) {
+            /* Force a reprogram: configureSelfTest() cleared the cache, so passing
+             * the saved triple would otherwise be a no-op against a part that is
+             * still in the self-test configuration. */
+            zeroModeChop_ = 0xFF;
+            enterZeroMode(wasChop, wasMode1, wasDr);
+        } else {
+            applyProductionConfig();
+        }
         return ok;
     }
 
@@ -1345,6 +1480,12 @@ private:
         const float sps = (float) n * 1000.0f / (float) window;
         const float fclk = FCLK_NOMINAL_HZ * (sps / SELFTEST_NOMINAL_SPS);
 
+        /* Anchor the running estimate. Recorded BEFORE the range check so a
+         * failing board still reports what it actually measured rather than
+         * nothing; the check below aborts init anyway, so nothing consumes it. */
+        fclkInitHz_ = fclk;
+        zeroSpsRef_ = NAN;   // reference belongs to this clock; re-establish it
+
         if (fclk < FCLK_MIN_HZ || fclk > FCLK_MAX_HZ) {
             ESP_LOGE("ads1262",
                      "SELF-TEST FAIL: fCLK ~ %.0f Hz, outside the %.0f..%.0f Hz the part accepts "
@@ -1354,10 +1495,17 @@ private:
                      fclk, FCLK_MIN_HZ, FCLK_MAX_HZ, FCLK_NOMINAL_HZ);
             return false;
         }
-        if (fabsf(fclk - FCLK_NOMINAL_HZ) / FCLK_NOMINAL_HZ > FCLK_WARN_TOLERANCE)
+        if (fabsf(fclk - FCLK_NOMINAL_HZ) / FCLK_NOMINAL_HZ > FCLK_WARN_TOLERANCE) {
+            /* Raise the alarm here too, not just in the log. The 1..8 MHz range
+             * check above passes a clock running at a QUARTER speed (1.84 MHz),
+             * which is exactly the 2026-08-15 failure -- so without this, a
+             * re-init onto an already-degraded clock would adopt it as the new
+             * reference and every downstream comparison would read "healthy". */
+            diag_ = encodeDiag(DIAG_CLOCK_DEGRADED, 0);
             ESP_LOGW("ads1262", "fCLK ~ %.0f Hz is more than %.0f%% off the expected %.0f Hz. "
                                 "Conversion timing and the 50/60 Hz filter nulls scale with it.",
                      fclk, FCLK_WARN_TOLERANCE * 100.0f, FCLK_NOMINAL_HZ);
+        }
         else
             ESP_LOGI("ads1262", "fCLK ~ %.0f Hz (%lu conversions in %u ms)", fclk,
                      (unsigned long) n, (unsigned) window);
@@ -1435,10 +1583,11 @@ private:
                             (uint8_t) (INPMUX_MUXP_AINCOM | INPMUX_MUXN_AINCOM));
         /* Upstream writeSingleRegister() does not update the shadow map; only
          * readSingleRegister() does, and readData() sizes its transfer from it. */
-        (void) readSingleRegister(REG_ADDR_MODE0);
-        (void) readSingleRegister(REG_ADDR_MODE1);
-        (void) readSingleRegister(REG_ADDR_MODE2);
+        const uint8_t m0 = readSingleRegister(REG_ADDR_MODE0);
+        const uint8_t m1 = readSingleRegister(REG_ADDR_MODE1);
+        const uint8_t m2 = readSingleRegister(REG_ADDR_MODE2);
         (void) readSingleRegister(REG_ADDR_INPMUX);
+        logConfig("zero mode", m0, m1, m2);
 
         sendCommand(OPCODE_STOP1);
         setSTART(HIGH);
@@ -1447,6 +1596,12 @@ private:
         zeroModeMode1_ = mode1;
         zeroModeDr_ = drCode;
         zeroSettleLeft_ = ZERO_SETTLE_DISCARDS;
+        /* Deliberately does NOT clear zeroSpsRef_. Re-entering zero mode is not
+         * evidence about the clock -- and it happens after every temperature
+         * read with unchanged settings. measureZero() re-anchors only when the
+         * CONFIGURATION differs from the one the reference was taken under
+         * (refChop_/refMode1_/refDr_), which is the only case where the expected
+         * rate actually changed. */
 
         /* Chop doubles the first-conversion latency (Equation 19) AND makes the
          * steady-state period td(STDR) rather than 1/DR (Equation 21), so both
@@ -1523,6 +1678,41 @@ private:
         const double var = sumSq / got - (sum / got) * (sum / got);
         sdUv = (float) sqrt(var > 0 ? var : 0);
         sps = (float) (got - 1) * 1000.0f / (float) (last - first);
+
+        /* Track fCLK from this rate. The nominal zero-mode rate is not hardcoded
+         * -- it depends on the data rate code AND on chop, which halves it -- so
+         * the first healthy measurement after a configuration change becomes the
+         * reference and everything after is a ratio against it. That makes this
+         * correct for any filter/rate/chop combination without a table to keep in
+         * sync, and it is why enterZeroMode() clears the reference. */
+        const bool newConfig = (refChop_ != chopBits || refMode1_ != mode1 || refDr_ != drCode);
+        if (newConfig || !std::isfinite(zeroSpsRef_)) {
+            /* First rate seen for THIS configuration. Trustworthy as a reference
+             * only because checkClock() validated fCLK during init and raises
+             * DIAG_CLOCK_DEGRADED itself if the clock was already off nominal. */
+            refChop_ = chopBits;
+            refMode1_ = mode1;
+            refDr_ = drCode;
+            zeroSpsRef_ = sps;
+        } else if (zeroSpsRef_ > 0) {
+            fclkEstHz_ = fclkInitHz_ * (sps / zeroSpsRef_);
+            const float dev = fabsf(sps / zeroSpsRef_ - 1.0f);
+            if (dev > FCLK_ALARM_TOLERANCE) {
+                diag_ = encodeDiag(DIAG_CLOCK_DEGRADED, 0);
+                ESP_LOGW("ads1262", "clock degraded: conversion rate %.2f SPS vs %.2f expected "
+                                    "(fCLK ~ %.0f Hz vs %.0f at init)",
+                         sps, zeroSpsRef_, fclkEstHz_, fclkInitHz_);
+            }
+        }
+
+        /* Publish whatever this measurement accumulated. diag() returns
+         * diagPublished_, which until now was latched ONLY inside pump() -- the
+         * multi-pair scan, which this build never calls (shuntAdcIn is not
+         * registered, and feather_s3 compiles with SHUNT_ADC_ONLY). Every reason
+         * raised on the zero-mode path, including DIAG_CLOCK_DEGRADED and
+         * DIAG_DEVICE_RESET, therefore never reached a published Sample. */
+        diagPublished_ = diag_;
+        diag_ = 0;
         return true;
     }
 
@@ -1837,6 +2027,91 @@ public:
         if (reportDieTemp) lastSample.temp = dev.dieTempC();
         /* Non-consuming: the other facade sharing this device must see the same
          * diagnostic rather than a zero because we got here first. */
+        lastSample.diag = dev.diag();
+        return true;
+    }
+
+    Sample getSample() override { return lastSample; }
+};
+
+
+/// Health/telemetry channel for the shunt-adc front end: fCLK and the ADC's own
+/// supply monitors, recorded as a time series.
+///
+/// Why this exists: on 2026-08-15 the external clock degraded to a quarter speed
+/// at 07:20 and the board died at 07:58. Nothing recorded it. The diagnosis came
+/// from counting InfluxDB rows per 5 minutes AFTER the fact and noticing the rate
+/// had dropped by exactly 4x -- fCLK was inferrable only because every ADS1262
+/// timing scales with it. Recording it directly turns that archaeology into a
+/// trend, and DIAG_CLOCK_DEGRADED raises it live.
+///
+/// This sampler PUBLISHES ONLY. It never triggers an ADC excursion of its own --
+/// the values are refreshed by whichever measurement channel is registered, on
+/// its existing schedule, so adding this costs no conversions and no settling.
+/// The consequence is that it is only as fresh as that channel: with nothing else
+/// registered, the supplies stay at their init values and only fCLK updates.
+///
+/// KNOWN LIMITATION: both quantities are measured THROUGH the converter, so when
+/// the ADC stops converting they stop with it. This records the approach to a
+/// failure, not the failure. That was enough on 2026-08-15 -- the degradation ran
+/// for 35 minutes -- but it is not a substitute for an independent supply sense.
+class PowerSampler_ShuntAdcHealth : public PowerSampler {
+    Ads1262ShuntAdc &dev;
+    const uint32_t intervalMs;
+    uint32_t lastPublishMs = 0;
+    bool published = false;
+
+    const uint8_t storageId;
+    const int8_t pinSck, pinMosi, pinMiso, pinCs, pinStart;
+    Sample lastSample{};
+
+public:
+    PowerSampler_ShuntAdcHealth(Ads1262ShuntAdc &dev, uint32_t intervalMs, uint8_t storageId,
+                                int8_t pinSck, int8_t pinMosi, int8_t pinMiso, int8_t pinCs,
+                                int8_t pinStart)
+            : dev(dev), intervalMs(intervalMs), storageId(storageId), pinSck(pinSck),
+              pinMosi(pinMosi), pinMiso(pinMiso), pinCs(pinCs), pinStart(pinStart) {}
+
+    uint8_t getStorageId() const override { return storageId; }
+
+    /// Diagnostics, not power. Opting out keeps it out of the idle-sleep vote,
+    /// which reads a non-finite mean power as "cannot judge -> stay awake".
+    bool measuresPower() const override { return false; }
+
+    /// Publishing every intervalMs is the design, not a stall. Give the detector
+    /// generous headroom over the interval so a genuine hang is still caught.
+    int64_t stallTimeoutUs() const override { return (int64_t) intervalMs * 3000; }
+
+    bool init() override { return dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart); }
+
+    void startReading() override {}
+
+    bool hasData() override {
+        const uint32_t now = millis();
+        if (published && (uint32_t) (now - lastPublishMs) < intervalMs) return false;
+
+        const float fclk = dev.fclkHz();
+        const float avdd = dev.avddAvss();
+        /* Nothing measured yet. Publishing zeros here would put a hard clock
+         * fault into the series for what is only a cold start. */
+        if (!std::isfinite(fclk) && !std::isfinite(avdd)) return false;
+
+        lastPublishMs = now;
+        published = true;
+
+        lastSample.setTimeNow();
+        /* Field reuse, as on the zero channel: u = fCLK in Hz, i = AVDD-AVSS in
+         * volts. Sample is exactly 32 bytes and WireSample 64, both pinned by
+         * static_assert in main_esp32.cpp and parsed by the bridge on rpi.local,
+         * so a dedicated field would be a cross-repo wire-format change for a
+         * diagnostic series. NAN stays NAN -- "not measured" must not become 0. */
+        lastSample.u = fclk;
+        lastSample.i = avdd;
+        /* Explicitly 0, not NAN: Sample::p() falls back to u*i when p_ is NAN,
+         * which would multiply hertz by volts and integrate the result into
+         * EnergyCounter as energy. */
+        lastSample.p_ = 0.0f;
+        lastSample.temp = dev.dieTempC();
         lastSample.diag = dev.diag();
         return true;
     }

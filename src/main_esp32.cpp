@@ -98,6 +98,16 @@ PowerSampler_ShuntAdcZero shuntAdcZero{shuntAdc, 4, 13,
                                        SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
                                        SHUNTADC_NCS, SHUNTADC_START};
 
+/* Front-end health as a recorded series: u = fCLK (Hz), i = AVDD-AVSS (V).
+ * Publishes cached values only -- it drives no conversions of its own, so it is
+ * free to register alongside whichever measurement channel is active. 30 s is
+ * far faster than either quantity can meaningfully move, and the failure this
+ * exists to catch ran for 35 minutes before the board died.
+ * storageId 14: taken are 0, 2, 3, 5, 6, 11, 12, 13, 15. */
+PowerSampler_ShuntAdcHealth shuntAdcHealth{shuntAdc, 30000, 14,
+                                           SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
+                                           SHUNTADC_NCS, SHUNTADC_START};
+
 SamplerRegistry samplers;
 BleSrv bleSrv;
 
@@ -292,6 +302,7 @@ void setup(void) {
      * BLE_SHUNT_ADC and BLE_SHUNT_ADC_ZERO. Extra channels: SHUNT_ADC_ch1, ... */
     //samplers.add("SHUNT_ADC", &shuntAdcIn);
     samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
+    samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);
 
 #ifndef SHUNT_ADC_ONLY
     if (!muxBackend.init()) {

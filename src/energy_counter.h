@@ -277,7 +277,12 @@ public:
             const int64_t now = esp_timer_get_time();
             if (lastSampleTime == 0) lastSampleTime = now; // start the clock on first call
             if (now < BOOT_GRACE_US) return;
-            if (now - lastSampleTime <= STALL_TIMEOUT_US) return;
+            /* Per-sampler, not the bare constant: a diagnostic channel that
+             * publishes every 30 s is not stalled at 4 s, and reporting it as
+             * such buries real stalls in false warnings. 0 opts out entirely. */
+            const int64_t stallTimeout = ps.stallTimeoutUs();
+            if (stallTimeout <= 0) return;
+            if (now - lastSampleTime <= stallTimeout) return;
             if (now < retryNotBefore) return;
 
             ++numTimeouts;

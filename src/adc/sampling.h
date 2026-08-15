@@ -52,6 +52,16 @@ class PowerSampler {
   /// Defaults to true so a sampler must opt OUT deliberately: the failure direction
   /// of a wrong answer here is "stays awake", never "sleeps while there is data".
   virtual bool measuresPower() const { return true; }
+
+  /// How long EnergyCounter waits without a sample before calling this sampler
+  /// stalled and re-arming it (see STALL_TIMEOUT_US in energy_counter.h).
+  ///
+  /// The 4 s default suits every measurement channel, which all sample far
+  /// faster than that. A sampler that publishes on a LONG deliberate interval
+  /// must widen this or it reports itself stalled forever: the detector cannot
+  /// tell "nothing to say yet" from "dead" without being told the cadence.
+  /// Returning 0 disables stall detection for this sampler.
+  virtual int64_t stallTimeoutUs() const { return 4000000; }
 };
 
 
