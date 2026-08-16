@@ -155,6 +155,13 @@ private:
     double Energy = 0; //Wh
     float LastP = 0.0f;
 
+    /// Intervals left out of the E integral because an endpoint was not finite, and how much
+    /// wall time they add up to. Kept so a total with a hole in it can be told from a complete
+    /// one -- the alternative to poisoning E with NaN is omitting time, and that has to be
+    /// visible rather than merely quieter.
+    unsigned long nUnmeasured = 0;
+    unsigned long long unmeasuredUs = 0;
+
     float TotalCharge = 0; //Ah
     float LastI = 0.0f;
 
@@ -239,11 +246,41 @@ public:
             if (lastTime != 0) {
                 // we use simple trapezoidal rule here
                 unsigned long dt_us = nowTime - lastTime;
-                Energy += (double) ((LastP + P) * 0.5f * (dt_us * (1e-6f / 3600.f)));
+                const float dt_h = dt_us * (1e-6f / 3600.f);
+
+                /* A trapezoid with a non-finite endpoint is not a small error, it is a
+                 * PERMANENT one: `Energy += NaN` leaves Energy NaN for the life of the
+                 * counter, and only reset() clears it. Two ways that bit us:
+                 *
+                 *  - A temperature-only sampler has no P at all (p() = u*i = NaN*NaN), so
+                 *    Energy went NaN on its second sample and E was missing from every
+                 *    frame it ever sent. Combined with a TMP117 whose I2C read had failed
+                 *    -- temp NAN too -- the summary carried NO finite field whatsoever,
+                 *    and the collector emitted line protocol with an empty field section
+                 *    that InfluxDB rejected outright ("invalid field format").
+                 *  - On a real power sampler, ONE failed conversion silently destroyed the
+                 *    Wh total from then on. Nothing said so; the counter just stopped
+                 *    reporting energy.
+                 *
+                 * Skipping the interval is the honest option. The energy that flowed while
+                 * we could not measure is unknown, and carrying the running total forward
+                 * says exactly that -- where NaN throws away everything correctly measured
+                 * BEFORE the dropout as well. Skipped time is counted, not swallowed, so a
+                 * total quietly missing a chunk of its integration window can be seen. */
+                const float e_step = (LastP + P) * 0.5f * dt_h;
+                if (std::isfinite(e_step)) {
+                    Energy += (double) e_step;
+                } else {
+                    unmeasuredUs += dt_us;
+                    if (++nUnmeasured == 1 || (nUnmeasured % 1000) == 0)
+                        ESP_LOGW("ec", "%s: no finite power for %u interval(s), %.1f s not "
+                                       "integrated into E (E itself is unaffected)",
+                                 name.c_str(), (unsigned) nUnmeasured, unmeasuredUs * 1e-6);
+                }
                 s.e = (float) Energy;
 
-
-                TotalCharge += (double) ((LastI + s.i) * 0.5f * (dt_us * (1e-6f / 3600.f)));
+                const float q_step = (LastI + s.i) * 0.5f * dt_h;
+                if (std::isfinite(q_step)) TotalCharge += (double) q_step;
                 //s.c = (float) TotalCharge;
 
                 if (dt_us > maxDt)
@@ -401,6 +438,8 @@ public:
 
         Energy = 0;
         LastP = 0.0f;
+        nUnmeasured = 0;
+        unmeasuredUs = 0;
 
         startTime = 0;
         lastTime = 0;
