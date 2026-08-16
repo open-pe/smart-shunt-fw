@@ -107,7 +107,20 @@ public:
     static constexpr uint16_t MTU = 512; // lower than BLE_ATT_MTU_MAX
     static constexpr uint16_t MAX_PAYLOAD_LEN = MTU - 3;
 
-    static constexpr auto bleBufLen = BleSrv::MAX_PAYLOAD_LEN * 1;
+    /// Queue depth, in units of one indication payload.
+    ///
+    /// Was *1, i.e. exactly one payload (509 B = 7 WireSamples). That gave the
+    /// link no elasticity at all: one indication round trip measured ~600 ms on
+    /// the bench, so any tick whose samples outran a single in-flight payload
+    /// dropped the remainder -- 45 "buffer full" warnings in 50 s with a
+    /// subscriber attached, and the dropped samples never reach InfluxDB, so the
+    /// stored series is silently decimated rather than merely late.
+    ///
+    /// *4 holds ~31 samples, several ticks' worth, so a slow ack costs LATENCY
+    /// instead of DATA. flush() clamps each indication to MAX_PAYLOAD_LEN and the
+    /// existing inFlightLen/memmove bookkeeping carries the remainder, so a
+    /// buffer larger than one payload is drained across successive indications.
+    static constexpr auto bleBufLen = BleSrv::MAX_PAYLOAD_LEN * 4;
     uint8_t bleBuf[bleBufLen];
     uint16_t bleBufPos = 0;
     // How much of bleBuf the in-flight indication actually covers. send() keeps appending
@@ -350,9 +363,19 @@ public:
             memcpy(&bleBuf[bleBufPos], buf, len);
             bleBufPos += len;
         }
-        if (!inTransmission()) {
-            flush();
-        }
+        /* DELIBERATELY NO flush() HERE. Telemetry calls send() once per sampler
+         * and then flush() once at the end of the tick (telemetry.h), so an
+         * eager flush on the FIRST send shipped a single 64-byte sample and then
+         * blocked every later send in that tick behind the in-flight ack --
+         * visible in the log as a stream of "sending 64" against a 448-byte
+         * capacity. At a ~600 ms round trip that caps throughput near 1.7
+         * samples/s no matter how much buffer exists, which is what made a
+         * 7-sample queue overflow.
+         *
+         * Letting the tick's own flush() send the accumulated batch puts up to
+         * MAX_PAYLOAD_LEN into each round trip instead of one sample. Nothing
+         * waits on an eager flush: telemetry.h:97 runs flush() unconditionally
+         * every tick, so a partial batch is never stranded. */
     }
 
     /// Drop every trace of the previous connection. Without this, a stale bleBufPos and a
@@ -498,13 +521,42 @@ public:
         }
 
         if (pCharacteristic && bleBufPos && subscribed) {
-            ESP_LOGI("ble", "sending %hu", bleBufPos);
+            /* One indication carries at most one ATT payload. bleBufLen is now
+             * several payloads deep, so this MUST be clamped. The tail stays
+             * queued and the ack path's memmove brings it forward for the next
+             * indication.
+             *
+             * CLAMP TO THE NEGOTIATED MTU, NOT THE REQUESTED ONE. MAX_PAYLOAD_LEN
+             * is MTU-3 = 509 for the 512 we ASK for, but the comment on peerMtu
+             * says plainly that we do not always get it --
+             * CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256 in the prebuilt libs caps it.
+             * NimBLE truncates an oversized indication to the negotiated MTU and
+             * still returns success, so with peerMtu=256 only 253 of 509 bytes
+             * would reach the central while the ack retired all 509: samples
+             * silently lost, and the collector fed a half frame that fails CRC
+             * and desynchronises its parser.
+             *
+             * This was latent before batching -- send() flushed eagerly, so
+             * bleBufPos was usually one 64-byte sample and never approached the
+             * cap. Filling the buffer is what made it reachable, which is why the
+             * bound belongs here and not only in drainOtaTx() (ble.h:462), where
+             * it was already being done correctly. */
+            const uint16_t attPayload = peerMtu > 3 ? (uint16_t) (peerMtu - 3) : 20;
+            const uint16_t cap = attPayload < MAX_PAYLOAD_LEN ? attPayload : MAX_PAYLOAD_LEN;
+            const uint16_t sendLen = bleBufPos > cap ? cap : bleBufPos;
+            /* DEBUG, not INFO: one line per indication is ~2/s forever and it
+             * buried the sampler summaries. Nothing is lost by hiding it --
+             * every case worth acting on has its own WARNING (indicate failed,
+             * no-ack re-arm, buffer full with a subscriber attached), and drops
+             * are counted in nDroppedBacklog rather than inferred from this.
+             * Rebuild with -DCORE_DEBUG_LEVEL=4 to watch batching behaviour. */
+            ESP_LOGD("ble", "sending %hu of %hu queued", sendLen, bleBufPos);
             //pCharacteristic->setValue(const_cast<uint8_t *>(buf), len);
-            bool res = pCharacteristic->indicate(bleBuf, bleBufPos);
+            bool res = pCharacteristic->indicate(bleBuf, sendLen);
             if (!res) {
                 ESP_LOGW("ble", "BLE server indicate failed");
             } else {
-                inFlightLen = bleBufPos;
+                inFlightLen = sendLen;
                 ++waitingForAck;
                 tLastIndicate = millis();
             }
@@ -598,7 +650,10 @@ public:
             // never covered, so it is only logged.
             ESP_LOGW("ble", "onAck (done=%i) with no indication in flight, ignored", (int) done);
         }
-        ESP_LOGI("ble", "onAck done=%i waiting=%hhu", (int)done, waitingForAck);
+        /* DEBUG for the same reason as flush()'s send line: this fires once per
+         * indication, pairing with it at ~2/s. A FAILED ack is the interesting
+         * case and it is handled below on its own path, not inferred from here. */
+        ESP_LOGD("ble", "onAck done=%i waiting=%hhu", (int)done, waitingForAck);
     }
 
     void onCharSub(bool sub) {

@@ -66,14 +66,26 @@ static constexpr int8_t SHUNTADC_SCLK = 4, SHUNTADC_DIN = 5, SHUNTADC_DOUT = 6,
                         SHUNTADC_NCS = 7, SHUNTADC_START = 16;
 
 Ads1262ShuntAdc shuntAdc;
-/* Input side: u from J5 (VIN), i from J3 (IIN). shuntOhm/dividerRatio are 0 =
- * unknown, so u reports raw ADC volts and i reports NAN until they are measured.
- * storageId 5 continues past the existing samplers. */
+/* Shunt current on J3 (IIN, PAIR_CH0), SINGLE-PAIR: uPair = PAIR_NONE parks the
+ * mux on CH0 so it never moves. That is the configuration the filter choice in
+ * ads1262.h assumes -- a mux change costs td(STDR) (~104 ms chopped) per sample,
+ * and parking is what lets FIR @ 20 SPS actually run at its 19.15 SPS.
+ *
+ * There is consequently NO voltage channel: u carries the raw shunt volts and p
+ * is pinned to 0. Give it a uPair (J5 = PAIR_CH2, the old wiring) once a divider
+ * is actually fitted there, and set dividerRatio at the same time.
+ *
+ * shuntOhm 2 mOhm: sized for 14 A => 28 mV, 80% of the 35 mV input window note N8
+ * derives from G=32, leaving headroom for transients. Nominal, NOT calibrated --
+ * gain error is whatever the resistor's tolerance is until it is measured against
+ * a reference.
+ *
+ * storageId 12 continues past the existing samplers. */
 PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
-                                 Ads1262ShuntAdc::PAIR_CH2, Ads1262ShuntAdc::PAIR_CH0,
-                                 /* shuntOhm, dividerRatio: 0 = unknown, so u is raw ADC
-                                  * volts and i is NAN until they are measured. */
-                                 0.0f, 0.0f,
+                                 Ads1262ShuntAdc::PAIR_NONE, Ads1262ShuntAdc::PAIR_CH0,
+                                 /* shuntOhm = 2 mOhm nominal; dividerRatio 0 = no voltage
+                                  * channel, so u stays raw ADC volts. */
+                                 0.002f, 0.0f,
                                  /* storageId is a namespace shared by EVERY registered
                                   * sampler -- it indexes the EEPROM calibration slot
                                   * (settings.h: 16 + id*8). Taken: 0 (ADS/ADS131),
@@ -82,7 +94,13 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
                                   * TMP117 and would have silently shared its calibration. */
                                  12,
                                  SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
-                                 SHUNTADC_NCS, SHUNTADC_START};
+                                 SHUNTADC_NCS, SHUNTADC_START,
+                                 /* reportDieTemp: this is now the only ADS1262
+                                  * measurement channel registered, so nothing else
+                                  * would carry the die temperature -- and it is the
+                                  * x-axis for the offset drift the shunt sizing
+                                  * depends on. T read nan before this was set. */
+                                 true};
 
 /* Offset-drift characterisation: the ADC's INTERNAL short with chop OFF,
  * streamed through the normal sampler path. MUTUALLY EXCLUSIVE with shuntAdcIn
@@ -339,11 +357,11 @@ void setup(void) {
     samplers.add("t17_4B", &tmp117_4b);
     /* ONE of these two, never both: they share the ADS1262 and configure it
      * differently. SHUNT_ADC_ZERO is the offset-drift characterisation run
-     * (internal short, chop off); SHUNT_ADC is normal measurement. */
+     * (internal short, chop ON since 2026-08-15); SHUNT_ADC is normal measurement. */
     /* The bridge prefixes the sampler name with "BLE_", so these appear as
      * BLE_SHUNT_ADC and BLE_SHUNT_ADC_ZERO. Extra channels: SHUNT_ADC_ch1, ... */
-    //samplers.add("SHUNT_ADC", &shuntAdcIn);
-    samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
+    samplers.add("SHUNT_ADC", &shuntAdcIn);
+    //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);
 
 #ifndef SHUNT_ADC_ONLY
