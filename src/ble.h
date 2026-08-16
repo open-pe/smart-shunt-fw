@@ -107,6 +107,42 @@ public:
     static constexpr uint16_t MTU = 512; // lower than BLE_ATT_MTU_MAX
     static constexpr uint16_t MAX_PAYLOAD_LEN = MTU - 3;
 
+    /// One telemetry record. bleBuf carries NOTHING ELSE: send() has exactly one
+    /// caller, telemetry.h, which passes sizeof(WireSample); aux state and the
+    /// OTA status stream use their own characteristics and never touch this
+    /// buffer. So bleBufPos is always a whole multiple of this.
+    ///
+    /// Pinned by `if (sizeof(WireSample) != 64) assert(false)` in
+    /// main_esp32.cpp/main_stm32.cpp -- ble.h does not include the telemetry
+    /// headers, so the number is restated here rather than derived.
+    static constexpr uint16_t RECORD_LEN = 64;
+
+    /// Largest indication that is still a whole number of records: 448 for a
+    /// 512-byte MTU, i.e. 7 records against the 509 bytes ATT would allow.
+    ///
+    /// RECORD ALIGNMENT IS THE POINT, and it is not cosmetic. flush() re-sends
+    /// the same byte range when an ack does not arrive within ACK_TIMEOUT_MS,
+    /// and if the peer DID receive that indication and merely acked late, those
+    /// bytes enter the stream twice. The collector
+    /// (pwr-metering/smart-shunt-ble-client.py) is a byte-stream reassembler --
+    /// it splits on `len(d) % 64` and carries the remainder -- so duplicated
+    /// bytes that are not a multiple of 64 shift every subsequent record
+    /// boundary permanently, and _decode_frame()'s CRC assert then fires on
+    /// every frame from then on.
+    ///
+    /// Clamping at 509 split records: 7 whole ones plus 61 bytes of the eighth.
+    /// Clamping at 448 cannot, so a duplicated payload inserts WHOLE records.
+    /// Those decode cleanly and are duplicates by idx, which is what flush()'s
+    /// own comment already assumed the client would see -- that assumption was
+    /// only true before the buffer grew past one payload, because bleBufPos was
+    /// then always both the whole buffer and a multiple of 64.
+    ///
+    /// Costs nothing: 448 is exactly the payload the single-payload buffer used
+    /// to ship, and the deep queue still drains across successive indications.
+    static constexpr uint16_t MAX_INDICATE_LEN = (MAX_PAYLOAD_LEN / RECORD_LEN) * RECORD_LEN;
+    static_assert(MAX_INDICATE_LEN >= RECORD_LEN,
+                  "MTU too small to carry even one telemetry record");
+
     /// Queue depth, in units of one indication payload.
     ///
     /// Was *1, i.e. exactly one payload (509 B = 7 WireSamples). That gave the
@@ -542,7 +578,36 @@ public:
              * bound belongs here and not only in drainOtaTx() (ble.h:462), where
              * it was already being done correctly. */
             const uint16_t attPayload = peerMtu > 3 ? (uint16_t) (peerMtu - 3) : 20;
-            const uint16_t cap = attPayload < MAX_PAYLOAD_LEN ? attPayload : MAX_PAYLOAD_LEN;
+            uint16_t cap = attPayload < MAX_PAYLOAD_LEN ? attPayload : MAX_PAYLOAD_LEN;
+
+            /* ROUND THE CAP DOWN TO A WHOLE RECORD -- see MAX_INDICATE_LEN. The
+             * MTU clamp above is necessary but not sufficient: 253 and 509 are
+             * both mid-record, and the no-ack path at the top of this function
+             * re-sends the SAME byte range, so a late ack for an indication the
+             * peer did receive injects a partial record into a byte stream the
+             * collector frames by `len(d) % 64`. Every boundary after it is
+             * wrong, permanently. Whole records instead duplicate cleanly, and
+             * the resulting InfluxDB points carry the same tags and timestamp,
+             * so they overwrite rather than double-count. */
+            if (cap >= RECORD_LEN) {
+                cap = (uint16_t) ((cap / RECORD_LEN) * RECORD_LEN);
+            } else {
+                /* An MTU too small for one 64-byte record. Ship the unaligned
+                 * bytes anyway: the collector reassembles a split record
+                 * correctly in the normal case, so best-effort delivery beats a
+                 * permanent silent stall -- which is what returning here would
+                 * be, since nothing would ever drain the buffer again. Loud,
+                 * because telemetry on such a link is degraded by design and the
+                 * resend hazard above is live. */
+                static uint16_t lastWarnedMtu = 0;
+                if (lastWarnedMtu != peerMtu) {
+                    lastWarnedMtu = peerMtu;
+                    ESP_LOGW("ble", "peer MTU %hu leaves %hu payload bytes, under one %hu-byte "
+                                    "record -- indications cannot be record-aligned and a "
+                                    "re-sent payload may desynchronise the collector",
+                             peerMtu, attPayload, RECORD_LEN);
+                }
+            }
             const uint16_t sendLen = bleBufPos > cap ? cap : bleBufPos;
             /* DEBUG, not INFO: one line per indication is ~2/s forever and it
              * buried the sampler summaries. Nothing is lost by hiding it --
