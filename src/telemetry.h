@@ -71,6 +71,26 @@ public:
 
         registry.consumeAllQueues();
 
+        /* CATCH-UP DRAIN, every pass (~10 ms), not once per 400 ms telemetry tick.
+         *
+         * flush() ships at most ONE indication per call -- ATT allows only one outstanding
+         * indication per connection -- so calling it only inside the 400 ms block below capped
+         * the link at 2.5 indications/s no matter how deep the backlog got. That cap is what
+         * turned a transient stall into permanent data loss: a tick produces ~4 records (256 B)
+         * and an indication carries 7 (448 B), so the surplus is under 200 B per tick. Once a
+         * few seconds of dropped acks had filled the queue, clawing it back needed ten clean
+         * ticks in a row, and the bench link never gave ten in a row -- the queue simply stayed
+         * pinned full, shedding ~3 samples/s indefinitely (measured over 21 s: 67 drops).
+         *
+         * Calling flush() every pass costs nothing when there is nothing to do (it returns
+         * immediately with an empty buffer or an indication in flight) and lets the backlog
+         * drain as fast as acks come back. It cannot fragment a tick's batch into one-sample
+         * indications -- the eager-flush regression the "DELIBERATELY NO flush() HERE" comment in
+         * BleSrv::send() documents -- because the send()
+         * loop below runs to completion within a single update() call, so no flush can
+         * interleave between its sends. */
+        ble.flush();
+
         if (nowTime - lastTimeOut > 400e3) {
             auto print = nowTime - lastTimePrint > 2000e3;
 

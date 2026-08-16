@@ -143,20 +143,38 @@ public:
     static_assert(MAX_INDICATE_LEN >= RECORD_LEN,
                   "MTU too small to carry even one telemetry record");
 
-    /// Queue depth, in units of one indication payload.
+    /// Queue depth, in whole records.
     ///
-    /// Was *1, i.e. exactly one payload (509 B = 7 WireSamples). That gave the
-    /// link no elasticity at all: one indication round trip measured ~600 ms on
-    /// the bench, so any tick whose samples outran a single in-flight payload
+    /// Was MAX_PAYLOAD_LEN*1, i.e. exactly one payload (7 WireSamples). That gave
+    /// the link no elasticity at all: one indication round trip measured ~600 ms
+    /// on the bench, so any tick whose samples outran a single in-flight payload
     /// dropped the remainder -- 45 "buffer full" warnings in 50 s with a
     /// subscriber attached, and the dropped samples never reach InfluxDB, so the
     /// stored series is silently decimated rather than merely late.
     ///
-    /// *4 holds ~31 samples, several ticks' worth, so a slow ack costs LATENCY
-    /// instead of DATA. flush() clamps each indication to MAX_PAYLOAD_LEN and the
-    /// existing inFlightLen/memmove bookkeeping carries the remainder, so a
-    /// buffer larger than one payload is drained across successive indications.
-    static constexpr auto bleBufLen = BleSrv::MAX_PAYLOAD_LEN * 4;
+    /// Then *4 (31 records, ~5 s of production at the bench's ~6 records/s).
+    /// Still far too shallow for the stall that actually happens: the bench rpi
+    /// shares one radio between three links, a continuous scan and a 20 s
+    /// initiating window for a board that is switched off, and its own collector
+    /// tears a link down after RX_TIMEOUT = 10 s of silence. A stall long enough
+    /// to matter is by construction at least twice as long as 31 records buys.
+    /// Measured on that board: the queue sat pinned at 1984/2036 bytes for tens
+    /// of seconds, shedding ~3 samples/s the whole time.
+    ///
+    /// 256 records is ~42 s of production and 16 KB of BSS -- affordable on an
+    /// ESP32-S3 and the difference between a stall costing LATENCY and a stall
+    /// costing DATA. Sized in records, not payloads, because the queue's job is
+    /// to hold samples over a stall: expressing it in payloads made the depth
+    /// depend on MTU arithmetic that has nothing to do with how long a stall the
+    /// bench needs to survive.
+    ///
+    /// (bleBufPos is a whole multiple of RECORD_LEN on every ordinary link, since
+    /// send() appends whole records and flush() retires whole records -- but NOT
+    /// on the degenerate sub-record-MTU path, where a partial ack leaves residue.
+    /// Nothing here depends on the alignment; the drop-oldest path in send()
+    /// checks it explicitly rather than assuming it.)
+    static constexpr uint16_t QUEUE_RECORDS = 256;
+    static constexpr auto bleBufLen = (uint16_t) (RECORD_LEN * QUEUE_RECORDS);
     uint8_t bleBuf[bleBufLen];
     uint16_t bleBufPos = 0;
     // How much of bleBuf the in-flight indication actually covers. send() keeps appending
@@ -169,6 +187,10 @@ public:
     // single-byte flags below, which the next send()/flush() consumes -- so no lock is needed
     // across the two tasks.
     uint16_t inFlightLen = 0;
+    // Whether the slow-link warning has already been issued for the CURRENT outstanding
+    // indication. There is only ever one (see flush()), so this is a per-indication latch rather
+    // than a rate limiter.
+    bool ackWarned = false;
     volatile bool acked = false;      // onAck(done): the in-flight indication was confirmed
     volatile bool ackFailed = false;  // onAck(!done): it terminally failed; retire it unconsumed
     // The subscription changed (unsubscribe, resubscribe or disconnect). Consumed at the top of
@@ -184,9 +206,54 @@ public:
 
     uint32_t nDroppedNoPeer = 0;   // discarded because nothing was subscribed
     uint32_t nDroppedBacklog = 0;  // discarded with a subscriber attached -- the real overflow
+    // Overflow is a sustained condition, not an event: it used to log once per dropped sample,
+    // ~3 lines/s forever, which drowned the sampler summaries in the very log you need to read to
+    // diagnose it. Rate-limited to one line carrying the count since the last one, so the rate is
+    // still visible without the volume.
+    uint32_t tLastBacklogWarn = 0;
+    uint32_t nDroppedSinceWarn = 0;
+    static constexpr uint32_t WARN_INTERVAL_MS = 5000;
 
     // An indication that is never acknowledged must not park the buffer forever.
+    //
+    // NOW A DIAGNOSTIC THRESHOLD, NOT A RETRY TRIGGER -- see flush(), which waits an unacked
+    // indication out instead of re-sending it. Crossing this logs "the link is slow"; it changes
+    // no transfer state.
+    //
+    // The history is worth keeping, because it is what proved the retry was wrong. The value was
+    // briefly cut from 5 s to 2 s, on the argument that the collector (pwr-metering) drops a link
+    // silent for RX_TIMEOUT = 10 s, so two lost acks would cost the connection. Flashed at 2 s,
+    // the board logged 309 failed indications in 7 minutes, every one NimBLE rc=6 = BLE_HS_ENOMEM
+    // -- the retries were exhausting the proc/mbuf pools, i.e. the timeout was manufacturing the
+    // congestion it was meant to survive.
+    //
+    // 5 s also brackets the real round trip usefully: at 2 s the threshold was crossed every
+    // ~2.7 s, at 5 s roughly once per 25 s, so the congested bench adapter's true ack latency sits
+    // between those figures. Below the worst LEGITIMATE round trip, this only cries wolf.
     static constexpr uint32_t ACK_TIMEOUT_MS = 5000;
+
+    // The buffer must not park forever, and since flush() no longer re-sends, THIS is what
+    // guarantees it. Above 30 s, NimBLE's own GATT timeout should already have terminated the
+    // procedure and reported a failure status; if nothing has been reported by 35 s the ATT
+    // bearer is stuck and, per spec, unusable for further transactions. Drop the link: the
+    // session teardown discards the queue and the transfer state, and the collector reconnects
+    // within seconds. Deliberately longer than NimBLE's timeout so the normal recovery -- a
+    // reported failure, consumed by the ackFailed path -- always gets to happen first.
+    static constexpr uint32_t ACK_STUCK_MS = 35000;
+
+    // indicate() returning false means NimBLE could not take the payload right now. Measured on
+    // the bench it is always rc=6, BLE_HS_ENOMEM: ble_gatts_indicate_custom() needs a
+    // ble_gattc_proc AND an mbuf per call, and it never refuses on "one is already outstanding"
+    // (see ACK_TIMEOUT_MS), so the only way it says no is by running out of one of those pools.
+    // That makes it a BACKPRESSURE signal, not an error to retry through: the pools refill as the
+    // queued ATT traffic drains. flush() now runs every app-task pass (~10 ms) rather than once
+    // per 400 ms telemetry tick, so retrying blindly would hammer an already-empty pool 100x/s and
+    // starve the OTA status notifies too. Back off for a connection interval instead.
+    uint32_t tIndicateFailed = 0;
+    uint32_t nIndicateFailed = 0;
+    uint32_t nIndicateFailedSinceWarn = 0;
+    uint32_t tLastIndicateWarn = 0;
+    static constexpr uint32_t INDICATE_BACKOFF_MS = 100;
 
     // ---- OTA over BLE -------------------------------------------------------------------------
     BLECharacteristic *pOtaCtrl = nullptr;
@@ -362,6 +429,7 @@ public:
         sessionChanged = false;
         bleBufPos = 0;
         inFlightLen = 0;
+        ackWarned = false;
         waitingForAck = 0;
         acked = false;
         ackFailed = false;
@@ -372,7 +440,8 @@ public:
         if (otaBleActive()) {
             // Telemetry stands down for the duration of a firmware push: the sampler is halted
             // anyway, and indications would only compete with the OTA status notifies for the same
-            // small mbuf pool. Dropped here rather than queued -- the buffer holds one payload.
+            // small mbuf pool. Dropped rather than queued: a firmware push takes minutes, so the
+            // queue would overflow whatever its depth and the records would be stale on arrival.
             bleBufPos = 0;
             inFlightLen = 0;
             return;
@@ -392,9 +461,66 @@ public:
 
         if (bleBufPos + len > bleBufLen) {
             // This one is real: a peer is subscribed and we still cannot keep up.
+            //
+            // DISCARD THE OLDEST QUEUED RECORD, NOT THIS ONE. Dropping the newest kept a full
+            // queue full: every sample delivered was already the whole queue depth old, the
+            // backlog never shrank, and the freshest measurement -- the one a live Grafana panel
+            // is actually asking for -- was the one guaranteed to be thrown away. Dropping the
+            // head instead bounds delivery latency at the queue depth and lets the queue walk
+            // back down as soon as the link recovers. The same number of samples is lost either
+            // way; this way they are the stale ones.
+            //
+            // The first inFlightLen bytes are off limits: an indication covering them is out on
+            // the wire and the ack path consumes exactly that range from the front of bleBuf.
+            // Shifting them would make the ack retire bytes it never carried. Only one indication
+            // is ever outstanding (flush() no longer re-sends), so inFlightLen alone describes
+            // the whole protected prefix.
+            //
+            // BOTH ENDS OF THE DELETED WINDOW MUST LAND ON A RECORD BOUNDARY, or this removes the
+            // tail of one record and the head of the next and the collector decodes one spliced
+            // frame from the halves that remain. Framing recovers -- exactly 64 bytes leave -- but
+            // a corrupt record is worse than a missing one. Two ways the head can be misaligned,
+            // both on the degenerate path where the negotiated MTU cannot carry even one record
+            // and flush() deliberately ships unaligned bytes:
+            //   - inFlightLen itself is mid-record (e.g. 20), so offset inFlightLen is not a
+            //     boundary;
+            //   - a PREVIOUS sub-record ack already consumed a non-multiple of 64 from the front,
+            //     leaving bleBuf[0] mid-record even when inFlightLen is 0.
+            // Only whole records are ever appended, so `bleBufPos % RECORD_LEN == 0` is exactly
+            // the test for "the head is on a boundary" and catches the second case, which
+            // checking inFlightLen alone does not. Fall back to dropping the newest, which leaves
+            // the existing byte stream untouched.
+            bool droppedOldest = false;
+            if (inFlightLen % RECORD_LEN == 0 && bleBufPos % RECORD_LEN == 0
+                && bleBufPos >= inFlightLen + len) {
+                memmove(bleBuf + inFlightLen, bleBuf + inFlightLen + len,
+                        bleBufPos - inFlightLen - len);
+                bleBufPos -= len;
+                memcpy(&bleBuf[bleBufPos], buf, len);
+                bleBufPos += len;
+                droppedOldest = true;
+            }
+            // else: the head is not droppable, so THIS sample is the loss. The warning says which,
+            // because "dropping oldest" on a line where the newest was actually dropped would
+            // misdescribe what happened to the data.
             ++nDroppedBacklog;
-            ESP_LOGW("ble", "buffer full with a subscriber attached, dropping sample "
-                     "(%hu queued, %lu dropped)", bleBufPos, (unsigned long) nDroppedBacklog);
+            ++nDroppedSinceWarn;
+            const uint32_t now = millis();
+            // `!tLastBacklogWarn ||` so the FIRST overflow always prints. Without it the zero
+            // initialiser doubles as a 5 s post-boot mute, and a burst that starts and clears
+            // inside that window is never reported at all. No interval is printed: ESP_LOGW
+            // already stamps every line with millis(), so the rate is the difference between two
+            // stamps -- and the one thing a computed interval could add here was a nonsense "in
+            // the last 0ms" on the first line.
+            if (!tLastBacklogWarn || now - tLastBacklogWarn >= WARN_INTERVAL_MS) {
+                ESP_LOGW("ble", "buffer full with a subscriber attached, dropping %s sample "
+                         "(%hu queued, %lu since the last warning, %lu total)",
+                         droppedOldest ? "oldest" : "newest",
+                         bleBufPos, (unsigned long) nDroppedSinceWarn,
+                         (unsigned long) nDroppedBacklog);
+                tLastBacklogWarn = now;
+                nDroppedSinceWarn = 0;
+            }
         } else {
             memcpy(&bleBuf[bleBufPos], buf, len);
             bleBufPos += len;
@@ -410,8 +536,9 @@ public:
          *
          * Letting the tick's own flush() send the accumulated batch puts up to
          * MAX_PAYLOAD_LEN into each round trip instead of one sample. Nothing
-         * waits on an eager flush: telemetry.h:97 runs flush() unconditionally
-         * every tick, so a partial batch is never stranded. */
+         * waits on an eager flush: Telemetry::update() runs flush() on every
+         * app-task pass and again at the end of each 400 ms tick, so a partial
+         * batch is never stranded. */
     }
 
     /// Drop every trace of the previous connection. Without this, a stale bleBufPos and a
@@ -514,8 +641,31 @@ public:
         }
     }
 
+    /// Emit the tail of a throttled warning burst. Without this the counters are only ever
+    /// printed BY a later event of the same kind, so a burst that stops inside the throttle
+    /// window is never reported at all -- and a burst that stops is exactly the one you would
+    /// most like to see bounded ("47 dropped, then it recovered"). Called from flush(), which
+    /// runs every app-task pass whether or not anything is going wrong.
+    void drainWarnCounters() {
+        const uint32_t now = millis();
+        if (nDroppedSinceWarn && now - tLastBacklogWarn >= WARN_INTERVAL_MS) {
+            ESP_LOGW("ble", "backlog drops stopped: %lu more since the last warning (%lu total)",
+                     (unsigned long) nDroppedSinceWarn, (unsigned long) nDroppedBacklog);
+            tLastBacklogWarn = now;
+            nDroppedSinceWarn = 0;
+        }
+        if (nIndicateFailedSinceWarn && now - tLastIndicateWarn >= WARN_INTERVAL_MS) {
+            ESP_LOGW("ble", "indicate failures stopped: %lu more since the last warning "
+                     "(%lu total)", (unsigned long) nIndicateFailedSinceWarn,
+                     (unsigned long) nIndicateFailed);
+            tLastIndicateWarn = now;
+            nIndicateFailedSinceWarn = 0;
+        }
+    }
+
     void flush() override {
         consumeSessionChange();
+        drainWarnCounters();
         if (otaBleActive()) return; // see send()
         if (acked || ackFailed) {
             // Consume the ack here, in the app task, instead of inside onAck (host task):
@@ -537,24 +687,62 @@ public:
                 bleBufPos -= inFlightLen;
             }
             inFlightLen = 0;
+            ackWarned = false;
         }
         if (inTransmission()) {
-            // Without this the client stops receiving samples while the link stays up, so
-            // nothing on either side looks wrong -- the worst kind of stall.  bleBufPos is
-            // untouched by a lost ack, so the next indicate re-sends the same payload (the
-            // client dedups by idx). A late ack for the ABANDONED indication is ignored by
-            // onAck's waitingForAck guard only until we re-indicate; if it arrives after
-            // that, it consumes the re-sent range early -- acceptable, since that range was
-            // transmitted and the true ack for it then hits the guard and is dropped.
-            if (millis() - tLastIndicate < ACK_TIMEOUT_MS) return;
-            ESP_LOGW("ble", "no ack for %ums with %hhu indication(s) in flight, re-arming",
-                     (unsigned) (millis() - tLastIndicate), waitingForAck);
-            waitingForAck = 0;
-            inFlightLen = 0;
+            /* AN UNACKED INDICATION IS WAITED OUT, NOT RE-SENT. This used to clear waitingForAck
+             * and inFlightLen after ACK_TIMEOUT_MS and indicate again, on the theory that the
+             * re-send replaced a lost payload. It does not: NimBLE's
+             * ble_gatts_indicate_custom() (ble_gattc.c:4860) allocates a fresh ble_gattc_proc and
+             * mbuf per call and QUEUES the new indication behind the outstanding ATT request --
+             * it never replaces or rejects it. So an application-level retry cannot reach the
+             * peer any sooner than the original will, and it costs a proc, an mbuf, and -- fatally
+             * -- a second pending completion that this code cannot tell apart from the first.
+             *
+             * That ambiguity is the real defect. onStatus carries no identity, and `acked` is a
+             * bool, so with two indications outstanding the FIRST completion retires the SECOND
+             * one's inFlightLen. Since send() keeps appending, the second is usually longer, and
+             * the difference is records retired from the queue that nothing ever confirmed. A
+             * disconnect before the queued indication drains loses them silently -- the exact
+             * class of invisible loss this whole file exists to prevent. Clamping the re-send's
+             * length (the previous attempt at a fix) narrows the window but cannot close it,
+             * because each further timeout adds another untracked completion.
+             *
+             * With no retry there is at most ONE indication outstanding at any time, which is
+             * precisely what a bool can represent. The timeout keeps its value as a DIAGNOSTIC --
+             * it says the link is slow -- and the buffer is unparked by ACK_STUCK_MS below rather
+             * than by stacking payloads. */
+            const uint32_t waited = millis() - tLastIndicate;
+            if (waited >= ACK_STUCK_MS) {
+                /* The escape hatch, and the reason "must not park the buffer forever" still
+                 * holds. Per the ATT spec a transaction that never completes is fatal to the
+                 * bearer, and NimBLE's own 30 s GATT timeout should have terminated the procedure
+                 * well before this. If it has not, the host is wedged and only a fresh session
+                 * recovers it -- onDisconnect sets sessionChanged, which discards the buffer and
+                 * every scrap of transfer state. Losing the queue is the point: none of it can be
+                 * accounted for any more. */
+                ESP_LOGE("ble", "no ack for %ums -- ATT bearer is stuck, dropping the link",
+                         (unsigned) waited);
+                if (pServer) pServer->disconnect(connHandle);
+                return;
+            }
+            if (waited >= ACK_TIMEOUT_MS && !ackWarned) {
+                // Once per outstanding indication, not once per ACK_TIMEOUT_MS: flush() runs at
+                // the app-task rate now, and this used to be the trigger for a re-send rather
+                // than a log line, so it fired on a schedule. It is a slow-link report.
+                ackWarned = true;
+                ESP_LOGW("ble", "no ack for %ums, waiting (queue %hu bytes)",
+                         (unsigned) waited, bleBufPos);
+            }
+            return;
         }
         if (!isConnected()) {
             return;
         }
+
+        // NimBLE turned us away recently: give its mbuf pool a connection interval to refill
+        // rather than retrying at the app-task rate. See tIndicateFailed.
+        if (tIndicateFailed && millis() - tIndicateFailed < INDICATE_BACKOFF_MS) return;
 
         if (pCharacteristic && bleBufPos && subscribed) {
             /* One indication carries at most one ATT payload. bleBufLen is now
@@ -619,8 +807,20 @@ public:
             //pCharacteristic->setValue(const_cast<uint8_t *>(buf), len);
             bool res = pCharacteristic->indicate(bleBuf, sendLen);
             if (!res) {
-                ESP_LOGW("ble", "BLE server indicate failed");
+                // Throttled for the same reason as the backlog warning: flush() is now called at
+                // the app-task rate, so a congested host would produce ~100 identical lines/s.
+                ++nIndicateFailed;
+                ++nIndicateFailedSinceWarn;
+                tIndicateFailed = millis();
+                if (!tLastIndicateWarn || tIndicateFailed - tLastIndicateWarn >= WARN_INTERVAL_MS) {
+                    ESP_LOGW("ble", "indicate failed %lu time(s) since the last warning (%lu total)",
+                             (unsigned long) nIndicateFailedSinceWarn,
+                             (unsigned long) nIndicateFailed);
+                    tLastIndicateWarn = tIndicateFailed;
+                    nIndicateFailedSinceWarn = 0;
+                }
             } else {
+                tIndicateFailed = 0; // disarm the backoff; nIndicateFailed stays a running total
                 inFlightLen = sendLen;
                 ++waitingForAck;
                 tLastIndicate = millis();
