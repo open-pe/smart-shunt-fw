@@ -45,27 +45,47 @@ INA228MuxBackend muxBackend{0x41, settings.Pin_INA22x_ALERT2,
 PowerSampler_MuxChannel mux_chA{muxBackend, INA228MuxBackend::Target::CH_A, 3};
 PowerSampler_MuxChannel mux_chB{muxBackend, INA228MuxBackend::Target::CH_B, 11};
 
+/* One per ADD0 strap (GND/V+/SDA/SCL).  All four are registered unconditionally
+ * and SamplerRegistry::initAll() drops whichever do not answer -- init() reads
+ * DEVICE_ID first and returns false on no response, so an absent part costs one
+ * failed transaction at boot and logs "init failed".  That beats hardcoding the
+ * populated addresses: rebuilding the firmware is not the right response to
+ * moving a strap. */
 PowerSampler_TMP117 tmp117{0x48};
 PowerSampler_TMP117 tmp117_49{0x49};
+PowerSampler_TMP117 tmp117_4a{0x4A};
+PowerSampler_TMP117 tmp117_4b{0x4B};
 
 /* pwr-metering shunt-adc board (ADS1262) on J2. Pins are the wiring, not
  * settings.h, because settings.h has no SPI entries for this board.
  *
  * WARNING: on the XIAO these five collide with the INA228 alerts and the mux
- * (GPIO4=ALERT2, 5=ALERT3, 6=Mux_S1, 7=Mux_S2). This wiring is the Feather
+ * (GPIO4=ALERT2, 5=ALERT3, 6=Mux_S1, 7=Mux_S2). This wiring is the N16R8 clone
  * bring-up map; pick one or the other per board before enabling both. */
 static constexpr int8_t SHUNTADC_SCLK = 4, SHUNTADC_DIN = 5, SHUNTADC_DOUT = 6,
                         SHUNTADC_NCS = 7, SHUNTADC_START = 16;
 
 Ads1262ShuntAdc shuntAdc;
-/* Input side: u from J5 (VIN), i from J3 (IIN). shuntOhm/dividerRatio are 0 =
- * unknown, so u reports raw ADC volts and i reports NAN until they are measured.
- * storageId 5 continues past the existing samplers. */
+/* Shunt current on J3 (IIN, PAIR_CH0), SINGLE-PAIR: uPair = PAIR_NONE parks the
+ * mux on CH0 so it never moves. That is the configuration the filter choice in
+ * ads1262.h assumes -- a mux change costs td(STDR) (~104 ms chopped) per sample,
+ * and parking is what lets FIR @ 20 SPS actually run at its 19.15 SPS.
+ *
+ * There is consequently NO voltage channel: u carries the raw shunt volts and p
+ * is pinned to 0. Give it a uPair (J5 = PAIR_CH2, the old wiring) once a divider
+ * is actually fitted there, and set dividerRatio at the same time.
+ *
+ * shuntOhm 2 mOhm: sized for 14 A => 28 mV, 80% of the 35 mV input window note N8
+ * derives from G=32, leaving headroom for transients. Nominal, NOT calibrated --
+ * gain error is whatever the resistor's tolerance is until it is measured against
+ * a reference.
+ *
+ * storageId 12 continues past the existing samplers. */
 PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
-                                 Ads1262ShuntAdc::PAIR_CH2, Ads1262ShuntAdc::PAIR_CH0,
-                                 /* shuntOhm, dividerRatio: 0 = unknown, so u is raw ADC
-                                  * volts and i is NAN until they are measured. */
-                                 0.0f, 0.0f,
+                                 Ads1262ShuntAdc::PAIR_NONE, Ads1262ShuntAdc::PAIR_CH0,
+                                 /* shuntOhm = 2 mOhm nominal; dividerRatio 0 = no voltage
+                                  * channel, so u stays raw ADC volts. */
+                                 0.002f, 0.0f,
                                  /* storageId is a namespace shared by EVERY registered
                                   * sampler -- it indexes the EEPROM calibration slot
                                   * (settings.h: 16 + id*8). Taken: 0 (ADS/ADS131),
@@ -74,7 +94,13 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
                                   * TMP117 and would have silently shared its calibration. */
                                  12,
                                  SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
-                                 SHUNTADC_NCS, SHUNTADC_START};
+                                 SHUNTADC_NCS, SHUNTADC_START,
+                                 /* reportDieTemp: this is now the only ADS1262
+                                  * measurement channel registered, so nothing else
+                                  * would carry the die temperature -- and it is the
+                                  * x-axis for the offset drift the shunt sizing
+                                  * depends on. T read nan before this was set. */
+                                 true};
 
 /* Offset-drift characterisation: the ADC's INTERNAL short with chop OFF,
  * streamed through the normal sampler path. MUTUALLY EXCLUSIVE with shuntAdcIn
@@ -259,15 +285,24 @@ void setup(void) {
 
     ESP_LOGI("main", "SmartShunt ESP32-S3 started");
 
-    /* SHUNT_ADC_ONLY: the ADS1262 bring-up board on an Adafruit Feather ESP32-S3.
+    // Before initAll(): the prefix is baked into each EnergyCounter's name there.
+    boardPrefixLoad();
+    boardPrefixLogState();
+
+    /* SHUNT_ADC_ONLY: the ADS1262 bring-up board on an OTRONIC ESP32-S3 N16R8 clone.
      * settings.h hardcodes `#define XIAO_ESP32S3 1`, so settings_t always carries
      * the XIAO pin map -- where I2C is GPIO3/2 and the INA228 alerts and mux sit
      * on GPIO4/5/6/7, exactly the pins the ADS1262 SPI uses here. There are no
-     * INA228s or TMP117s on the Feather anyway, so the whole I2C side is skipped
-     * rather than repinned. */
-#ifndef SHUNT_ADC_ONLY
-    Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, 400000UL);
-#endif
+     * INA228s on the clone, so the mux/INA side stays skipped -- but there ARE
+     * TMP117s, so settings.h now carries a SHUNT_ADC_ONLY pin branch (I2C on
+     * GPIO11/12, alerts and mux at 255) and the bus is brought up on both builds. */
+
+    /* Physical-layer check while the pins are still plain GPIOs. Not fatal: on the
+     * shunt-adc board the ADS1262 is on SPI and must come up even with the I2C
+     * harness unplugged. See i2c_check_pins() for what it can and cannot see. */
+    i2c_check_pins(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL);
+
+    Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
 
     if (!disableWifi) {
         connect_wifi_async_once();
@@ -292,16 +327,41 @@ void setup(void) {
     samplers.add("ESP32_INA228", &ina228_40);
     samplers.add("ESP32_INA228_2A", &mux_chA);
     samplers.add("ESP32_INA228_2B", &mux_chB);
-    samplers.add("TMP117", &tmp117);
-    samplers.add("TMP117_2", &tmp117_49);
 #endif
+    /* Outside the SHUNT_ADC_ONLY guard: the N16R8 clone carries TMP117s even though it
+     * carries no INA228s.
+     *
+     * The name is the InfluxDB series key (the collector tags points with
+     * "BLE_" + this name), so it has to be unique across every board reporting into
+     * the same database -- not just within one board. The XIAO already publishes
+     * BLE_TMP117 and BLE_TMP117_2, so the clone's parts take an SA_ (shunt-adc)
+     * prefix; the two boards can then never collide even if they populate the same
+     * addresses. The XIAO keeps its historical names, so no existing series forks.
+     *
+     * Address-suffixed rather than ordinal: with parts appearing and disappearing by
+     * strap, "TMP117_3" is not stable across boots, whereas the address is the one
+     * name that always identifies the same physical part.
+     *
+     * The board half of the identity is NOT here: SamplerRegistry prepends the
+     * NVS-stored board prefix (board_prefix.h), so the same binary gives each unit
+     * distinct series without a per-unit build.
+     *
+     * LENGTH: WireSample::dev is 16 bytes and name.copy(ws.dev, 16) TRUNCATES, so
+     * two names differing only past character 16 become one series. "t17" rather
+     * than "TMP117" buys the room for a prefix: "ftr_t17_48" is 10. Registration
+     * checks the composed names for exactly this, so a bad prefix is reported at
+     * boot rather than discovered in the database. */
+    samplers.add("t17_48", &tmp117);
+    samplers.add("t17_49", &tmp117_49);
+    samplers.add("t17_4A", &tmp117_4a);
+    samplers.add("t17_4B", &tmp117_4b);
     /* ONE of these two, never both: they share the ADS1262 and configure it
      * differently. SHUNT_ADC_ZERO is the offset-drift characterisation run
-     * (internal short, chop off); SHUNT_ADC is normal measurement. */
+     * (internal short, chop ON since 2026-08-15); SHUNT_ADC is normal measurement. */
     /* The bridge prefixes the sampler name with "BLE_", so these appear as
      * BLE_SHUNT_ADC and BLE_SHUNT_ADC_ZERO. Extra channels: SHUNT_ADC_ch1, ... */
-    //samplers.add("SHUNT_ADC", &shuntAdcIn);
-    samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
+    samplers.add("SHUNT_ADC", &shuntAdcIn);
+    //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);
 
 #ifndef SHUNT_ADC_ONLY

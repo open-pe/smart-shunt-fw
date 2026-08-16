@@ -19,12 +19,12 @@ constexpr uint8_t AUX_PIN = PA8;
  * MCU sheet is an ESP-12F), not the ESP32-S3 module the firmware runs on.
  *
  * The pin FLOATS from reset until auxBegin() runs. Nothing in firmware can cover that window, so the
- * driver gate needs an external pulldown to keep the load off through boot.
+ * P-ch MOSFET gate needs an external pullup to keep the load off through boot.
  */
 
 constexpr gpio_num_t AUX_PIN = GPIO_NUM_9;
 #endif
-constexpr bool AUX_ACTIVE_HIGH = true;
+constexpr bool AUX_ACTIVE_HIGH = false; // P-ch MOSFET gate: LOW = on, HIGH = off
 
 // Raw EEPROM/NVS byte offsets -- deliberately NOT slot indices. Calibration occupies bytes 16..111
 // today and its assert(ecIndex <= 16) reserves through 151, and the slot scheme is already

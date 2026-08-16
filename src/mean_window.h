@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <limits>
 
 struct MeanWindow {
@@ -7,11 +8,46 @@ struct MeanWindow {
   float max;
   uint32_t num;
 
+  /// Mean of the finite samples in the window, NAN when there were none (0/0).
+  ///
+  /// THERE IS DELIBERATELY NO MINIMUM-COUNT FLOOR, and that is a decision worth
+  /// recording because the obvious "fix" is actively harmful here.
+  ///
+  /// The published mean's noise falls as 1/sqrt(num), and num is not reported
+  /// anywhere on the wire -- WireSample and Sample are both exactly full at 64
+  /// and 32 bytes, pinned by static_assert in main_esp32.cpp. So a window backed
+  /// by ONE conversion is indistinguishable downstream from one backed by eight,
+  /// and any noise figure quoted per published point must therefore be the
+  /// SINGLE-CONVERSION figure, not the averaged one. For the ADS1262 shunt
+  /// channel that is 0.765 ppm of 28 mV rather than the nominal 0.27 -- see the
+  /// noise discussion in adc/ads1262.h.
+  ///
+  /// Flooring num would not fix that; it would delete data. This window is
+  /// shared by every sampler, and their rates differ by an order of magnitude
+  /// against a fixed 400 ms window: the chopped sinc4 zero channel produces 2.5
+  /// conversions per second, i.e. ONE per window, so a floor of even 2 would
+  /// silence it completely and permanently. A check that discards a legitimate
+  /// slow channel because it cannot certify the fast one's confidence is the
+  /// same anti-guard shape as returning "fine" when the input is unevaluable --
+  /// it just fails in the other direction.
+  ///
+  /// If per-point confidence is ever actually needed downstream, the fix is to
+  /// carry num on the wire, which is a cross-repo format change to agree with
+  /// the collector -- not a floor here.
   float getMean() const {
     return sum / num;
   }
+  /// NAN when no finite sample was ever added, NOT the lowest() sentinel.
+  ///
+  /// add() compares with `x > max`, which is false for NaN, so a window fed only
+  /// NaN keeps the sentinel. Returning it raw published I_max/U_max as
+  /// -3.4028235e38 for every temperature-only sampler: finite, so
+  /// Point::addField() did not drop it the way it drops the NaN mean, and InfluxDB
+  /// got -3.4e38 as a real reading -- enough to wreck any auto-scaled dashboard
+  /// sharing the measurement. The sentinel means "no data", so say NAN and let the
+  /// existing NaN handling downstream drop the field.
   float getMax() const {
-      return max;
+      return max == std::numeric_limits<float>::lowest() ? NAN : max;
   }
 
   void clear() {
@@ -19,7 +55,24 @@ struct MeanWindow {
     num = 0.f;
     max = std::numeric_limits<float>::lowest();
   }
+  /// Non-finite input is IGNORED, not accumulated.
+  ///
+  /// `sum += NAN` poisons the entire window: one failed read out of eight made the
+  /// whole 400 ms mean NaN and discarded seven good samples with it. That is how a
+  /// TMP117 that missed a single I2C read published a summary with no usable field
+  /// in it at all -- the collector then emitted line protocol with an empty field
+  /// section, which InfluxDB rejects outright.
+  ///
+  /// A dropout is missing evidence about ONE sample. It is not evidence about the
+  /// other samples in the window, and it must not delete them.
+  ///
+  /// A window that saw no finite sample at all still reports NAN, through 0/0 in
+  /// getMean() -- "nothing was measured" must never come out as 0. Samplers that
+  /// legitimately have no value for a channel (a temperature-only part has no I or
+  /// U) keep reporting NAN for it exactly as before, since every sample they add is
+  /// non-finite and num stays 0.
   void add(float x) {
+    if (!std::isfinite(x)) return;
     sum += x;
     if(x > max) max = x;
     ++num;

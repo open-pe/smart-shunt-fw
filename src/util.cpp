@@ -181,6 +181,18 @@ void influxWritePointUDP(const Point &p, bool flush) {
     auto port = 8086;
 
     auto lp = p.toLineProtocol();
+
+    /* The wire format, and the only way to see it: these points go out over UDP,
+     * which is fire-and-forget -- the device cannot tell a delivered point from one
+     * that vanished, so a silent telemetry path looks identical to a working one.
+     * ESP_LOGD is compiled out at the default CORE_DEBUG_LEVEL=3, so this costs
+     * nothing normally; rebuild with -DCORE_DEBUG_LEVEL=4 to inspect what is
+     * actually being sent. Worth checking when a sampler publishes only some
+     * fields: Point::addField(float) DROPS NaN silently, so a temperature-only
+     * sampler emits a point carrying T with no U/I/P -- correct, but it means a
+     * missing field is not by itself evidence of a bug. */
+    ESP_LOGD("tele", "influx lp: %s", lp.c_str());
+
     if (influxMsgBuf.length() + lp.length() >= MTU) {
         udpFlushString(influxdbhost, port, influxMsgBuf);
     }

@@ -110,6 +110,23 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             disableWifi = true;
             g_wifiRequest = 0;
             UART_LOG("WiFi disconnect requested (async via wifiTask)");
+        } else if (inp == "board-prefix" || inp.startsWith("board-prefix ")) {
+            /* Per-board identity, persisted in NVS. Deliberately requires a reset to
+             * take effect: sampler names are baked into the EnergyCounters at
+             * initAll(), and renaming a live counter would split its series
+             * mid-flight and orphan the energy total accumulated under the old
+             * name. */
+            String v = inp.substring(strlen("board-prefix"));
+            v.trim();
+            if (v.length() == 0) {
+                const char *p = boardPrefixGet();
+                UART_LOG("board-prefix = '%s'%s", p, p[0] ? "" : " (unset -- names are unprefixed)");
+            } else if (boardPrefixSet(v.c_str())) {
+                UART_LOG("board-prefix = '%s', reset to apply", boardPrefixGet());
+            } else {
+                UART_LOG("board-prefix rejected (1..%u chars of [A-Za-z0-9_])",
+                         (unsigned) BOARD_PREFIX_MAX);
+            }
         } else if (inp == "bootinfo") {
             const esp_partition_t *running = esp_ota_get_running_partition();
             esp_ota_img_states_t st;
@@ -139,6 +156,9 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
 #ifndef TARGET_STM32H5
             UART_LOG("bootinfo              running slot + OTA verify state");
             UART_LOG("wifi on|off           enable/disable WiFi + InfluxDB telemetry");
+#endif
+            UART_LOG("board-prefix [<name>] get/set this board's series-name prefix (NVS, needs reset)");
+#ifndef TARGET_STM32H5
 #endif
         } else {
             UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());
