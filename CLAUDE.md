@@ -32,6 +32,14 @@ gone — old transcripts still name them.)
 - Opening the port with default DTR/RTS can leave the board wedged and silent. If it goes
   quiet and re-flashing also fails, it needs a physical **BOOT + RESET** to re-enter download
   mode — ask, don't try to fix it over the wire.
+- **Before concluding "the board is silent", run `lsof /dev/cu.usbmodem1101`.** A leftover
+  reader — a capture script that outlived its loop, a backgrounded task that was stopped but
+  not reaped — keeps the port open and *drains* it, so a second reader gets zero bytes. The
+  symptom is indistinguishable from a wedged board: no output, no boot banner, nothing. Kill
+  the holding PID and read again before reaching for BOOT + RESET or a reflash. (Seen twice in
+  one session; each time it sent the diagnosis down the wrong path, once as far as blaming an
+  unrelated code change for a boot loop that was not happening.) `lsof` showing a non-zero
+  `0t<offset>` on the device is the tell — that process has consumed that many bytes.
 
 ## Data plumbing (end to end)
 
