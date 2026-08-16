@@ -60,7 +60,7 @@ PowerSampler_TMP117 tmp117_4b{0x4B};
  * settings.h, because settings.h has no SPI entries for this board.
  *
  * WARNING: on the XIAO these five collide with the INA228 alerts and the mux
- * (GPIO4=ALERT2, 5=ALERT3, 6=Mux_S1, 7=Mux_S2). This wiring is the Feather
+ * (GPIO4=ALERT2, 5=ALERT3, 6=Mux_S1, 7=Mux_S2). This wiring is the N16R8 clone
  * bring-up map; pick one or the other per board before enabling both. */
 static constexpr int8_t SHUNTADC_SCLK = 4, SHUNTADC_DIN = 5, SHUNTADC_DOUT = 6,
                         SHUNTADC_NCS = 7, SHUNTADC_START = 16;
@@ -271,11 +271,11 @@ void setup(void) {
     boardPrefixLoad();
     boardPrefixLogState();
 
-    /* SHUNT_ADC_ONLY: the ADS1262 bring-up board on an Adafruit Feather ESP32-S3.
+    /* SHUNT_ADC_ONLY: the ADS1262 bring-up board on an OTRONIC ESP32-S3 N16R8 clone.
      * settings.h hardcodes `#define XIAO_ESP32S3 1`, so settings_t always carries
      * the XIAO pin map -- where I2C is GPIO3/2 and the INA228 alerts and mux sit
      * on GPIO4/5/6/7, exactly the pins the ADS1262 SPI uses here. There are no
-     * INA228s on the Feather, so the mux/INA side stays skipped -- but there ARE
+     * INA228s on the clone, so the mux/INA side stays skipped -- but there ARE
      * TMP117s, so settings.h now carries a SHUNT_ADC_ONLY pin branch (I2C on
      * GPIO11/12, alerts and mux at 255) and the bus is brought up on both builds. */
 
@@ -310,13 +310,13 @@ void setup(void) {
     samplers.add("ESP32_INA228_2A", &mux_chA);
     samplers.add("ESP32_INA228_2B", &mux_chB);
 #endif
-    /* Outside the SHUNT_ADC_ONLY guard: the Feather carries TMP117s even though it
+    /* Outside the SHUNT_ADC_ONLY guard: the N16R8 clone carries TMP117s even though it
      * carries no INA228s.
      *
      * The name is the InfluxDB series key (the collector tags points with
      * "BLE_" + this name), so it has to be unique across every board reporting into
      * the same database -- not just within one board. The XIAO already publishes
-     * BLE_TMP117 and BLE_TMP117_2, so the Feather's parts take an SA_ (shunt-adc)
+     * BLE_TMP117 and BLE_TMP117_2, so the clone's parts take an SA_ (shunt-adc)
      * prefix; the two boards can then never collide even if they populate the same
      * addresses. The XIAO keeps its historical names, so no existing series forks.
      *

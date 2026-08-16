@@ -150,6 +150,22 @@ public:
     volatile uint16_t connHandle = 0;
     volatile bool haveConn = false;
 
+#ifdef BLE_STATUS_NEOPIXEL_PIN
+    // Minimum nonzero WS2812 channel value: visible status with the least light.
+    static constexpr uint8_t BLE_STATUS_BLUE_BRIGHTNESS = 1;
+    /// -1 forces begin() to transmit black once; afterward the WS2812 only needs
+    /// another frame when the displayed connection state changes.
+    int8_t connectionLedState = -1;
+
+    void updateConnectionLed(bool connected) {
+        const int8_t next = connected ? 1 : 0;
+        if (connectionLedState == next) return;
+        rgbLedWrite(BLE_STATUS_NEOPIXEL_PIN, 0, 0,
+                    connected ? BLE_STATUS_BLUE_BRIGHTNESS : 0);
+        connectionLedState = next;
+    }
+#endif
+
     /// Pending connection-parameter change, applied from the app task. NOT from onConnect: issuing
     /// a device-initiated LL update synchronously inside the connect callback trips a controller
     /// assert (lld_con.c:3275) -- fugu paid for that one.
@@ -273,6 +289,10 @@ public:
         // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/bluetooth/esp_gap_ble.html
         //BLEDevice::startAdvertising();
         ESP_LOGI("ble", "BLE server started");
+
+#ifdef BLE_STATUS_NEOPIXEL_PIN
+        updateConnectionLed(false);
+#endif
     }
 
     /*
@@ -405,6 +425,10 @@ public:
         }
 
         drainOtaTx();
+
+#ifdef BLE_STATUS_NEOPIXEL_PIN
+        updateConnectionLed(haveConn);
+#endif
     }
 
     /// Push queued OTA status bytes out with real backpressure. A failed notify means NimBLE's mbuf

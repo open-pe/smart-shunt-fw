@@ -44,7 +44,7 @@ struct SamplerRegistry {
         }
         /* Scan on ANY failure, not only on a total wipeout. The old `counters.empty()`
          * gate meant a board with one working SPI sampler stayed silent while every
-         * I2C part on it failed -- exactly the Feather case, where four TMP117s
+         * I2C part on it failed -- exactly the N16R8 clone case, where four TMP117s
          * failed and the ADS1262 counters kept the condition invisible. A sampler
          * that did not come up is worth a bus dump even if its neighbours did. */
         if (failed) {

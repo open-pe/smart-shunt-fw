@@ -1774,7 +1774,7 @@ private:
         /* Publish whatever this measurement accumulated. diag() returns
          * diagPublished_, which until now was latched ONLY inside pump() -- the
          * multi-pair scan, which this build never calls (shuntAdcIn is not
-         * registered, and feather_s3 compiles with SHUNT_ADC_ONLY). Every reason
+         * registered, and esp32s3_n16r8 compiles with SHUNT_ADC_ONLY). Every reason
          * raised on the zero-mode path, including DIAG_CLOCK_DEGRADED and
          * DIAG_DEVICE_RESET, therefore never reached a published Sample. */
         diagPublished_ = diag_;

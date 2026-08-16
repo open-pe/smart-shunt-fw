@@ -3,7 +3,7 @@
 
 #include "sampling.h"
 #include "util.h"
-//#include "../../.pio/libdeps/adafruit_feather_esp32s3/ADS1220_WE/src/ADS1220_WE.h"
+//#include "../../.pio/libdeps/esp32s3_n16r8/ADS1220_WE/src/ADS1220_WE.h"
 
 
 void IRAM_ATTR ads1220_alert();

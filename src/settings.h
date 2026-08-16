@@ -63,12 +63,12 @@ static bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
 
 struct settings_t {
 #ifdef SHUNT_ADC_ONLY
-    /* Adafruit Feather ESP32-S3 carrying the pwr-metering shunt-adc board.  This
+    /* OTRONIC ESP32-S3 N16R8 clone carrying the pwr-metering shunt-adc board. This
      * branch exists because `#define XIAO_ESP32S3 1` above is unconditional, so
-     * without it a Feather build silently inherits the XIAO map -- I2C on GPIO3/2
+     * without it this clone build silently inherits the XIAO map -- I2C on GPIO3/2
      * and the alerts/mux on GPIO4/5/6/7, which are the ADS1262 SPI pins here.
      *
-     * I2C is GPIO11/12 (Feather D11/D12).  NOT 9/10: GPIO9 is AUX_PIN
+     * I2C is GPIO11/12. NOT 9/10: GPIO9 is AUX_PIN
      * (aux_switch.h), driven push-pull by auxBegin() before Wire.begin() and held
      * through deep sleep, which would sit on SDA.  Clear of the ADS1262 wiring
      * (SHUNTADC_* in main_esp32.cpp: 4/5/6/7/16) as well.
