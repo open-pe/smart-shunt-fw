@@ -155,12 +155,22 @@ private:
     double Energy = 0; //Wh
     float LastP = 0.0f;
 
+    /// Has ANY finite interval gone into Energy? Until one has, E is unmeasured, not zero.
+    /// Energy's initial 0 is otherwise indistinguishable from a real total of zero, which is
+    /// exactly the "absence of evidence encoded as absence of the quantity" this file is
+    /// fixing elsewhere. A current-only INA228 never sets this, and so never publishes E.
+    bool energyValid = false;
+
     /// Intervals left out of the E integral because an endpoint was not finite, and how much
     /// wall time they add up to. Kept so a total with a hole in it can be told from a complete
     /// one -- the alternative to poisoning E with NaN is omitting time, and that has to be
     /// visible rather than merely quieter.
-    unsigned long nUnmeasured = 0;
-    unsigned long long unmeasuredUs = 0;
+    ///
+    /// Both 32-bit deliberately: they are written from the real-time task and cleared by
+    /// reset() from the app task, and an aligned 32-bit store cannot tear on these MCUs the
+    /// way a 64-bit one can. Milliseconds, so the range is still ~49 days of unmeasured time.
+    uint32_t nUnmeasured = 0;
+    uint32_t unmeasuredMs = 0;
 
     float TotalCharge = 0; //Ah
     float LastI = 0.0f;
@@ -266,18 +276,31 @@ public:
                  * we could not measure is unknown, and carrying the running total forward
                  * says exactly that -- where NaN throws away everything correctly measured
                  * BEFORE the dropout as well. Skipped time is counted, not swallowed, so a
-                 * total quietly missing a chunk of its integration window can be seen. */
+                 * total quietly missing a chunk of its integration window can be seen.
+                 *
+                 * energyValid is what keeps the skip from becoming the very lie this file
+                 * is fixing. Energy starts at 0, so "every interval was skipped" and "the
+                 * load drew nothing" would otherwise both publish E=0. That is not
+                 * hypothetical: the INA228 boards default to CURRENT-ONLY (channelState
+                 * .vbus=false, ina228.h), so u is NAN, p() is NAN, and every interval they
+                 * ever integrate is skipped. Publishing E=0 for them would invent a
+                 * measurement out of a channel that cannot produce one. E stays NAN until
+                 * at least one finite interval has actually gone into it.
+                 *
+                 * NOTHING IS LOGGED HERE. This runs in the real-time sampling task, and a
+                 * channel with no voltage hits this branch on EVERY sample -- at the
+                 * INA228's ~120 Hz a rate-limited line still means a UART write every few
+                 * seconds, forever, in the hot path. The counters are reported from
+                 * summary()'s print instead, which runs on the app task. */
                 const float e_step = (LastP + P) * 0.5f * dt_h;
                 if (std::isfinite(e_step)) {
                     Energy += (double) e_step;
+                    energyValid = true;
                 } else {
-                    unmeasuredUs += dt_us;
-                    if (++nUnmeasured == 1 || (nUnmeasured % 1000) == 0)
-                        ESP_LOGW("ec", "%s: no finite power for %u interval(s), %.1f s not "
-                                       "integrated into E (E itself is unaffected)",
-                                 name.c_str(), (unsigned) nUnmeasured, unmeasuredUs * 1e-6);
+                    ++nUnmeasured;
+                    unmeasuredMs += (uint32_t) (dt_us / 1000u);
                 }
-                s.e = (float) Energy;
+                s.e = energyValid ? (float) Energy : NAN;
 
                 const float q_step = (LastI + s.i) * 0.5f * dt_h;
                 if (std::isfinite(q_step)) TotalCharge += (double) q_step;
@@ -286,7 +309,10 @@ public:
                 if (dt_us > maxDt)
                     maxDt = dt_us;
             } else {
-                s.e = 0.0f;
+                // First sample: there is no preceding interval, so no energy has been
+                // integrated. NAN, not 0.0f -- the old 0 asserted a measured zero before
+                // anything had been measured at all.
+                s.e = NAN;
                 startTime = nowTime;
             }
 
@@ -373,7 +399,10 @@ public:
     WireSample summary(unsigned long dt_us, bool print, bool &outNewSamples) {
         // capture
         auto nSamples = NumSamples;
-        auto energy = Energy;
+        // NAN, not the raw 0, until a finite interval has actually been integrated -- see
+        // energyValid. A current-only INA228 has no power channel at all and must publish no
+        // energy, rather than a zero that reads like a measured one.
+        const float energy = energyValid ? (float) Energy : NAN;
         float i_max = winPoint.I.getMax(), u_max = winPoint.U.getMax();
         float i_mean = winPoint.I.pop(), u_mean = winPoint.U.pop(), p_mean = winPoint.P.pop();
         float temp_mean = winPoint.Temp.pop();
@@ -416,6 +445,16 @@ public:
                      SiFmt((float) energy, "Wh").c_str(),
                      winPrint.Temp.pop(), nSamples, sps, maxDt * 1e-3f);
 
+            /* Report the hole in E here, on the APP task, rather than from the sampling
+             * loop that produces it: a channel with no voltage skips every interval, so a
+             * rate-limited warning down there would be a UART write every few seconds
+             * forever, in the real-time path. Printed only when there is something to say,
+             * and only when E is actually a number -- an unmeasured E is already NAN on the
+             * wire and does not need explaining as a gap as well. */
+            if (nUnmeasured && energyValid)
+                UART_LOG("%s   E excludes %lu interval(s), %.1f s of unmeasurable power",
+                         name.c_str(), (unsigned long) nUnmeasured, unmeasuredMs * 1e-3f);
+
             // Serial0.print(", T=");
             // Serial0.print((nowTime - startTime) * 1e-6, 1);
             // Serial0.print("s");
@@ -437,9 +476,16 @@ public:
         NSamplesLastSummary = 0;
 
         Energy = 0;
+        energyValid = false;
         LastP = 0.0f;
         nUnmeasured = 0;
-        unmeasuredUs = 0;
+        unmeasuredMs = 0;
+
+        // Cleared with Energy, not left running. They are the other half of the same
+        // integration and a `reset` that zeroed one while the other kept accumulating from
+        // before the reset would make the pair silently inconsistent.
+        TotalCharge = 0.0f;
+        LastI = 0.0f;
 
         startTime = 0;
         lastTime = 0;
