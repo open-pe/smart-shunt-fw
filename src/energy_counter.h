@@ -89,6 +89,22 @@ struct WireSample {
             point.addField("P", data.p_, 7);
             point.addField("E", data.e, 4);
             point.addField("T", data.temp, 2);
+            /* The DIAGNOSTIC, which this path dropped while the BLE collector has
+             * always published it -- so the two routes to the same database
+             * disagreed about whether a fault had been reported at all.
+             *
+             * It also rescues the degenerate point. A sample that says "not
+             * measured, and here is why" carries NaN in every measurement field,
+             * addField drops NaN silently, and the result was a measurement, a
+             * tag and a timestamp with NO FIELDS -- which InfluxDB rejects with a
+             * 400. The one case where the point matters most was the one case it
+             * could not be written. `diag` is an integer and always present, so
+             * a fault sample now always has at least one field.
+             *
+             * Written unconditionally rather than only when non-zero: a field
+             * that appears only during faults makes "no diag field" ambiguous
+             * between healthy and not-reported. */
+            point.addField("diag", (int) diag);
             /*if (maxDt > maxDtReported) {
                 point.addField("dt_max", (float) maxDt * 1e-3f, 2);
                 maxDtReported = maxDt;

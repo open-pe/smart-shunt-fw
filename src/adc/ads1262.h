@@ -336,7 +336,17 @@ public:
     static constexpr uint8_t DIAG_CLOCK_DEGRADED = 7;
     /// Input drove the PGA out of range during the conversion: PGAD_ALM
     /// (differential over-range) or PGAH/PGAL_ALM (PGA output within 0.2 V of a
-    /// rail). At 2 mOhm and G=32 this is the ~17.5 A full-scale wall.
+    /// rail).
+    ///
+    /// NOT a current threshold, and emphatically not the 17.5 A this comment
+    /// used to claim. 17.5 A is 35 mV, the DESIGN point note N8 sizes the input
+    /// window from -- a choice about the board, not a wall in the part. The
+    /// hardware limits are ~39.06 A (digital clipping) and ~41.02 A (PGAD_ALM),
+    /// with a blind band between them where the output saturates and no alarm
+    /// fires; see the full derivation at the over-range check in pump(). And
+    /// PGAH/PGAL are COMMON-MODE alarms that can fire at any current, including
+    /// none. Sizing a bench test off this constant is how the earlier figure was
+    /// going to waste someone's afternoon.
     static constexpr uint8_t DIAG_PGA_RANGE = 8;
     /// The running clock estimate is too old to stand behind. NOT "the clock is
     /// bad" -- it is "nobody can currently say", which is a different report and
@@ -439,9 +449,12 @@ private:
     /* When set, the mux stays on this pair instead of scanning. Costs no restart
      * between conversions, so all of the time budget goes into averaging. */
     int8_t onlyPair_ = -1;
-    bool scanningFacade_ = false;  ///< a facade needs the full mux scan; see noteScanningFacade()
+    bool scanningFacade_ = false;      ///< a facade needs the full mux scan
+    bool zeroFacade_ = false;          ///< the zero-drift facade owns the part
+    bool measurementFacade_ = false;   ///< a shunt-measurement facade owns the part
     uint32_t sinceRestart_ = 0;   ///< conversions read since the last selectPair()
     uint32_t lastRangeLogMs_ = 0;  ///< rate-limits the PGA range error; it fires per conversion
+    bool rangeLogged_ = false;     ///< so the FIRST one is never rate-limited away
     uint32_t notReadyReads_ = 0;  ///< all-zero "nothing yet" frames; ~1 per restart is normal
     uint32_t generation_ = 0;      ///< bumped when all four pairs have a reading
 
@@ -677,6 +690,15 @@ public:
     /// clear would only ever be wrong.
     void noteScanningFacade() { scanningFacade_ = true; }
     bool hasScanningFacade() const { return scanningFacade_; }
+
+    /// Ownership claims, so two facades that cannot coexist refuse LOUDLY at
+    /// init() instead of quietly corrupting each other's readings. Only ever
+    /// set, never cleared: facades are static objects that live for the whole
+    /// run, so a clear could only ever be wrong.
+    void noteZeroFacade() { zeroFacade_ = true; }
+    bool hasZeroFacade() const { return zeroFacade_; }
+    void noteMeasurementFacade() { measurementFacade_ = true; }
+    bool hasMeasurementFacade() const { return measurementFacade_; }
 
     /// Sample standard deviation of the conversions behind volts(p). This is the
     /// measured noise, not an assumed one -- use it to choose AVG_N.
@@ -1859,16 +1881,26 @@ public:
          * both alarms still clear. 0.1 V of PGA output at G=32 is 3.1 mV of
          * input, so the band is not narrow. */
         if (status & (STATUS_PGAD_ALM | STATUS_PGAH_ALM | STATUS_PGAL_ALM)) {
-            diag_ = encodeDiag(DIAG_PGA_RANGE, count);
-            diagPublished_ = diag_;
+            /* raiseFault(), not a bare diag_ assignment: the latch-on-scan-complete
+             * scheme cannot carry a fault that the very next good conversion
+             * erases. finishPairAndAdvance() copies diag_ (now 0) over
+             * diagPublished_ ~50 ms later, so a ONE-CONVERSION excursion was gone
+             * long before the 30 s health channel next looked. */
+            raiseFault(DIAG_PGA_RANGE, count);
             volts_[pair] = NAN;
             sd_[pair] = NAN;
             sum_ = sumsq_ = 0;
             nAvg_ = 0;
             /* Rate-limited: this fires per conversion, ~19/s at FIR 20 SPS, and a
              * sustained excursion drowned every other line on the console. */
-            if ((uint32_t) (millis() - lastRangeLogMs_) >= RANGE_LOG_INTERVAL_MS) {
+            /* rangeLogged_ guards the FIRST report: lastRangeLogMs_ starts at 0, so an
+             * excursion inside the first RANGE_LOG_INTERVAL_MS after boot compares
+             * millis() against 0 and is silently rate-limited away -- exactly the window
+             * where a miswired bench is most likely to be over-range. */
+            if (!rangeLogged_ ||
+                (uint32_t) (millis() - lastRangeLogMs_) >= RANGE_LOG_INTERVAL_MS) {
                 lastRangeLogMs_ = millis();
+                rangeLogged_ = true;
                 const bool diff = (status & STATUS_PGAD_ALM) != 0;
                 ESP_LOGE("ads1262", "PGA %s (STATUS=0x%02x:%s%s%s) -- %s; discarding",
                          diff ? "DIFFERENTIAL over-range" : "ABSOLUTE range violation", status,
@@ -2467,7 +2499,22 @@ public:
     /// otherwise pin the board permanently awake.
     bool measuresPower() const override { return false; }
 
-    bool init() override { return dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart); }
+    bool init() override {
+        /* MUTUALLY EXCLUSIVE with any measurement facade, and now enforced rather
+         * than only documented. This facade parks the ADC on its internal short
+         * and leaves it there; a production channel sharing the device would
+         * publish those shorted conversions as plausible shunt current. Both
+         * samplers.add() lines used to be enablable at once with no complaint. */
+        if (dev.hasMeasurementFacade()) {
+            ESP_LOGE("ads1262", "a measurement facade owns this device -- the zero-drift facade "
+                                "parks the ADC on its internal short and cannot share it, "
+                                "refusing to start");
+            return false;
+        }
+        if (!dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart)) return false;
+        dev.noteZeroFacade();
+        return true;
+    }
 
     void startReading() override {}
 
@@ -2635,6 +2682,35 @@ public:
                                 "facade cannot share it, refusing to start");
             return false;
         }
+        /* Two single-pair facades wanting DIFFERENT pairs slipped through both
+         * checks above: the second one is itself PAIR_NONE (so the first check
+         * does not apply) and onlyPair_ is already set (so the second does not
+         * either). It then called setOnlyPair() with its own iPair and silently
+         * took the mux, leaving the first facade reading a pair the hardware no
+         * longer visits -- stale values with fresh timestamps. Two facades on the
+         * SAME pair are fine and deliberately still allowed. */
+        if (uPair == Ads1262ShuntAdc::PAIR_NONE && dev.onlyPair() >= 0 &&
+            dev.onlyPair() != (int8_t) iPair) {
+            ESP_LOGE("ads1262", "device is already parked on pair %d; this facade wants pair %u. "
+                                "One mux cannot serve both -- refusing to start",
+                     (int) dev.onlyPair(), (unsigned) iPair);
+            return false;
+        }
+        /* The ZERO facade reconfigures the part to its internal short and leaves
+         * it there. It is mutually exclusive with any measurement facade, and
+         * until now nothing enforced that: both samplers.add() lines could be
+         * enabled and init() would succeed for both. The production channel would
+         * then publish internal-short conversions as plausible shunt current --
+         * and the conditional restore added for throughput makes that worse, since
+         * production configuration is now only reasserted at temperature
+         * boundaries rather than after every sample. */
+        if (dev.hasZeroFacade()) {
+            ESP_LOGE("ads1262", "the zero-drift facade owns this device (it parks the ADC on its "
+                                "internal short) -- a measurement facade cannot share it, "
+                                "refusing to start");
+            return false;
+        }
+        dev.noteMeasurementFacade();
 
         /* Single-pair mode. Set AFTER init(), which runs the self-test and leaves
          * the part on PAIR_CH0; setting it before would be overwritten. */
@@ -2667,6 +2743,18 @@ public:
             lastReinitMs = now;
             ESP_LOGW("ads1262", "re-initialising after device reset");
             if (!dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart)) return false;
+            /* RE-PARK. init() always programs and records PAIR_CH0, but it does
+             * NOT consult onlyPair_ -- so after a reset the hardware sits on CH0
+             * while onlyPair_ still names whatever this facade asked for. pump()
+             * then writes its readings into volts_[CH0] and this facade goes on
+             * reading volts_[iPair], republishing its last PRE-RESET value with
+             * fresh timestamps until the next temperature boundary happens to
+             * reselect the pair. Stale data wearing a current timestamp is the
+             * worst of the available failures, and it is silent.
+             *
+             * Invisible for iPair == CH0, which is all this build ships, so the
+             * defect was masked by the configuration rather than absent. */
+            if (uPair == Ads1262ShuntAdc::PAIR_NONE) dev.setOnlyPair((int8_t) iPair);
         }
 
         dev.pump();
@@ -2680,7 +2768,39 @@ public:
         const bool singlePair = (uPair == Ads1262ShuntAdc::PAIR_NONE);
         const float vI = dev.volts(iPair);
         const float vU = singlePair ? vI : dev.volts(uPair);
-        if (std::isnan(vU) || std::isnan(vI)) return false;
+
+        /* NaN WITH a diagnostic is a REPORTABLE fault, not "nothing to say".
+         *
+         * The over-range path deliberately writes NAN into volts_ so a clipped
+         * reading can never be published as a current -- but returning false here
+         * then swallowed the reason as well. The scan HAD advanced, so lastGen
+         * was consumed, and the next good conversion cleared diagPublished_ about
+         * 50 ms later. A transient PGA excursion therefore left no trace anywhere
+         * a remote observer could see: the series simply skipped a sample, which
+         * is indistinguishable from an idle board. The health channel could not
+         * cover it either -- it publishes every 30 s, some 600 conversions later.
+         *
+         * So publish the fault as a sample that carries NAN and says why. NaN is
+         * this driver's word for "not measured", which is exactly true of a
+         * clipped conversion, and diag names the cause. Silence, by contrast,
+         * asserts nothing and cannot be distinguished from health.
+         *
+         * NaN with NO diagnostic really is nothing to say -- a pair that has not
+         * produced its first reading yet -- and still returns false. */
+        if (std::isnan(vU) || std::isnan(vI)) {
+            const uint32_t d = dev.diag();
+            if (!d) return false;
+            lastSample.setTimeNow();
+            lastSample.u = NAN;
+            lastSample.i = NAN;
+            /* NAN, not 0. Sample::p() falls back to u*i when p_ is NAN, and both
+             * are NAN here, so p reports "not measured" rather than a confident
+             * zero watts for a conversion that never happened. */
+            lastSample.p_ = NAN;
+            if (reportDieTemp) lastSample.temp = dev.dieTempC();
+            lastSample.diag = d;
+            return true;
+        }
 
         lastSample.setTimeNow();
         lastSample.u = (dividerRatio > 0) ? vU * dividerRatio : vU;
@@ -2692,8 +2812,14 @@ public:
          * dissipation, which is a real quantity but would be logged as "P" and
          * read as load power. Pin it to 0 instead, exactly as the zero channel
          * does: there is no power measurement here, and 0 says so where a
-         * plausible small number would not. */
-        if (singlePair) lastSample.p_ = 0.0f;
+         * plausible small number would not.
+         *
+         * Assigned on BOTH branches, never conditionally. lastSample is a member
+         * that survives between calls, so a p_ written once persists into every
+         * later sample -- a single faulted reading (which sets NAN) would
+         * otherwise leave a scanning channel reporting NAN power forever, and a
+         * single-pair 0 would pin a scanning channel to zero watts. */
+        lastSample.p_ = singlePair ? 0.0f : NAN;
         if (reportDieTemp) lastSample.temp = dev.dieTempC();
         /* Non-consuming: the other facade sharing this device must see the same
          * diagnostic rather than a zero because we got here first. */
@@ -2752,7 +2878,12 @@ public:
     /// generous headroom over the interval so a genuine hang is still caught.
     int64_t stallTimeoutUs() const override { return (int64_t) intervalMs * 3000; }
 
-    bool init() override { return dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart); }
+    bool init() override {
+        /* The health facade drives no conversions of its own and reconfigures
+         * nothing, so it is free to sit alongside whichever measurement channel
+         * is active. It claims no ownership on purpose. */
+        return dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart);
+    }
 
     void startReading() override {}
 
