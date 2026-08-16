@@ -2665,6 +2665,25 @@ public:
             return false;
         }
 
+        /* uPair INDEXES MEMORY TOO, which the sentence above used to deny. It
+         * does not reach INPMUX_FOR[], so it is not a hardware axis -- but
+         * hasData() calls dev.volts(uPair) on every published sample whenever
+         * uPair is not PAIR_NONE, and volts_ is a 4-element array. Anything in
+         * 4..254 therefore reads off the end of it and publishes whatever
+         * happened to be in the adjacent member (sd_[], dieTempC_, ...) as a
+         * voltage: finite, plausible, wrong, and with no diagnostic anywhere.
+         *
+         * PAIR_COUNT itself is the likely value to arrive here, because it is
+         * the natural thing to write for "one past the end" and it sits directly
+         * beside PAIR_NONE in the same enum. Only PAIR_NONE and a real pair are
+         * meaningful, so everything else is refused. */
+        if (uPair >= Ads1262ShuntAdc::PAIR_COUNT && uPair != Ads1262ShuntAdc::PAIR_NONE) {
+            ESP_LOGE("ads1262", "uPair=%u is neither a real pair (0..%u) nor PAIR_NONE; "
+                                "refusing to start rather than index volts_[] out of bounds",
+                     (unsigned) uPair, (unsigned) Ads1262ShuntAdc::PAIR_COUNT - 1);
+            return false;
+        }
+
         /* Single-pair mode is a property of the DEVICE, not of this facade, so
          * two facades sharing one ADS1262 cannot disagree about it. They would
          * not fail loudly if they did: the scanning facade would keep receiving

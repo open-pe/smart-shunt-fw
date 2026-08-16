@@ -8,6 +8,32 @@ struct MeanWindow {
   float max;
   uint32_t num;
 
+  /// Mean of the finite samples in the window, NAN when there were none (0/0).
+  ///
+  /// THERE IS DELIBERATELY NO MINIMUM-COUNT FLOOR, and that is a decision worth
+  /// recording because the obvious "fix" is actively harmful here.
+  ///
+  /// The published mean's noise falls as 1/sqrt(num), and num is not reported
+  /// anywhere on the wire -- WireSample and Sample are both exactly full at 64
+  /// and 32 bytes, pinned by static_assert in main_esp32.cpp. So a window backed
+  /// by ONE conversion is indistinguishable downstream from one backed by eight,
+  /// and any noise figure quoted per published point must therefore be the
+  /// SINGLE-CONVERSION figure, not the averaged one. For the ADS1262 shunt
+  /// channel that is 0.765 ppm of 28 mV rather than the nominal 0.27 -- see the
+  /// noise discussion in adc/ads1262.h.
+  ///
+  /// Flooring num would not fix that; it would delete data. This window is
+  /// shared by every sampler, and their rates differ by an order of magnitude
+  /// against a fixed 400 ms window: the chopped sinc4 zero channel produces 2.5
+  /// conversions per second, i.e. ONE per window, so a floor of even 2 would
+  /// silence it completely and permanently. A check that discards a legitimate
+  /// slow channel because it cannot certify the fast one's confidence is the
+  /// same anti-guard shape as returning "fine" when the input is unevaluable --
+  /// it just fails in the other direction.
+  ///
+  /// If per-point confidence is ever actually needed downstream, the fix is to
+  /// carry num on the wire, which is a cross-repo format change to agree with
+  /// the collector -- not a floor here.
   float getMean() const {
     return sum / num;
   }
