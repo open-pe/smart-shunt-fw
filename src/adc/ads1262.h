@@ -154,16 +154,27 @@ public:
     /// the obvious answer -- sinc4 @ 10 SPS is 2.3x quieter per sample. Chop is
     /// what decides it: Equation 21 makes the chopped rate 1/td(STDR), so sinc4
     /// @ 10 SPS runs at 2.5 SPS (td 400.4 ms), not 10, while FIR's single-cycle
-    /// settling keeps it at 19.15 SPS (td 52.22 ms). Per unit time that is
-    /// 6.9 nV/sqrt(s) for FIR against 8.2 for sinc4 -- FIR wins by 1.19x, and
-    /// the sinc4 advantage only exists with chop OFF. Same reasoning, written
-    /// out with the measurement it came from, in zeroDriftSample().
+    /// settling keeps it at 19.15 SPS (td 52.22 ms).
+    ///
+    /// Table 8-1 is quoted for CHOP OFF, so its numbers must be divided by 1.4
+    /// before they can be used here: "The ADC noise is reduced by a factor of
+    /// 1.4 with chop mode enabled" (sec.8.8). Chopped, per unit time:
+    ///     FIR   @ 20 SPS: (30 nV / 1.4) / sqrt(19.15) = 4.9 nV/sqrt(s)
+    ///     sinc4 @ 10 SPS: (13 nV / 1.4) / sqrt(2.5)   = 5.9 nV/sqrt(s)
+    /// FIR wins by 1.20x. An earlier revision of this comment gave 6.9 against
+    /// 8.2, which is the same calculation with the UNCHOPPED Table 8-1 values --
+    /// wrong in absolute terms, though the ratio survives because the 1.4 is
+    /// common to both. The sinc4 advantage only exists with chop OFF. Same
+    /// reasoning, with the measurement it came from, in zeroDriftSample().
     ///
     /// The price is mains rejection: -95 dB at 50 Hz against sinc4 @ 10 SPS's
     /// -136 (Table 9-6, reproduced under ZERO_MODE1_VALUE). Sized rather than
     /// assumed: -95 dB tolerates 19.7 mV RMS of DIFFERENTIAL 50 Hz pickup before
-    /// it alone consumes a 10 ppm budget on 35 mV, and ~0.4 mV before it even
-    /// reaches the noise floor above. 19.7 mV differential on a twisted Kelvin
+    /// it alone consumes a 10 ppm budget on 35 mV. (A second figure, "~0.4 mV
+    /// before it reaches the noise floor", used to sit here; it does not
+    /// reconstruct from either the chopped or the unchopped floor -- 1.2 mV and
+    /// 1.7 mV respectively -- so it is removed rather than adjusted, its
+    /// derivation being unknown.) 19.7 mV differential on a twisted Kelvin
     /// pair is not a realistic number, so FIR is the right trade here -- but it
     /// is a trade, and it rests on EXTCLK being healthy (note N10).
     static constexpr uint8_t MODE1_VALUE = 0x80;
@@ -209,6 +220,25 @@ public:
     /// Minimum gap between PGA range-alarm error lines. The alarm is latched
     /// per conversion, so an excursion logs ~19x/s and buries everything else.
     static constexpr uint32_t RANGE_LOG_INTERVAL_MS = 1000;
+
+    /// Conversions per production clock-rate window. 32 at the chopped FIR rate
+    /// of 19.15 SPS is ~1.7 s, comfortably inside the 64 conversions between
+    /// temperature reads -- so a window never spans the restart a temperature
+    /// read causes, and never has to model its ~104 ms cost.
+    static constexpr uint16_t RATE_WINDOW_CONVERSIONS = 32;
+
+    /// How long fclkHz() will keep serving a running estimate before calling it
+    /// unverified. A window is ~1.7 s at nominal; a clock at a quarter speed
+    /// still closes one in ~6.7 s, so this is deliberately far above the
+    /// interesting degradations -- it exists for "conversions stopped
+    /// altogether", not for "the clock got slower".
+    ///
+    /// The far tail is the case that matters. As the clock slows the windows get
+    /// longer, and at some point conversions stop arriving at all -- at which
+    /// point a rate-based guard has NOTHING to measure. Without this the last
+    /// good estimate would be served forever, and the guard would go quiet
+    /// exactly when the fault became total.
+    static constexpr uint32_t RATE_STALE_MS = 20000;
 
 
     /// Conversions discarded after ENTERING zero mode, paid once per
@@ -308,6 +338,11 @@ public:
     /// (differential over-range) or PGAH/PGAL_ALM (PGA output within 0.2 V of a
     /// rail). At 2 mOhm and G=32 this is the ~17.5 A full-scale wall.
     static constexpr uint8_t DIAG_PGA_RANGE = 8;
+    /// The running clock estimate is too old to stand behind. NOT "the clock is
+    /// bad" -- it is "nobody can currently say", which is a different report and
+    /// must not be collapsed into either a healthy value or a fault code that
+    /// implies a measurement was made.
+    static constexpr uint8_t DIAG_CLOCK_UNVERIFIED = 9;
 
     /// Fractional deviation of the running fCLK estimate that raises
     /// DIAG_CLOCK_DEGRADED. Wide, because the estimate is derived from only a few
@@ -348,6 +383,30 @@ private:
      * That is a guard that disappears exactly when the fault is real. */
     uint8_t refChop_ = 0xFF, refMode1_ = 0xFF, refDr_ = 0xFF;
     float fclkEstHz_ = NAN;    ///< running estimate; NAN until a reference exists
+
+    /* PRODUCTION-PATH clock tracking. The zero-mode machinery above measures the
+     * conversion rate too, but ONLY inside measureZero() -- and that sampler is
+     * not registered in a measurement build. Retiring the zero channel therefore
+     * silently disarmed the whole clock guard: fclkEstHz_ stayed NAN, fclkHz()
+     * fell back to the boot-time fclkInitHz_, and SHUNT_ADC_HEALTH published
+     * that as the CURRENT clock with a clean diagnostic, indefinitely.
+     *
+     * That is the same failure the comment above describes and worse: on
+     * 2026-08-15 the clock fell to a quarter speed and the channel ran on for
+     * 35 minutes. A guard written for exactly that event was disabled by a
+     * one-line change in main_esp32.cpp, with nothing to say so.
+     *
+     * Same trick as the zero path -- the rate IS the clock, measured for free
+     * from conversions we already take -- but anchored to the production
+     * configuration, which never changes at runtime. So the reference is
+     * captured ONCE and cannot be re-anchored by a temperature read, which is
+     * the drift the zero path had to defend against explicitly. */
+    uint32_t rateWinStartMs_ = 0;   ///< millis() at the first conversion of the window
+    uint16_t rateWinCount_ = 0;     ///< conversions accumulated in the window
+    float prodSpsRef_ = NAN;        ///< production rate when the clock was known good
+    uint32_t lastRateOkMs_ = 0;     ///< millis() of the last completed rate window
+    uint32_t lastStaleLogMs_ = 0;   ///< rate-limits the stale-estimate error line
+    bool rateEverMeasured_ = false; ///< false until the first window closes
     float avddAvss_ = NAN;     ///< refreshed by refreshHealth(), NAN until first success
     float dvdd_ = NAN;
     bool isrAttached = false;      ///< attachInterrupt() is not idempotent; do it once
@@ -393,6 +452,118 @@ private:
      * the scan completes and is READ, not consumed, so both facades see it. */
     uint32_t diag_ = 0;
     uint32_t diagPublished_ = 0;
+
+    /// Raise a fault that ABORTS the conversion, and publish it immediately.
+    ///
+    /// The two-slot scheme latches diag_ into diagPublished_ when a scan
+    /// COMPLETES -- which is exactly wrong for a fault that stops scans from
+    /// completing. A stuck-low MISO is the worked example: every read returns
+    /// all-zero bytes, the checksum test fails, pump() returns early, and
+    /// generation_ never advances. Nothing then ever copies diag_ across, so
+    /// PowerSampler_ShuntAdcHealth kept publishing the LAST GOOD diagnostic
+    /// every 30 s for as long as the fault lasted. The measurement channel goes
+    /// quiet (hasData() gates on generation_), and a quiet channel plus a clean
+    /// health channel is indistinguishable from an idle, healthy board. The
+    /// louder the hardware fault, the more thoroughly it was hidden from the
+    /// only path that leaves the device -- absence of evidence encoding absence
+    /// of the problem, on the one channel a remote observer can see.
+    ///
+    /// Publishing directly is safe against the opposite error (a stale fault
+    /// sticking forever) because a completed scan overwrites diagPublished_
+    /// from diag_, and diag_ is cleared at that point. So a fault that clears
+    /// itself is reported until the next good scan and then goes away on its
+    /// own, with no separate ageing rule to get wrong.
+    void raiseFault(uint8_t code, int32_t count) {
+        diag_ = encodeDiag(code, count);
+        diagPublished_ = diag_;
+    }
+
+    /// Fold one completed conversion into the production clock-rate window.
+    ///
+    /// Called for every FRESH conversion (after the STATUS_ADC1 gate), including
+    /// ones later discarded for over-range: an over-range conversion still took
+    /// exactly one conversion period, which is the only thing being measured
+    /// here. Excluding them would make the measured rate depend on the SIGNAL,
+    /// which is precisely what a clock guard must not do.
+    ///
+    /// WHAT THIS ACTUALLY MEASURES is the rate at which conversions are
+    /// CONSUMED, which equals the conversion rate only while pump() keeps up.
+    /// ads1262_ready is a flag, not a counter, so a starved caller silently
+    /// drops edges and the measured rate falls -- and this guard will report
+    /// that as a degraded clock. That is a false POSITIVE, i.e. it errs toward
+    /// the alarm, which is the correct direction to be wrong in; but it means a
+    /// DIAG_CLOCK_DEGRADED must be read as "conversions are not arriving at the
+    /// expected rate", not as proof the crystal is at fault. checkClock() is the
+    /// one that measures fCLK directly, and it is the right follow-up.
+    void noteConversionForRate() {
+        const uint32_t now = millis();
+        if (rateWinCount_ == 0) {
+            rateWinStartMs_ = now;
+            rateWinCount_ = 1;
+            return;
+        }
+        if (++rateWinCount_ < RATE_WINDOW_CONVERSIONS) return;
+
+        const uint32_t elapsed = (uint32_t) (now - rateWinStartMs_);
+        rateWinCount_ = 0;
+        /* No time base -- millis() has not ticked across the whole window. That
+         * is un-evaluable, not fast: bank NOTHING, do not touch lastRateOkMs_,
+         * and let the window restart. Banking a rate here would divide by zero,
+         * and treating it as fresh would hide a stall behind a bogus success. */
+        if (elapsed == 0) return;
+
+        const float sps = (float) (RATE_WINDOW_CONVERSIONS - 1) * 1000.0f / (float) elapsed;
+        lastRateOkMs_ = now;
+        rateEverMeasured_ = true;
+
+        if (!std::isfinite(prodSpsRef_)) {
+            /* First window becomes the reference, and is never re-anchored --
+             * the production configuration does not change at runtime, so there
+             * is no legitimate reason for the expected rate to move. Trustworthy
+             * only because checkClock() measured fCLK against FCLK_NOMINAL_HZ
+             * during init and raises DIAG_CLOCK_DEGRADED itself if the clock was
+             * ALREADY off; without that this would happily adopt a quarter-speed
+             * clock as "normal" and then report every later comparison clean. */
+            prodSpsRef_ = sps;
+            return;
+        }
+        if (!(prodSpsRef_ > 0)) return;
+
+        fclkEstHz_ = fclkInitHz_ * (sps / prodSpsRef_);
+        const float dev = fabsf(sps / prodSpsRef_ - 1.0f);
+        if (dev > FCLK_ALARM_TOLERANCE) {
+            raiseFault(DIAG_CLOCK_DEGRADED, 0);
+            ESP_LOGW("ads1262", "clock degraded: production rate %.2f SPS vs %.2f reference "
+                                "(fCLK ~ %.0f Hz vs %.0f at init). Conversion timing and the "
+                                "50/60 Hz FIR nulls scale with this.",
+                     sps, prodSpsRef_, fclkEstHz_, fclkInitHz_);
+        }
+    }
+
+    /// Raise a fault when the running clock estimate has gone unverifiable.
+    ///
+    /// Runs from pump() rather than from fclkHz(), because it must fire when
+    /// conversions have STOPPED -- and fclkHz() is only called by the health
+    /// sampler, which is not where the absence of conversions shows up.
+    ///
+    /// This is the far-tail case for a rate-based guard: measuring the clock
+    /// FROM the conversions works only while conversions exist. As the clock
+    /// degrades the guard gets better (longer windows, larger deviation) right
+    /// up to the point where it gets no input at all, and there it must not fall
+    /// back to the last good answer. It reports unverified instead.
+    void checkRateFreshness() {
+        if (!rateEverMeasured_) return;   // no window has closed yet; init value still stands
+        const uint32_t now = millis();
+        if ((uint32_t) (now - lastRateOkMs_) <= RATE_STALE_MS) return;
+
+        raiseFault(DIAG_CLOCK_UNVERIFIED, 0);
+        if ((uint32_t) (now - lastStaleLogMs_) >= RATE_STALE_MS) {
+            lastStaleLogMs_ = now;
+            ESP_LOGE("ads1262", "no completed conversion window for %u ms -- the clock estimate is "
+                                "UNVERIFIED, not healthy. fclkHz() now reports NAN rather than the "
+                                "last good value.", (unsigned) (now - lastRateOkMs_));
+        }
+    }
 
     int8_t pinMiso_ = -1;
     int8_t g_pinSck = -1, g_pinMosi = -1, g_pinCs = -1;
@@ -454,6 +625,12 @@ private:
         ads1262_ready = false;
         lastEdgeMs = millis();
         sinceRestart_ = 0;
+        /* Abandon any part-built rate window. A START toggle costs td(STDR)
+         * (~104 ms chopped), so a window spanning a restart measures the restart
+         * rather than the clock and would read as a degraded clock on perfectly
+         * healthy hardware -- a guard that fires on good input is as useless as
+         * one that stays quiet on bad input, and it trains you to ignore it. */
+        rateWinCount_ = 0;
     }
 
 public:
@@ -514,7 +691,19 @@ public:
     /// the value checkClock() measured at init. NAN if the part never came up --
     /// never a nominal stand-in, which would report a healthy clock for a board
     /// that was never checked.
-    float fclkHz() const { return std::isfinite(fclkEstHz_) ? fclkEstHz_ : fclkInitHz_; }
+    ///
+    /// Returns NAN once the running estimate goes stale (RATE_STALE_MS with no
+    /// completed window). Before the first window closes it still returns the
+    /// init measurement, which is then the freshest thing that exists -- the
+    /// staleness rule only applies once something better was being produced and
+    /// has stopped. Falling back to fclkInitHz_ forever was the actual bug: a
+    /// boot-time reading published as the CURRENT clock, for hours, with a clean
+    /// diagnostic beside it.
+    float fclkHz() const {
+        if (!rateEverMeasured_) return fclkInitHz_;
+        if ((uint32_t) (millis() - lastRateOkMs_) > RATE_STALE_MS) return NAN;
+        return std::isfinite(fclkEstHz_) ? fclkEstHz_ : fclkInitHz_;
+    }
 
     float avddAvss() const { return avddAvss_; }
     float dvdd() const { return dvdd_; }
@@ -1481,6 +1670,11 @@ public:
     bool pump() {
         if (!initialized) return false;
 
+        /* BEFORE waitForEdge(), deliberately. If conversions have stopped, every
+         * path below returns early, so a freshness check placed after the wait
+         * would itself stop running exactly when it is needed. */
+        checkRateFreshness();
+
         if (!waitForEdge()) return false;
 
         uint8_t status = 0, checksum = 0, data[4] = {0};
@@ -1493,7 +1687,7 @@ public:
         ++sinceRestart_;
 
         if (ads126xHalFaults() != faultsBefore) {
-            diag_ = encodeDiag(DIAG_HAL_FAULT, 0);
+            raiseFault(DIAG_HAL_FAULT, 0);
             ESP_LOGW("ads1262", "HAL fault during read");
             return false;
         }
@@ -1556,7 +1750,7 @@ public:
         }
 
         if (checksum != calculateChecksum(data, 4)) {
-            diag_ = encodeDiag(DIAG_CHECKSUM, count);
+            raiseFault(DIAG_CHECKSUM, count);
             /* The BYTES, not just the verdict. "checksum mismatch" alone cannot
              * distinguish a too-early read (STATUS with ADC1 clear, data still
              * zero) from a bit error on the wire (one byte off) from a framing
@@ -1571,7 +1765,7 @@ public:
         }
 
         if (status & STATUS_RESET) {
-            diag_ = encodeDiag(DIAG_DEVICE_RESET, count);
+            raiseFault(DIAG_DEVICE_RESET, count);
             ESP_LOGE("ads1262", "device reset flag set -- configuration lost, re-init needed");
             initialized = false;    // force a full re-init rather than trusting the part
             return false;
@@ -1580,7 +1774,7 @@ public:
         /* THE mandatory per-acquisition check (note N10). Absence of the
          * external clock must never read as "clock fine". */
         if (!(status & STATUS_EXTCLK)) {
-            diag_ = encodeDiag(DIAG_NO_EXTCLK, count);
+            raiseFault(DIAG_NO_EXTCLK, count);
             ESP_LOGE("ads1262", "EXTCLK=0: ADC on internal oscillator, data UNSYNCHRONISED "
                                 "-- refusing sample");
             return false;
@@ -1588,6 +1782,9 @@ public:
 
         if (!(status & STATUS_ADC1))
             return false;           // not a fresh conversion; re-reading would bias averages
+
+        /* A genuine conversion arrived: it is one tick of the clock guard. */
+        noteConversionForRate();
 
         /* OVER-RANGE. These alarms are "latched during the conversion phase and
          * appended to the conversion data" (sec.9.2), so they qualify THIS
@@ -1617,13 +1814,29 @@ public:
          * sustained over-range is visible remotely rather than only in the log.
          *
          * WHICH ALARM MATTERS: PGAD_ALM is differential over-range -- genuinely
-         * too much current. That wall is the DIFFERENTIAL FULL SCALE, +-VREF/G =
-         * +-2.5/32 = +-78.125 mV, i.e. ~+-39 A at 2 mOhm.
+         * too much current. But it is NOT the clipping point, and the gap is a
+         * blind band this check cannot close:
          *
-         * NOT 17.5 A, which an earlier revision of this comment and of the log
-         * message below both claimed. 35 mV / 17.5 A is not a hardware threshold
-         * at all: it is the DESIGN POINT from which note N8's common-mode window
-         * is derived. Equation 12 reads
+         *   digital clipping   +-VREF/G      = +-78.125 mV = +-39.06 A at 2 mOhm
+         *   PGAD_ALM threshold +-105% FSR    = +-82.03 mV  = +-41.02 A
+         *                                      (sec.7.5, sec.9.3.7.1, Fig. 9-8)
+         *
+         * So between 39.06 A and 41.02 A the 32-bit output is SATURATED and no
+         * alarm fires. A 40 A input publishes 39.06 A: plausible, pinned, and
+         * unflagged. The alarm accuracy is +-1% typ / +-3% max FSR on top, which
+         * widens the band to ~38 A..42 A in the worst direction. THIS CHECK
+         * THEREFORE DOES NOT BOUND CLIPPING -- treat it as a fault detector, not
+         * as a range guard, and clamp in software if the range guard is needed.
+         *
+         * What the monitors ARE good for (sec.9.3.7): they are fast analog
+         * comparators, so they catch short overrange events "not necessarily
+         * evident in the output as clipped codes because of averaging of the
+         * digital filter" -- transients the FIR would otherwise hide.
+         *
+         * Neither number is 17.5 A, which an earlier revision of this comment
+         * and of the log message below both claimed. 35 mV / 17.5 A is not a
+         * hardware threshold at all: it is the DESIGN POINT from which note N8's
+         * common-mode window is derived. Equation 12 reads
          *     AVSS + 0.3 + |VIN|(G-1)/2 < VINP,VINN < AVDD - 0.3 - |VIN|(G-1)/2
          * so at |VIN| = 35 mV the window is 2.5 - 0.3 - 0.5425 = +-1.6575 V,
          * which is the figure the board was sized on. The window shrinks as the
@@ -1637,7 +1850,14 @@ public:
          * window above, not that the current was too large. The fixes are
          * unrelated -- one is a shunt/gain problem, the other is a wiring and
          * reference-potential problem (DESIGN.md F1: J7 must be tied to the shunt
-         * cold end, or the secondary floats on CM-cap leakage). */
+         * cold end, or the secondary floats on CM-cap leakage).
+         *
+         * The absolute alarms have their own blind band, in the opposite
+         * direction from the differential one: they trip at AVDD-0.2/AVSS+0.2
+         * (sec.7.5), while Equation 12 reserves 0.3 V. So an input can violate
+         * the datasheet's valid-input range -- and stop being specified -- with
+         * both alarms still clear. 0.1 V of PGA output at G=32 is 3.1 mV of
+         * input, so the band is not narrow. */
         if (status & (STATUS_PGAD_ALM | STATUS_PGAH_ALM | STATUS_PGAL_ALM)) {
             diag_ = encodeDiag(DIAG_PGA_RANGE, count);
             diagPublished_ = diag_;
@@ -1655,8 +1875,9 @@ public:
                          diff ? " PGAD" : "",
                          (status & STATUS_PGAH_ALM) ? " PGAH(out>AVDD-0.2V)" : "",
                          (status & STATUS_PGAL_ALM) ? " PGAL(out<AVSS+0.2V)" : "",
-                         diff ? "input exceeds the differential full scale, +-VREF/G = +-78.1 mV "
-                                "(~+-39 A at 2 mOhm, G=32)"
+                         diff ? "PGA differential output past +-105% FSR (+-82.0 mV in, ~+-41 A at "
+                                "2 mOhm, G=32) -- note the output already CLIPS at +-78.1 mV/39.1 A, "
+                                "so readings just under this alarm may be saturated"
                               : "PGA output hit a rail: at a small differential this is the COMMON "
                                 "MODE outside the Equation-12 window (+-1.66 V at 35 mV, note N8), "
                                 "NOT excess current -- check J7 to the shunt cold end");
@@ -1818,7 +2039,7 @@ private:
              * POWER is rewritten (cleared in init()'s register table), so this
              * cannot false-fire on a healthy part after init. */
             if (status & STATUS_RESET) {
-                diag_ = encodeDiag(DIAG_DEVICE_RESET, 0);
+                raiseFault(DIAG_DEVICE_RESET, 0);
                 ESP_LOGE("ads1262", "device reset during self-test conversion -- refusing value");
                 initialized = false;
                 return false;
@@ -1896,7 +2117,7 @@ private:
              * which is exactly the 2026-08-15 failure -- so without this, a
              * re-init onto an already-degraded clock would adopt it as the new
              * reference and every downstream comparison would read "healthy". */
-            diag_ = encodeDiag(DIAG_CLOCK_DEGRADED, 0);
+            raiseFault(DIAG_CLOCK_DEGRADED, 0);
             ESP_LOGW("ads1262", "fCLK ~ %.0f Hz is more than %.0f%% off the expected %.0f Hz. "
                                 "Conversion timing and the 50/60 Hz filter nulls scale with it.",
                      fclk, FCLK_WARN_TOLERANCE * 100.0f, FCLK_NOMINAL_HZ);
