@@ -6,7 +6,7 @@
 #include "sampling.h"
 
 
-/// TMP117 driver, direct on the shared Wire bus (src/i2c.h).
+/// TMP117 driver, direct on a Wire bus selected through src/i2c.h.
 ///
 /// This replaced NilsMinor/TMP117-Arduino, which was unusable here for three
 /// independent reasons -- all of them silent:
@@ -108,7 +108,12 @@ public:
     // AUX_NVS_MAGIC_ADDR = 152) and is the only free one left, so 0x4B goes there.
     static constexpr uint8_t STORAGE_ID_4B = 16;
 
-    explicit PowerSampler_TMP117(uint8_t addr) : address(addr) {
+    explicit PowerSampler_TMP117(uint8_t addr)
+        : address(addr), storageId(storageIdForAddress(addr)) {
+    }
+
+    PowerSampler_TMP117(uint8_t addr, uint8_t i2cPort, uint8_t storageId)
+        : address(addr), i2cPort(i2cPort), storageId(storageId) {
     }
 
     bool init() override;
@@ -120,24 +125,25 @@ public:
 
     Sample getSample() override;
 
-    /// Distinct per part, so several TMP117s do not alias onto one EEPROM
-    /// calibration slot.  init() rejects an address outside [ADDR_MIN, ADDR_MAX]
-    /// and the caller only reaches this after init() succeeds, so the result is
-    /// always 5, 6, 7 or STORAGE_ID_4B.
-    uint8_t getStorageId() const override {
-        if (address == ADDR_MAX) return STORAGE_ID_4B; // see STORAGE_ID_4B
-        return STORAGE_ID_BASE + (address - ADDR_MIN);
-    }
+    /// Distinct per physical part, so same-address TMP117s on separate buses do
+    /// not alias onto one EEPROM calibration slot.
+    uint8_t getStorageId() const override { return storageId; }
 
     /// Temperature only -- u/i/p are never set, so this counter's mean power is NaN
     /// by construction and must not vote on idle-sleep.  See PowerSampler.
     bool measuresPower() const override { return false; }
 
 private:
+    static constexpr uint8_t storageIdForAddress(uint8_t address) {
+        return address == ADDR_MAX ? STORAGE_ID_4B : STORAGE_ID_BASE + (address - ADDR_MIN);
+    }
+
     /// NAN on any I2C failure or out-of-range value.
     float readTemperature();
 
     uint8_t address;
+    uint8_t i2cPort{0};
+    uint8_t storageId;
     bool dataReady{false};   ///< sticky: reading CONFIG clears DRDY in the chip
     bool pollFailed{false};  ///< sticky: DRDY poll failed, getSample() owes a NAN
     unsigned long tLastPoll{0};

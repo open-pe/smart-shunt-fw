@@ -12,7 +12,7 @@
 #endif
 
 /*
- * ONE I2C stack, and one lock around it.
+ * One Wire stack per hardware controller, with one lock per stack.
  *
  * This file used to drive I2C_NUM_0 through the raw IDF driver
  * (i2c_master_cmd_begin) while adc/ina228.h drove the SAME port through Arduino
@@ -24,8 +24,8 @@
  * bus, and every failure here lands in an ESP_ERROR_CHECK -> abort(). There is no
  * bus-recovery routine anywhere in this firmware, so a wedge means a power cycle.
  *
- * So: everything goes through Wire, and every complete transaction takes i2cLock().
- * Wire has its own per-call lock, but a register read is beginTransmission ->
+ * So: everything goes through the selected TwoWire instance, and every complete
+ * transaction takes its bus lock. Wire has its own per-call lock, but a register read is beginTransmission ->
  * endTransmission(false) -> requestFrom, and that SEQUENCE has to be atomic too --
  * a repeated-start read is not three independent operations.
  */
@@ -96,22 +96,39 @@ inline bool i2c_check_pins(uint8_t sda, uint8_t scl) {
     return ok;
 }
 
+inline TwoWire &i2c_wire(uint8_t port) {
+#if defined(ESP32) && !defined(TARGET_STM32H5)
+    return port == 0 ? Wire : Wire1;
+#else
+    (void) port;
+    return Wire;
+#endif
+}
+
 class I2cLock {
-    static SemaphoreHandle_t mutex() {
-        static SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
+    static SemaphoreHandle_t mutex(uint8_t port) {
+        static SemaphoreHandle_t mutexes[2] = {nullptr, nullptr};
+#if defined(ESP32) && !defined(TARGET_STM32H5)
+        const uint8_t lockIndex = port == 0 ? 0 : 1;
+#else
+        const uint8_t lockIndex = 0;
+#endif
+        SemaphoreHandle_t &m = mutexes[lockIndex];
+        if (!m) m = xSemaphoreCreateRecursiveMutex();
         return m;
     }
 
+    SemaphoreHandle_t handle;
     bool held;
 
 public:
     // Recursive, so a helper that locks may call another that locks.
-    explicit I2cLock(TickType_t wait = pdMS_TO_TICKS(2000))
-        : held(xSemaphoreTakeRecursive(mutex(), wait) == pdTRUE) {
-        if (!held) ESP_LOGE("i2c", "bus lock timeout");
+    explicit I2cLock(uint8_t port = 0, TickType_t wait = pdMS_TO_TICKS(2000))
+        : handle(mutex(port)), held(xSemaphoreTakeRecursive(handle, wait) == pdTRUE) {
+        if (!held) ESP_LOGE("i2c", "bus %hhu lock timeout", port);
     }
 
-    ~I2cLock() { if (held) xSemaphoreGiveRecursive(mutex()); }
+    ~I2cLock() { if (held) xSemaphoreGiveRecursive(handle); }
 
     explicit operator bool() const { return held; }
 
@@ -119,23 +136,24 @@ public:
     I2cLock &operator=(const I2cLock &) = delete;
 };
 
-/// Write `command` then `len` bytes. Port is always the one Wire.begin() opened.
-inline esp_err_t i2c_write_buf(uint8_t, uint8_t address, uint8_t command, const uint8_t *data, uint8_t len) {
-    I2cLock lock;
+/// Write `command` then `len` bytes on the selected hardware controller.
+inline esp_err_t i2c_write_buf(uint8_t port, uint8_t address, uint8_t command, const uint8_t *data, uint8_t len) {
+    I2cLock lock{port};
     if (!lock) return ESP_ERR_TIMEOUT;
 
-    Wire.beginTransmission(address);
-    if (Wire.write(command) != 1) {
-        Wire.endTransmission();
+    TwoWire &wire = i2c_wire(port);
+    wire.beginTransmission(address);
+    if (wire.write(command) != 1) {
+        wire.endTransmission();
         return ESP_FAIL;
     }
     for (uint8_t i = 0; i < len; ++i) {
-        if (Wire.write(data[i]) != 1) {
-            Wire.endTransmission();
+        if (wire.write(data[i]) != 1) {
+            wire.endTransmission();
             return ESP_FAIL;
         }
     }
-    return Wire.endTransmission() == 0 ? ESP_OK : ESP_FAIL;
+    return wire.endTransmission() == 0 ? ESP_OK : ESP_FAIL;
 }
 
 inline esp_err_t i2c_write_short(uint8_t port, uint8_t address, uint8_t command, uint16_t data) {
@@ -171,18 +189,19 @@ inline esp_err_t i2c_write_short(uint8_t port, uint8_t address, uint8_t command,
 /// boards that would sit on the continuously-sampled path.
 ///
 /// If this failure is ever seen again: check the ground before changing this code.
-inline esp_err_t i2c_read_buf(uint8_t, uint8_t address, uint8_t command, uint8_t *buffer, uint8_t len) {
-    I2cLock lock;
+inline esp_err_t i2c_read_buf(uint8_t port, uint8_t address, uint8_t command, uint8_t *buffer, uint8_t len) {
+    I2cLock lock{port};
     if (!lock) return ESP_ERR_TIMEOUT;
 
-    Wire.beginTransmission(address);
-    if (Wire.write(command) != 1) {
-        Wire.endTransmission();
+    TwoWire &wire = i2c_wire(port);
+    wire.beginTransmission(address);
+    if (wire.write(command) != 1) {
+        wire.endTransmission();
         return ESP_FAIL;
     }
-    if (Wire.endTransmission(false) != 0) return ESP_FAIL; // repeated start, no stop
-    if (Wire.requestFrom(address, len) != len) return ESP_FAIL;
-    for (uint8_t i = 0; i < len; ++i) buffer[i] = Wire.read();
+    if (wire.endTransmission(false) != 0) return ESP_FAIL; // repeated start, no stop
+    if (wire.requestFrom(address, len) != len) return ESP_FAIL;
+    for (uint8_t i = 0; i < len; ++i) buffer[i] = wire.read();
     return ESP_OK;
 }
 
@@ -194,9 +213,10 @@ inline uint16_t i2c_read_short(uint8_t port, uint8_t address, uint8_t command) {
     return (uint16_t) ((buf[0] << 8) | buf[1]);
 }
 
-inline bool i2c_test_address(uint8_t addr) {
-    I2cLock lock;
+inline bool i2c_test_address(uint8_t addr, uint8_t port = 0) {
+    I2cLock lock{port};
     if (!lock) return false;
-    Wire.beginTransmission(addr);
-    return Wire.endTransmission() == 0;
+    TwoWire &wire = i2c_wire(port);
+    wire.beginTransmission(addr);
+    return wire.endTransmission() == 0;
 }

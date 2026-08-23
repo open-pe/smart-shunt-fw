@@ -56,6 +56,15 @@ PowerSampler_TMP117 tmp117_49{0x49};
 PowerSampler_TMP117 tmp117_4a{0x4A};
 PowerSampler_TMP117 tmp117_4b{0x4B};
 
+#ifdef SHUNT_ADC_ONLY
+/* A separate controller lets another default-address part coexist with bus 0;
+ * storage slot 9 is unused by every sampler registered in this build. */
+static constexpr uint8_t TMP117_I2C2_SDA = 3;
+static constexpr uint8_t TMP117_I2C2_SCL = 8;
+static constexpr uint8_t TMP117_I2C2_STORAGE_ID = 9;
+PowerSampler_TMP117 tmp117_i2c2{0x48, 1, TMP117_I2C2_STORAGE_ID};
+#endif
+
 /* pwr-metering shunt-adc board (ADS1262) on J2. Pins are the wiring, not
  * settings.h, because settings.h has no SPI entries for this board.
  *
@@ -304,6 +313,11 @@ void setup(void) {
 
     Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
 
+#ifdef SHUNT_ADC_ONLY
+    i2c_check_pins(TMP117_I2C2_SDA, TMP117_I2C2_SCL);
+    Wire1.begin(TMP117_I2C2_SDA, TMP117_I2C2_SCL, settings.I2C_Freq);
+#endif
+
     if (!disableWifi) {
         connect_wifi_async_once();
         wait_for_wifi();
@@ -355,6 +369,9 @@ void setup(void) {
     samplers.add("t17_49", &tmp117_49);
     samplers.add("t17_4A", &tmp117_4a);
     samplers.add("t17_4B", &tmp117_4b);
+#ifdef SHUNT_ADC_ONLY
+    samplers.add("t17b_48", &tmp117_i2c2);
+#endif
     /* ONE of these two, never both: they share the ADS1262 and configure it
      * differently. SHUNT_ADC_ZERO is the offset-drift characterisation run
      * (internal short, chop ON since 2026-08-15); SHUNT_ADC is normal measurement. */
