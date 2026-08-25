@@ -131,7 +131,13 @@ public:
 
     void checkIdleSleep() {
         if (platform::micros64() - timeLastWakeEvent > IDLE_SLEEP_AFTER_US) {
-            if (ble.isConnected()) {
+            // Deep sleep cannot wake for USB input. Keep an attached USB console and an
+            // energised AUX output controllable instead of preserving a state nobody can change.
+            bool stayAwake = ble.isConnected() || auxGet();
+#if defined(ESP32) && ARDUINO_USB_MODE
+            stayAwake = stayAwake || Serial.isPlugged();
+#endif
+            if (stayAwake) {
                 noteWakeEvent();
             } else {
                 onIdleSleep();
