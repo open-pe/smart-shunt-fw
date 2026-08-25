@@ -446,7 +446,7 @@ void setup(void) {
      * would collide with SHUNT_ADC's truncation in InfluxDB. */
     samplers.add("DCCT", &shuntAdcDcct);
     //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
-    samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);
+    //samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);  // fCLK/AVDD diagnostic series; disabled on request
 
 #ifndef SHUNT_ADC_ONLY
     if (!muxBackend.init()) {
