@@ -387,6 +387,10 @@ private:
             0x67,  // AIN6 / AIN7
     };
 
+    /// Board connector each pair lands on, so a fault message can name the thing
+    /// the user has to physically go and look at rather than the mux index.
+    static constexpr const char *CONNECTOR_FOR[PAIR_COUNT] = {"J3", "J4", "J5", "J6"};
+
     /* Not atomic, and deliberately so: SamplerRegistry::initAll() calls every
      * sampler's init() sequentially on one task before any sampling task exists,
      * so the check-then-set below cannot race today. If samplers ever get their
@@ -2038,7 +2042,13 @@ public:
                 lastRangeLogMs_ = millis();
                 rangeLogged_ = true;
                 const bool diff = (status & STATUS_PGAD_ALM) != 0;
-                ESP_LOGE("ads1262", "PGA %s (STATUS=0x%02x:%s%s%s) -- %s; discarding",
+                /* NAME THE PAIR. Without it this message reads as if it were
+                 * always about the shunt, and its "check J7" advice sent a real
+                 * debug session (2026-08-25) to the wrong connector for half an
+                 * hour while the actual fault was a miswired J4 on CH1. Each
+                 * pair has its own connector, so the remedy is per-pair. */
+                ESP_LOGE("ads1262", "pair %u (%s): PGA %s (STATUS=0x%02x:%s%s%s) -- %s; discarding",
+                         (unsigned) pair, CONNECTOR_FOR[pair],
                          diff ? "DIFFERENTIAL over-range" : "ABSOLUTE range violation", status,
                          diff ? " PGAD" : "",
                          (status & STATUS_PGAH_ALM) ? " PGAH(out>AVDD-0.2V)" : "",
@@ -2048,18 +2058,29 @@ public:
                                 "so readings just under this alarm may be saturated"
                               : "PGA output hit a rail: at a small differential this is the COMMON "
                                 "MODE outside the Equation-12 window (+-1.66 V at 35 mV, note N8), "
-                                "NOT excess current -- check J7 to the shunt cold end");
+                                "NOT excess current -- check THIS pair's connector for a missing "
+                                "DC path to board GND (the cold end must be referenced)");
             }
             return finishPairAndAdvance();
         }
 
-        /* A PGA-BYPASSED pair gets none of the alarms above -- the monitors sit
-         * in the PGA, and bypassing it silences all three. Over-range there
-         * shows up only as the 32-bit code saturating toward +-FS (+-VREF), so
-         * police it digitally: past 98% of FS the converter is at or beyond the
-         * onset of clipping and the number is a bound, not a measurement. Same
-         * handling as the PGA alarms -- NAN, DIAG_PGA_RANGE, advance the scan --
-         * so a remote observer sees the same fault shape either way. */
+        /* Digital over-range guard for a PGA-BYPASSED pair.
+         *
+         * This comment used to assert that bypassing the PGA silences all three
+         * monitors, and gave that as the REASON for the guard. That is wrong,
+         * and the bench disproved it on 2026-08-25: a floating, bypassed CH1
+         * raised PGAH continuously while CH0 converted normally beside it. So
+         * the monitors are NOT known to be dead in bypass, and the alarm path
+         * above does catch at least some bypassed excursions.
+         *
+         * The guard stays, on a narrower and honest justification: the monitors
+         * watch the PGA OUTPUT, and in bypass the signal reaches the modulator
+         * without passing through it, so there is no guarantee they see a given
+         * excursion. What is certain is that the 32-bit code saturates at +-FS
+         * (+-VREF). Policing that digitally costs one comparison and cannot be
+         * wrong: past 98% of FS the number is a bound, not a measurement.
+         * Same handling as the PGA alarms -- NAN, DIAG_PGA_RANGE, advance the
+         * scan -- so a remote observer sees the same fault shape either way. */
         if (pairMode2_[pair] & MODE2_PGA_BYPASS) {
             static constexpr int64_t CLIP_CODE = (int64_t) (0.98 * 2147483648.0);
             const int64_t mag = count < 0 ? -(int64_t) count : (int64_t) count;

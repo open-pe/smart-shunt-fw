@@ -147,12 +147,22 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
  * rail-to-rail input, +-VREF = +-2.5 V digital full scale. 2.4 V is 96% of FS;
  * prefer a turns
  * count with I*N <= ~200 A-turns when the setup allows headroom. Over-range is
- * policed digitally (DIAG_PGA_RANGE) because the PGA alarms cannot fire
- * bypassed. G=1 noise (~1 uV/conversion) is ~50 ppm of the worst-case 20 mV
+ * ALSO policed digitally (DIAG_PGA_RANGE): the PGA monitors watch the PGA
+ * output, which a bypassed signal never passes through, so they cannot be relied
+ * on here -- though they are demonstrably not dead in bypass either, a floating
+ * J4 having raised PGAH continuously on 2026-08-25.
+ * G=1 noise (~1 uV/conversion) is ~50 ppm of the worst-case 20 mV
  * signal -- the DCCT ratio error and the burden's tolerance/tempco dominate.
  * Burden dissipation reaches (40*6/500)^2 * 5 = 1.15 W: fit a >= 3 W low-tempco
- * part, it is the metrology element. Tie the burden cold end to board GND so
- * the pins stay inside the bypassed +-2.6 V absolute window.
+ * part, it is the metrology element.
+ *
+ * TIE THE BURDEN COLD END TO BOARD GND -- not optional. Without a DC path to the
+ * board's reference the pair floats out of the +-2.6 V absolute input window,
+ * and a CH1 driven HARD out of range corrupts its NEIGHBOUR: on 2026-08-25 it
+ * put a 7.2 mV offset on CH0 (3.6 A of phantom shunt current) and made the
+ * internal die-temperature read return 1503 degC, because the mux now visits
+ * both pairs and the front end had not recovered by the next conversion. A
+ * merely FLOATING CH1 does not do this -- only a driven one.
  *
  * FIELD MAPPING (same convention as the other overloaded channels): u is the
  * raw burden voltage in VOLTS at the ADC input (dividerRatio 0 = unscaled,

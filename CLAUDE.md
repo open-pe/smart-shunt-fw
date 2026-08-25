@@ -29,6 +29,18 @@ gone — old transcripts still name them.)
   investigating; it is USB, not the build.
 - **`pio device monitor` does not work here** — miniterm dies on `termios.error: Operation not
   supported by device`. Read the port with pyserial instead.
+- **OPENING THE SERIAL PORT REBOOTS THE BOARD**, and therefore drops its BLE link. This is
+  the ESP32-S3's native USB-CDC: it resets on open, and setting `dtr = False` / `rts = False`
+  before `open()` does **not** prevent it — verified 2026-08-25, where a `help` probe returned
+  a full boot banner. Consequences, both of which cost real time:
+  - Every serial read costs the collector a reconnect. A session of "just checking the log"
+    looks downstream exactly like a board with flaky BLE, and it is easy to go hunting for a
+    BlueZ or collector fault that does not exist. If you are reading serial, **you** are the
+    dropouts. Read the collector's journal instead when the board is in service.
+  - Uptime in the telemetry line resets each time, so it measures your last port open, not
+    the board's actual run.
+  Console commands still work — just sleep ~10 s after opening to ride out the reboot before
+  writing, and expect one BLE reconnect per session.
 - Opening the port with default DTR/RTS can leave the board wedged and silent. If it goes
   quiet and re-flashing also fails, it needs a physical **BOOT + RESET** to re-enter download
   mode — ask, don't try to fix it over the wire.
@@ -71,6 +83,9 @@ Other facts that cost real debugging time:
   what it runs.
 - **Only one BLE central may hold a link**, which is why aux control and OTA go *through* the
   collector rather than connecting alongside it. Do not attach a second scanner casually.
+- **Console `calibrate` takes the PREFIXED name.** `samplers.add("DCCT", …)` plus board prefix
+  `ftr` means the energy counter is `ftr_DCCT`, and `registry.findByName()` matches that
+  exactly — `calibrate DCCT I …` silently finds nothing. Use `calibrate ftr_DCCT I 0.33333333`.
 - **Series names truncate to 16 chars** in `dev[16]`, so console and database names differ:
   `ftr_SHUNT_ADC_HEALTH` is `BLE_ftr_SHUNT_ADC_HE` in InfluxDB. Grepping the serial log for the
   name you see in Grafana finds nothing.
@@ -86,9 +101,17 @@ Other facts that cost real debugging time:
     amperes, `P` is always 0. `I` is only correct for the turns count actually rigged: the
     N/100 ratio is carried by the EEPROM calibration factor (`calibrate DCCT I <1/N>`), which
     is the *same* factor any gain trim lives in — re-rigging N overwrites the trim.
-    This pair runs G=1 with the **PGA bypassed** (2.4 V full scale is far outside the G=1
-    PGA window), so the PGA over-range alarms cannot fire; over-range is caught digitally at
-    ~98% of ±2.5 V FS and reported as `DIAG_PGA_RANGE` with `U`/`I` = NaN.
+    This pair runs G=1 with the **PGA bypassed** (a ground-referenced 2.4 V peak clears the
+    G=1 pin window of ~±2.2 V). Over-range is caught digitally at ~98% of ±2.5 V FS and
+    reported as `DIAG_PGA_RANGE` with `U`/`I` = NaN. The PGA alarms are **not** silenced by
+    bypass — a floating J4 raises PGAH continuously — but they watch the PGA output, which a
+    bypassed signal never crosses, so they are a bonus, not the guard.
+  - **Tie the DCCT burden's cold end to board GND.** A CH1 driven hard outside the ±2.6 V
+    absolute window corrupts **CH0 and the die temperature**, because the mux visits both
+    pairs and the front end has not recovered by the next conversion. Seen 2026-08-25: a
+    7.2 mV offset on CH0 (3.6 A of phantom shunt current) and die temps of 1503 °C. A merely
+    *floating* CH1 is harmless; only a *driven* one does this. If the shunt reads a steady
+    offset it cannot explain, suspect the other channel's wiring before the shunt's.
 - **Registering `DCCT` un-parks the ADS1262 mux.** With only `SHUNT_ADC` registered the mux
   sits on CH0 and reaches its full 19.15 SPS; with both, the device scans CH0↔CH1 and each
   channel updates at **~4.8 SPS** (every pair switch restarts conversion, ~104 ms chopped).
