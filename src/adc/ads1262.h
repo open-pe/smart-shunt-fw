@@ -89,9 +89,12 @@ public:
         PAIR_CH3,       ///< J6, AIN6(+)/AIN7(-)
         PAIR_COUNT,
         /// "No pair on this axis." Only valid as PowerSampler_ShuntAdc's uPair,
-        /// where it selects single-pair mode: the mux parks on iPair and never
-        /// moves. Deliberately outside [0, PAIR_COUNT) so it can never be used
-        /// to index INPMUX_FOR[] by accident.
+        /// where it means the facade has no voltage channel and registers iPair
+        /// alone. Whether the mux then PARKS is a property of the device, not of
+        /// this facade: it parks only while exactly one pair is registered
+        /// across all facades, and scans as soon as a second one appears.
+        /// Deliberately outside [0, PAIR_COUNT) so it can never be used to index
+        /// INPMUX_FOR[] by accident.
         PAIR_NONE = 0xFF
     };
 
@@ -99,6 +102,17 @@ public:
     static constexpr uint8_t PGA_GAIN = 32;   ///< G=32; note N8 sizes the input window on exactly this
     static constexpr uint8_t PGA_GAIN_CODE = 5;  // log2(32)
     static constexpr uint8_t DATA_RATE_CODE = 0x04;  ///< 20 SPS -- the fastest the FIR filter allows
+    static constexpr uint8_t MODE2_PGA_BYPASS = 0x80;  ///< MODE2 bit 7: input straight to the modulator, G=1
+
+    /// MODE2 value for a pair's front-end configuration. In bypass the GAIN
+    /// field is forced to 000: the hardware ignores it (bypass is gain 1 by
+    /// definition, sec.9.3.2), and a nonzero gain code alongside the bypass bit
+    /// would make two different register values mean the same configuration --
+    /// defeating the equality check facades use to detect a disagreement.
+    static constexpr uint8_t mode2For(uint8_t gainCode, bool pgaBypass) {
+        return pgaBypass ? (uint8_t) (MODE2_PGA_BYPASS | DATA_RATE_CODE)
+                         : (uint8_t) (((gainCode & 0x07) << 4) | DATA_RATE_CODE);
+    }
 
     /// SCLK. Kept well below the 8 MHz maximum: every edge crosses an ISO7761
     /// with up to 5.9 ns of pulse-width distortion (note N10).
@@ -353,6 +367,10 @@ public:
     /// must not be collapsed into either a healthy value or a fault code that
     /// implies a measurement was made.
     static constexpr uint8_t DIAG_CLOCK_UNVERIFIED = 9;
+    /// A pair switch did not take: MODE2 or INPMUX read back as something other
+    /// than what selectPair() just wrote. Fails the device closed rather than
+    /// scaling conversions by a gain the hardware is not using.
+    static constexpr uint8_t DIAG_PAIR_CONFIG = 10;
 
     /// Fractional deviation of the running fCLK estimate that raises
     /// DIAG_CLOCK_DEGRADED. Wide, because the estimate is derived from only a few
@@ -446,17 +464,33 @@ private:
     double sum_ = 0, sumsq_ = 0;
     uint8_t nAvg_ = 0;
 
-    /* When set, the mux stays on this pair instead of scanning. Costs no restart
-     * between conversions, so all of the time budget goes into averaging. */
-    int8_t onlyPair_ = -1;
-    bool scanningFacade_ = false;      ///< a facade needs the full mux scan
+    /* Pairs registered by facades, as a bitmask. The mux visits exactly these:
+     * one registered pair parks the mux there (no restart between conversions,
+     * so all of the time budget goes into averaging); two or more scan, paying
+     * the ~104 ms chopped restart per switch. Only ever accumulates bits:
+     * facades are static objects that live for the whole run. */
+    uint8_t scanSet_ = 0;
+
+    /* Per-pair front end. J3..J6 carry whatever the bench wired to them, and one
+     * global gain cannot serve a 2 mOhm shunt (G=32, 78 mV window) and a DCCT
+     * burden (2.4 V full scale, G=1 PGA-bypassed) at once. selectPair() programs
+     * MODE2 from this table on every switch, unconditionally -- one register
+     * write during a restart that already costs td(STDR), in exchange for no
+     * cache-coherency reasoning against the OTHER MODE2 writers (init,
+     * applyProductionConfig, configureSelfTest, enterZeroMode). */
+    uint8_t pairMode2_[PAIR_COUNT] = {
+            mode2For(PGA_GAIN_CODE, false), mode2For(PGA_GAIN_CODE, false),
+            mode2For(PGA_GAIN_CODE, false), mode2For(PGA_GAIN_CODE, false)};
+    /// Effective gain for the volts conversion, matching pairMode2_ (1 when bypassed).
+    float pairGain_[PAIR_COUNT] = {PGA_GAIN, PGA_GAIN, PGA_GAIN, PGA_GAIN};
+
     bool zeroFacade_ = false;          ///< the zero-drift facade owns the part
     bool measurementFacade_ = false;   ///< a shunt-measurement facade owns the part
     uint32_t sinceRestart_ = 0;   ///< conversions read since the last selectPair()
     uint32_t lastRangeLogMs_ = 0;  ///< rate-limits the PGA range error; it fires per conversion
     bool rangeLogged_ = false;     ///< so the FIRST one is never rate-limited away
     uint32_t notReadyReads_ = 0;  ///< all-zero "nothing yet" frames; ~1 per restart is normal
-    uint32_t generation_ = 0;      ///< bumped when all four pairs have a reading
+    uint32_t generation_ = 0;      ///< bumped when every REGISTERED pair has a reading
 
     /* Two diag slots, because TWO facades read this one device. A single
      * take-and-clear slot meant whichever facade polled second always saw 0 --
@@ -592,12 +626,52 @@ private:
         return ((uint32_t) reason << 24) | (sign << 20) | (mag & 0xFFFFF);
     }
 
-    void selectPair(uint8_t p) {
-        /* START low -> INPMUX -> START high restarts the conversion cycle, which
-         * is what sec.9.4.1 wants after an input change; the board wires START
-         * to a host GPIO on J2.8 for exactly this (and for cross-board sync). */
+    /// steadyAdvance: this restart is one step of the REGULAR scan rhythm, not
+    /// an irregular event (init, temp read, config change, recovery). The rate
+    /// window survives steady advances -- see the rateWinCount_ note below.
+    void selectPair(uint8_t p, bool steadyAdvance = false) {
+        /* START low -> MODE2 -> INPMUX -> START high restarts the conversion
+         * cycle, which is what sec.9.4.1 wants after an input change; the board
+         * wires START to a host GPIO on J2.8 for exactly this (and for
+         * cross-board sync). MODE2 is written unconditionally from the per-pair
+         * table: pairs can differ in gain/PGA-bypass, and rewriting an unchanged
+         * value costs a few microseconds inside a restart that costs td(STDR). */
         setSTART(LOW);
+        writeSingleRegister(REG_ADDR_MODE2, pairMode2_[p]);
         writeSingleRegister(REG_ADDR_INPMUX, INPMUX_FOR[p]);
+
+        /* VERIFY BOTH, while START is still low and nothing is converting yet.
+         *
+         * This is not belt-and-braces: it is the guard that keeps per-pair gain
+         * from becoming a silent scale error. While every pair shared one gain,
+         * a lost MODE2 write was harmless -- the register already held the value
+         * being rewritten. Now CH0 runs G=32 and CH1 runs G=1 bypassed, so if
+         * the MODE2 write is dropped and the INPMUX write lands, the hardware
+         * stays on the PREVIOUS pair's front end while the conversion is divided
+         * by this pair's gain: a shunt current reported 32x LOW, finite,
+         * plausible, and with nothing anywhere to contradict it. Upstream's
+         * writeSingleRegister() is void and does not even update TI's shadow map
+         * (ads1263.c:240), so nothing downstream can notice either.
+         *
+         * Fail the DEVICE closed rather than just this pair -- a link that drops
+         * writes has not earned trust in the registers we did not check. START
+         * stays low, so the part converts nothing on a configuration we cannot
+         * stand behind; hasData() re-inits and re-registers from scanSet_.
+         * The two reads also refresh the shadow map, which readData() sizes its
+         * transfer from. Cost is a few microseconds inside a restart that costs
+         * td(STDR) (~104 ms chopped). */
+        const uint8_t gotMode2 = readSingleRegister(REG_ADDR_MODE2);
+        const uint8_t gotMux = readSingleRegister(REG_ADDR_INPMUX);
+        if (gotMode2 != pairMode2_[p] || gotMux != INPMUX_FOR[p]) {
+            raiseFault(DIAG_PAIR_CONFIG, 0);
+            ESP_LOGE("ads1262", "pair %u switch did not take: MODE2 wrote 0x%02x read 0x%02x, "
+                                "INPMUX wrote 0x%02x read 0x%02x. Refusing to convert on an "
+                                "unverified front end -- forcing re-init.",
+                     (unsigned) p, pairMode2_[p], gotMode2, INPMUX_FOR[p], gotMux);
+            initialized = false;
+            return;
+        }
+
         setSTART(HIGH);
         /* This is an INPMUX writer, so the zero-mode cache no longer describes
          * the part. Every other writer (applyProductionConfig, configureSelfTest,
@@ -638,12 +712,22 @@ private:
         ads1262_ready = false;
         lastEdgeMs = millis();
         sinceRestart_ = 0;
-        /* Abandon any part-built rate window. A START toggle costs td(STDR)
-         * (~104 ms chopped), so a window spanning a restart measures the restart
-         * rather than the clock and would read as a degraded clock on perfectly
-         * healthy hardware -- a guard that fires on good input is as useless as
-         * one that stays quiet on bad input, and it trains you to ignore it. */
-        rateWinCount_ = 0;
+        /* Abandon any part-built rate window on an IRREGULAR restart. A START
+         * toggle costs td(STDR) (~104 ms chopped), so a window spanning a
+         * sporadic restart measures the restart rather than the clock and would
+         * read as a degraded clock on perfectly healthy hardware -- a guard that
+         * fires on good input is as useless as one that stays quiet on bad
+         * input, and it trains you to ignore it.
+         *
+         * A STEADY scan advance is different, and must NOT reset the window, or
+         * scanning mode never closes one and the production clock guard is
+         * silently disarmed -- the exact failure the prodSpsRef_ block documents.
+         * In a multi-pair scan EVERY conversion follows a restart, uniformly, so
+         * the window measures the scan rhythm -- and that is still a clock
+         * measurement: td(STDR) scales with fCLK exactly as the conversion
+         * period does. prodSpsRef_ anchors to the same rhythm, so the ratio
+         * stays clean. */
+        if (!steadyAdvance) rateWinCount_ = 0;
     }
 
 public:
@@ -661,35 +745,38 @@ public:
     /// Differential volts at the ADC input for a pair, NAN until first read.
     float volts(Pair p) const { return volts_[p]; }
 
-    /// Restrict the mux to ONE pair, or -1 to scan all four. Single-pair mode
-    /// avoids a mux restart between conversions, so every 50 ms goes into the
-    /// average rather than into re-settling.
-    ///
-    /// Selects the pair IMMEDIATELY as well as recording it. Recording alone left
-    /// the marker and the hardware disagreeing: init() always programs and records
-    /// PAIR_CH0, so after a device-reset recovery an onlyPair_ of anything else
-    /// would have the mux physically on CH0 while pump() wrote its readings into
-    /// volts_[CH0] -- and the facade, reading volts_[iPair], would keep
-    /// republishing its last pre-reset value with fresh timestamps until the next
-    /// temperature boundary re-selected the pair. Stale data with a current
-    /// timestamp is the worst of the available failures, so the two are kept in
-    /// step at the one place that sets the marker. Harmless for onlyPair_ == CH0,
-    /// which is the only configuration shipped today -- but this mode advertises
-    /// arbitrary pairs.
-    void setOnlyPair(int8_t p) {
-        onlyPair_ = p;
-        if (p >= 0 && p < (int8_t) PAIR_COUNT && initialized) selectPair((uint8_t) p);
+    /// Configure a pair's front end BEFORE registerPair(): gainCode = log2(G)
+    /// (0..5 => G=1..32), or pgaBypass for rail-to-rail input at G=1 (the only
+    /// gain bypass supports). Takes effect at the next selectPair() -- callers
+    /// go through registerPair(), which re-selects and so programs it
+    /// immediately.
+    void setPairGain(Pair p, uint8_t gainCode, bool pgaBypass) {
+        pairMode2_[p] = mode2For(gainCode, pgaBypass);
+        pairGain_[p] = pgaBypass ? 1.0f : (float) (1u << (gainCode & 0x07));
     }
 
-    /// Current single-pair selection, or -1 when scanning. Facades read this at
-    /// init() to refuse an incompatible pairing rather than silently disagree.
-    int8_t onlyPair() const { return onlyPair_; }
+    /// MODE2 byte a pair will be driven with. Facades compare this at init() to
+    /// refuse a second registration that silently disagrees about gain/bypass.
+    uint8_t pairMode2(Pair p) const { return pairMode2_[p]; }
+    bool pairRegistered(Pair p) const { return (scanSet_ & (1u << p)) != 0; }
 
-    /// Set by a facade that needs the full mux scan. Only ever set, never
-    /// cleared: facades are static objects that live for the whole run, so a
-    /// clear would only ever be wrong.
-    void noteScanningFacade() { scanningFacade_ = true; }
-    bool hasScanningFacade() const { return scanningFacade_; }
+    /// Add a pair to the set the mux visits. One registered pair parks the mux
+    /// (no restart between conversions); two or more scan round-robin.
+    ///
+    /// Re-selects IMMEDIATELY as well as recording, so the hardware and the
+    /// marker cannot disagree: init() always programs and records PAIR_CH0 with
+    /// the default G=32, so after a device-reset recovery the mux would
+    /// otherwise sit on CH0 while pump() wrote its readings into volts_[CH0] --
+    /// and a facade reading volts_[iPair] would keep republishing its last
+    /// pre-reset value with fresh timestamps until the next temperature
+    /// boundary. Stale data with a current timestamp is the worst of the
+    /// available failures. The re-select also programs the pair's MODE2, which
+    /// the reset put back to the global default.
+    void registerPair(Pair p) {
+        scanSet_ |= (uint8_t) (1u << p);
+        if (initialized)
+            selectPair(pairRegistered((Pair) pair) ? pair : firstRegisteredPair());
+    }
 
     /// Ownership claims, so two facades that cannot coexist refuse LOUDLY at
     /// init() instead of quietly corrupting each other's readings. Only ever
@@ -703,6 +790,25 @@ public:
     /// Sample standard deviation of the conversions behind volts(p). This is the
     /// measured noise, not an assumed one -- use it to choose AVG_N.
     float voltsStdDev(Pair p) const { return sd_[p]; }
+
+private:
+    uint8_t registeredCount() const { return (uint8_t) __builtin_popcount(scanSet_); }
+
+    uint8_t firstRegisteredPair() const {
+        for (uint8_t i = 0; i < PAIR_COUNT; ++i)
+            if (scanSet_ & (1u << i)) return i;
+        return PAIR_CH0;   // empty set: init()'s default; pump() has nothing to visit anyway
+    }
+
+    /// Next registered pair strictly after `after`, or PAIR_COUNT when the scan
+    /// has wrapped -- the caller treats that as "scan complete".
+    uint8_t nextRegisteredPair(uint8_t after) const {
+        for (uint8_t i = (uint8_t) (after + 1); i < PAIR_COUNT; ++i)
+            if (scanSet_ & (1u << i)) return i;
+        return PAIR_COUNT;
+    }
+
+public:
 
     /// ADS1262 die temperature in degC, NAN until the first scan completes.
     /// SBAS661C sec.9.3.4 notes the die runs ~0.7 degC above the surrounding
@@ -948,6 +1054,36 @@ public:
 
         initialized = true;
         everInitialized = true;
+
+        /* RE-ANCHOR the production-rate reference. prodSpsRef_ is a rate in SPS
+         * that is only meaningful when paired with the fclkInitHz_ it was
+         * measured under -- fclkEstHz_ is literally fclkInitHz_ * (sps /
+         * prodSpsRef_). checkClock() above has just REPLACED fclkInitHz_, so a
+         * surviving reference from before the reset now pairs a new fCLK with an
+         * old rate: come back from a reset under a quarter-rate clock and the
+         * health channel would report roughly a SIXTEENTH of nominal (a quarter,
+         * squared) rather than a quarter. Dropping the reference costs one
+         * window and is safe for the same reason the first anchor is safe --
+         * checkClock() has already raised DIAG_CLOCK_DEGRADED itself if the
+         * clock came back wrong, so re-anchoring cannot launder a bad clock into
+         * a new "normal".
+         *
+         * It also covers a scan-set change: the reference is a whole-device
+         * cadence, and going from one registered pair to two halves it. Today
+         * every facade registers during initAll() before the first conversion,
+         * so that cannot happen at runtime -- but it is the same staleness. */
+        prodSpsRef_ = NAN;
+        rateWinCount_ = 0;
+
+        /* Honour pairs registered BEFORE init(). init() hardcodes PAIR_CH0
+         * above, so a facade that registered only, say, CH1 while the device was
+         * down would leave the mux parked on CH0 forever: one registered pair
+         * means finishPairAndAdvance() never switches, and the facade would read
+         * volts_[CH1] that nothing ever writes. Today's facades all call
+         * dev.init() before registerPair(), so this is unreachable -- but the
+         * public API does not enforce that ordering and must not punish it. */
+        if (scanSet_ && !pairRegistered((Pair) pair)) selectPair(firstRegisteredPair());
+
         return true;
     }
 
@@ -1917,13 +2053,41 @@ public:
             return finishPairAndAdvance();
         }
 
+        /* A PGA-BYPASSED pair gets none of the alarms above -- the monitors sit
+         * in the PGA, and bypassing it silences all three. Over-range there
+         * shows up only as the 32-bit code saturating toward +-FS (+-VREF), so
+         * police it digitally: past 98% of FS the converter is at or beyond the
+         * onset of clipping and the number is a bound, not a measurement. Same
+         * handling as the PGA alarms -- NAN, DIAG_PGA_RANGE, advance the scan --
+         * so a remote observer sees the same fault shape either way. */
+        if (pairMode2_[pair] & MODE2_PGA_BYPASS) {
+            static constexpr int64_t CLIP_CODE = (int64_t) (0.98 * 2147483648.0);
+            const int64_t mag = count < 0 ? -(int64_t) count : (int64_t) count;
+            if (mag >= CLIP_CODE) {
+                raiseFault(DIAG_PGA_RANGE, count);
+                volts_[pair] = NAN;
+                sd_[pair] = NAN;
+                sum_ = sumsq_ = 0;
+                nAvg_ = 0;
+                if (!rangeLogged_ ||
+                    (uint32_t) (millis() - lastRangeLogMs_) >= RANGE_LOG_INTERVAL_MS) {
+                    lastRangeLogMs_ = millis();
+                    rangeLogged_ = true;
+                    ESP_LOGE("ads1262", "pair %u (PGA bypassed) at %.1f%% of the +-%.2f V "
+                                        "digital full scale -- clipped or about to; discarding",
+                             (unsigned) pair, 100.0 * (double) mag / 2147483648.0, VREF);
+                }
+                return finishPairAndAdvance();
+            }
+        }
+
         if (discardsLeft) {
             --discardsLeft;         // still settling after the mux change
             return false;
         }
 
-        // bipolar 32-bit: LSB = VREF / (gain * 2^31)
-        constexpr float lsb = VREF / (float) PGA_GAIN / (float) (2u << 30);
+        // bipolar 32-bit: LSB = VREF / (gain * 2^31), gain taken per pair
+        const float lsb = VREF / pairGain_[pair] / (float) (2u << 30);
         const double v = (double) lsb * (double) count;
         sum_ += v;
         sumsq_ += v * v;
@@ -1949,9 +2113,10 @@ public:
     /// telemetry. Callers set volts_[pair]/sd_[pair] (real value, or NAN when the
     /// conversion was discarded) and clear the accumulators before calling.
     bool finishPairAndAdvance() {
-        if (onlyPair_ >= 0) {
-            /* Single-pair mode: do NOT touch INPMUX, so conversions keep arriving
-             * at the nominal rate with no restart latency.
+        if (registeredCount() <= 1) {
+            /* Parked (one registered pair, or none yet): do NOT touch INPMUX,
+             * so conversions keep arriving at the nominal rate with no restart
+             * latency.
              *
              * The reconfiguration below is therefore CONDITIONAL on the die-temp
              * read, and that is load-bearing rather than tidiness. selectPair()
@@ -1972,7 +2137,7 @@ public:
                 tempSkip_ = 0;
                 readDieTemperature();
                 applyProductionConfig();
-                selectPair((uint8_t) onlyPair_);
+                selectPair(firstRegisteredPair());
             }
             diagPublished_ = diag_;
             diag_ = 0;
@@ -1980,7 +2145,8 @@ public:
             return true;
         }
 
-        if (pair + 1 >= PAIR_COUNT) {
+        const uint8_t nxt = nextRegisteredPair(pair);
+        if (nxt >= PAIR_COUNT) {
             /* One die-temperature reading per scan. It needs a different gain
              * and input, so it runs at the scan boundary rather than inside it,
              * and restores the measurement configuration afterwards. At sinc1
@@ -1989,20 +2155,25 @@ public:
              * costs a mux change, a gain switch and two START restarts. Reading
              * it every scan was both redundant and a measurable part of why the
              * achieved rate fell short of the budget. */
+            bool tempRead = false;
             if (++tempSkip_ >= TEMP_EVERY_N_SCANS) {
                 tempSkip_ = 0;
                 readDieTemperature();
+                tempRead = true;
             }
 
-            /* A full scan of all four pairs is complete. Latch whatever
+            /* A scan of every REGISTERED pair is complete. Latch whatever
              * diagnostics accumulated during it so every facade reading this
-             * generation sees the same value, then start the next scan clean. */
+             * generation sees the same value, then start the next scan clean.
+             * The wrap is a steady advance for the rate window -- unless a
+             * temperature read just interrupted the rhythm, in which case the
+             * window must restart or it measures the excursion, not the clock. */
             diagPublished_ = diag_;
             diag_ = 0;
             ++generation_;
-            selectPair(PAIR_CH0);
+            selectPair(firstRegisteredPair(), /*steadyAdvance=*/!tempRead);
         } else {
-            selectPair(pair + 1);
+            selectPair(nxt, /*steadyAdvance=*/true);
         }
         return true;
     }
@@ -2595,8 +2766,10 @@ public:
 };
 
 
-/// One half of the efficiency measurement: a voltage pair and a current pair.
-/// Two of these share the single Ads1262ShuntAdc.
+/// One measurement channel on the shared Ads1262ShuntAdc: a current pair, and
+/// optionally a voltage pair (the two halves of an efficiency measurement).
+/// Several of these share the one device; each registers its pair(s) and the
+/// device visits the union -- parked when that is one pair, scanning otherwise.
 class PowerSampler_ShuntAdc : public PowerSampler {
     Ads1262ShuntAdc &dev;
     const Ads1262ShuntAdc::Pair uPair, iPair;
@@ -2616,6 +2789,16 @@ class PowerSampler_ShuntAdc : public PowerSampler {
     const uint8_t storageId;
     const int8_t pinSck, pinMosi, pinMiso, pinCs, pinStart;
 
+    /// Front-end configuration for iPair (uPair keeps the device default G=32).
+    /// gainCode = log2(G); pgaBypass trades the PGA's noise advantage for
+    /// rail-to-rail input at G=1. The DCCT burden channel needs it: at G=1 the
+    /// PGA's own output swing (Equation 12) leaves each input pin roughly
+    /// -2.2..+2.2 V on these +-2.5 V rails, and a ground-referenced 2.4 V peak
+    /// clears that by ~0.2 V. Bypassed, full scale is the reference itself,
+    /// +-2.5 V.
+    const uint8_t pgaGainCode;
+    const bool pgaBypass;
+
     uint32_t lastGen = 0;
     uint32_t lastReinitMs = 0;
     static constexpr uint32_t REINIT_INTERVAL_MS = 2000;
@@ -2625,11 +2808,13 @@ public:
     PowerSampler_ShuntAdc(Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair uPair,
                           Ads1262ShuntAdc::Pair iPair, float shuntOhm, float dividerRatio,
                           uint8_t storageId, int8_t pinSck, int8_t pinMosi, int8_t pinMiso,
-                          int8_t pinCs, int8_t pinStart, bool reportDieTemp = false)
+                          int8_t pinCs, int8_t pinStart, bool reportDieTemp = false,
+                          uint8_t pgaGainCode = Ads1262ShuntAdc::PGA_GAIN_CODE,
+                          bool pgaBypass = false)
             : dev(dev), uPair(uPair), iPair(iPair), shuntOhm(shuntOhm),
               dividerRatio(dividerRatio), reportDieTemp(reportDieTemp), storageId(storageId),
               pinSck(pinSck), pinMosi(pinMosi), pinMiso(pinMiso), pinCs(pinCs),
-              pinStart(pinStart) {}
+              pinStart(pinStart), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass) {}
 
     uint8_t getStorageId() const override { return storageId; }
 
@@ -2684,35 +2869,33 @@ public:
             return false;
         }
 
-        /* Single-pair mode is a property of the DEVICE, not of this facade, so
-         * two facades sharing one ADS1262 cannot disagree about it. They would
-         * not fail loudly if they did: the scanning facade would keep receiving
-         * single-pair generations and publish its other pairs' stale values
-         * forever, which reads as working. Refuse at init() instead -- the class
-         * contract allows shared facades, so the incompatible COMBINATION is
-         * what has to be caught. */
-        if (dev.onlyPair() >= 0 && uPair != Ads1262ShuntAdc::PAIR_NONE) {
-            ESP_LOGE("ads1262", "device is already in single-pair mode (pair %d); a scanning "
-                                "facade cannot share it -- refusing to start", (int) dev.onlyPair());
+        /* Two facades on the SAME pair are fine and deliberately allowed (both
+         * read the same volts_ entry) -- but only when they agree about the
+         * front end. pairMode2_ is one value per pair, so a second registration
+         * with a different gain/bypass would silently rescale the first
+         * facade's channel: same wire, same series, different volts per code. */
+        if (dev.pairRegistered(iPair) &&
+            dev.pairMode2(iPair) != Ads1262ShuntAdc::mode2For(pgaGainCode, pgaBypass)) {
+            ESP_LOGE("ads1262", "pair %u is already registered with MODE2=0x%02x; this facade "
+                                "wants 0x%02x. One front end cannot serve both -- refusing to start",
+                     (unsigned) iPair, dev.pairMode2(iPair),
+                     Ads1262ShuntAdc::mode2For(pgaGainCode, pgaBypass));
             return false;
         }
-        if (dev.onlyPair() < 0 && uPair == Ads1262ShuntAdc::PAIR_NONE && dev.hasScanningFacade()) {
-            ESP_LOGE("ads1262", "a scanning facade already owns this device -- a single-pair "
-                                "facade cannot share it, refusing to start");
-            return false;
-        }
-        /* Two single-pair facades wanting DIFFERENT pairs slipped through both
-         * checks above: the second one is itself PAIR_NONE (so the first check
-         * does not apply) and onlyPair_ is already set (so the second does not
-         * either). It then called setOnlyPair() with its own iPair and silently
-         * took the mux, leaving the first facade reading a pair the hardware no
-         * longer visits -- stale values with fresh timestamps. Two facades on the
-         * SAME pair are fine and deliberately still allowed. */
-        if (uPair == Ads1262ShuntAdc::PAIR_NONE && dev.onlyPair() >= 0 &&
-            dev.onlyPair() != (int8_t) iPair) {
-            ESP_LOGE("ads1262", "device is already parked on pair %d; this facade wants pair %u. "
-                                "One mux cannot serve both -- refusing to start",
-                     (int) dev.onlyPair(), (unsigned) iPair);
+        /* uPair gets the same treatment, or the refusal is ORDER-DEPENDENT. The
+         * voltage axis has no gain parameter -- it is documented as the device
+         * default G=32 -- so a uPair that some other facade already registered
+         * bypassed at G=1 would be read with a 32x error. Registering a bypassed
+         * pair FIRST and a voltage facade second is the order that slips through
+         * the iPair check above; the reverse order is caught by it. */
+        if (uPair != Ads1262ShuntAdc::PAIR_NONE && dev.pairRegistered(uPair) &&
+            dev.pairMode2(uPair) !=
+                    Ads1262ShuntAdc::mode2For(Ads1262ShuntAdc::PGA_GAIN_CODE, false)) {
+            ESP_LOGE("ads1262", "pair %u is already registered with MODE2=0x%02x, but the voltage "
+                                "axis assumes the default 0x%02x (G=%u) -- refusing to start",
+                     (unsigned) uPair, dev.pairMode2(uPair),
+                     Ads1262ShuntAdc::mode2For(Ads1262ShuntAdc::PGA_GAIN_CODE, false),
+                     (unsigned) Ads1262ShuntAdc::PGA_GAIN);
             return false;
         }
         /* The ZERO facade reconfigures the part to its internal short and leaves
@@ -2731,16 +2914,23 @@ public:
         }
         dev.noteMeasurementFacade();
 
-        /* Single-pair mode. Set AFTER init(), which runs the self-test and leaves
-         * the part on PAIR_CH0; setting it before would be overwritten. */
-        if (uPair == Ads1262ShuntAdc::PAIR_NONE) {
-            dev.setOnlyPair((int8_t) iPair);
-            ESP_LOGI("ads1262", "single-pair mode: mux parked on pair %u, no voltage "
-                                "channel (u = raw shunt volts, p = 0)", (unsigned) iPair);
+        /* Register AFTER init(), which runs the self-test and leaves the part
+         * on PAIR_CH0 at the default G=32; registering before would be
+         * overwritten. setPairGain first, so registerPair()'s immediate
+         * re-select programs the right MODE2. */
+        dev.setPairGain(iPair, pgaGainCode, pgaBypass);
+        dev.registerPair(iPair);
+        if (uPair != Ads1262ShuntAdc::PAIR_NONE) {
+            dev.registerPair(uPair);
+            ESP_LOGI("ads1262", "registered pairs %u (u) and %u (i, G=%u%s)",
+                     (unsigned) uPair, (unsigned) iPair,
+                     pgaBypass ? 1u : (unsigned) (1u << pgaGainCode),
+                     pgaBypass ? ", PGA bypassed" : "");
         } else {
-            dev.noteScanningFacade();
-            ESP_LOGI("ads1262", "scanning mode: u from pair %u, i from pair %u",
-                     (unsigned) uPair, (unsigned) iPair);
+            ESP_LOGI("ads1262", "registered pair %u (i, G=%u%s): no voltage channel "
+                                "(u = raw ADC volts, p = 0)",
+                     (unsigned) iPair, pgaBypass ? 1u : (unsigned) (1u << pgaGainCode),
+                     pgaBypass ? ", PGA bypassed" : "");
         }
         return true;
     }
@@ -2762,18 +2952,25 @@ public:
             lastReinitMs = now;
             ESP_LOGW("ads1262", "re-initialising after device reset");
             if (!dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart)) return false;
-            /* RE-PARK. init() always programs and records PAIR_CH0, but it does
-             * NOT consult onlyPair_ -- so after a reset the hardware sits on CH0
-             * while onlyPair_ still names whatever this facade asked for. pump()
-             * then writes its readings into volts_[CH0] and this facade goes on
-             * reading volts_[iPair], republishing its last PRE-RESET value with
-             * fresh timestamps until the next temperature boundary happens to
-             * reselect the pair. Stale data wearing a current timestamp is the
-             * worst of the available failures, and it is silent.
+            /* RE-REGISTER. init() always programs PAIR_CH0 at the default G=32
+             * and does NOT consult the scan set -- so after a reset the hardware
+             * sits on CH0 while the set still names whatever the facades asked
+             * for. pump() would then write its readings into volts_[CH0] and
+             * this facade go on reading volts_[iPair], republishing its last
+             * PRE-RESET value with fresh timestamps until the next temperature
+             * boundary happened to reselect the pair. Stale data wearing a
+             * current timestamp is the worst of the available failures, and it
+             * is silent.
              *
-             * Invisible for iPair == CH0, which is all this build ships, so the
-             * defect was masked by the configuration rather than absent. */
-            if (uPair == Ads1262ShuntAdc::PAIR_NONE) dev.setOnlyPair((int8_t) iPair);
+             * registerPair() is idempotent (the set survives the reset -- it is
+             * driver state, not device state) and re-selects a registered pair,
+             * which also reprograms that pair's MODE2 over the reset default.
+             * Only the facade that OBSERVES the reset runs this; the others see
+             * needsReinit() false and skip -- which is fine, because the
+             * surviving set covers their pairs and the scan resumes over all of
+             * them. */
+            dev.registerPair(iPair);
+            if (uPair != Ads1262ShuntAdc::PAIR_NONE) dev.registerPair(uPair);
         }
 
         dev.pump();

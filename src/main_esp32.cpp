@@ -75,14 +75,23 @@ static constexpr int8_t SHUNTADC_SCLK = 4, SHUNTADC_DIN = 5, SHUNTADC_DOUT = 6,
                         SHUNTADC_NCS = 7, SHUNTADC_START = 16;
 
 Ads1262ShuntAdc shuntAdc;
-/* Shunt current on J3 (IIN, PAIR_CH0), SINGLE-PAIR: uPair = PAIR_NONE parks the
- * mux on CH0 so it never moves. That is the configuration the filter choice in
- * ads1262.h assumes -- a mux change costs td(STDR) (~104 ms chopped) per sample,
- * and parking is what lets FIR @ 20 SPS actually run at its 19.15 SPS.
+/* Shunt current on J3 (IIN, PAIR_CH0). uPair = PAIR_NONE means no voltage
+ * channel: u carries the raw shunt volts and p is pinned to 0. Give it a uPair
+ * (J5 = PAIR_CH2, the old wiring) once a divider is actually fitted there, and
+ * set dividerRatio at the same time.
  *
- * There is consequently NO voltage channel: u carries the raw shunt volts and p
- * is pinned to 0. Give it a uPair (J5 = PAIR_CH2, the old wiring) once a divider
- * is actually fitted there, and set dividerRatio at the same time.
+ * NO LONGER PARKED: with shuntAdcDcct below also registered, the device scans
+ * CH0 <-> CH1. Every pair switch restarts the conversion cycle (td(STDR)
+ * doubled to ~104 ms by chop), so EACH channel updates at ~4.8 SPS -- not the
+ * 19.15 SPS the mux-parked configuration delivered. Still well above the
+ * ~2.5 SPS on-air target.
+ *
+ * Each published sample is no noisier: it is still ONE conversion at the same
+ * gain and filter. What degrades is the uncertainty of any FIXED-DURATION
+ * average, by ~2x -- four times fewer CH0 conversions arrive per second, and
+ * averaging error falls as sqrt(N). Comment out the DCCT registration below and
+ * this channel parks again automatically (the device parks whenever exactly one
+ * pair is registered).
  *
  * shuntOhm 2 mOhm: sized for 14 A => 28 mV, 80% of the 35 mV input window note N8
  * derives from G=32, leaving headroom for transients. Nominal, NOT calibrated --
@@ -104,9 +113,9 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
                                  12,
                                  SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
                                  SHUNTADC_NCS, SHUNTADC_START,
-                                 /* reportDieTemp: this is now the only ADS1262
-                                  * measurement channel registered, so nothing else
-                                  * would carry the die temperature -- and it is the
+                                 /* reportDieTemp: DCCT below shares this ADS1262 but
+                                  * deliberately opts out, so this remains the one
+                                  * channel carrying the single die sensor -- and it is the
                                   * x-axis for the offset drift the shunt sizing
                                   * depends on. T read nan before this was set. */
                                  true};
@@ -129,6 +138,51 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
  * configuration, and 4 is enough for that. The mean's uncertainty goes from
  * sd/4 to sd/2 -- about 3 nV to 7 nV at the measured 13 nV per-conversion
  * sigma, against a budget of 350 nV (10 ppm of 35 mV). */
+/* DCCT primary current on J4 (PAIR_CH1): a 500:N current transformer into a
+ * 5 Ohm burden resistor across AIN2(+)/AIN3(-). V_burden = I_primary * N/100,
+ * so the envelope (2..40 A primary, N = 1..6 turns) spans 20 mV .. 2.4 V. At
+ * G=1 the PGA's own output swing (Equation 12) still limits each input pin to
+ * roughly -2.2..+2.2 V on these +-2.5 V rails, which a ground-referenced 2.4 V
+ * peak clears by ~0.2 V, so this pair runs GAIN 1 with the PGA BYPASSED:
+ * rail-to-rail input, +-VREF = +-2.5 V digital full scale. 2.4 V is 96% of FS;
+ * prefer a turns
+ * count with I*N <= ~200 A-turns when the setup allows headroom. Over-range is
+ * policed digitally (DIAG_PGA_RANGE) because the PGA alarms cannot fire
+ * bypassed. G=1 noise (~1 uV/conversion) is ~50 ppm of the worst-case 20 mV
+ * signal -- the DCCT ratio error and the burden's tolerance/tempco dominate.
+ * Burden dissipation reaches (40*6/500)^2 * 5 = 1.15 W: fit a >= 3 W low-tempco
+ * part, it is the metrology element. Tie the burden cold end to board GND so
+ * the pins stay inside the bypassed +-2.6 V absolute window.
+ *
+ * FIELD MAPPING (same convention as the other overloaded channels): u is the
+ * raw burden voltage in VOLTS at the ADC input (dividerRatio 0 = unscaled,
+ * doubles as a range readout), i is the PRIMARY current in AMPERES, p = 0.
+ *
+ * shuntOhm 0.01 is the N=1 effective transresistance (5 Ohm * 1/500). The
+ * turns ratio is applied at runtime through the EXISTING per-sampler
+ * calibration: after re-rigging, `calibrate DCCT I <1/N>` on the console
+ * (0.5 for N=2 ... 0.1667 for N=6; EEPROM-persisted). i is only correct for
+ * the rigged N -- and note a trim calibration lives in the SAME factor, so
+ * changing N overwrites trim.
+ *
+ * storageId 10: taken are 0 (ADS/ADS131), 1 (INA226), 2 (INA228 0x40),
+ * 3/11 (mux A/B), 5/6/7 (TMP117 0x48-0x4A), 16 (TMP117 0x4B), 9 (SHUNT_ADC_ONLY
+ * TMP117), 12/13/14 (shunt/zero/health), 15 (Dummy).
+ *
+ * Slot 8 is NOT free despite no getStorageId() returning it: PowerSampler_INA228
+ * is a SECOND consumer of this same EEPROM namespace, storing resistor/range at
+ * 8 + (addr - I2C_A0) (ina228.h:186) independently of its own storageId of 2.
+ * Grepping getStorageId() alone therefore understates what is taken -- 10 was
+ * checked against both. */
+PowerSampler_ShuntAdc shuntAdcDcct{shuntAdc,
+                                   Ads1262ShuntAdc::PAIR_NONE, Ads1262ShuntAdc::PAIR_CH1,
+                                   0.01f, 0.0f,
+                                   10,
+                                   SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
+                                   SHUNTADC_NCS, SHUNTADC_START,
+                                   /* reportDieTemp: CH0 already carries it */ false,
+                                   /* pgaGainCode */ 0, /* pgaBypass */ true};
+
 PowerSampler_ShuntAdcZero shuntAdcZero{shuntAdc, 4, 13,
                                        SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
                                        SHUNTADC_NCS, SHUNTADC_START};
@@ -378,6 +432,9 @@ void setup(void) {
     /* The bridge prefixes the sampler name with "BLE_", so these appear as
      * BLE_SHUNT_ADC and BLE_SHUNT_ADC_ZERO. Extra channels: SHUNT_ADC_ch1, ... */
     samplers.add("SHUNT_ADC", &shuntAdcIn);
+    /* dev[16] truncation: "ftr_DCCT" fits whole; a SHUNT_ADC_-prefixed name
+     * would collide with SHUNT_ADC's truncation in InfluxDB. */
+    samplers.add("DCCT", &shuntAdcDcct);
     //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);
 

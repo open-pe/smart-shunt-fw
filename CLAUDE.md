@@ -81,6 +81,21 @@ Other facts that cost real debugging time:
   - `SHUNT_ADC_ZERO`: `U` is the offset in volts, `I` is a within-burst standard deviation
     **in volts, not a current**, `P` is always 0.
   - `SHUNT_ADC_HEALTH`: `U` is fCLK in **Hz**, `I` is AVDD−AVSS in volts, `P` is always 0.
+  - `DCCT`: J4/PAIR_CH1, a 500:N current transformer into a 5 Ω burden. `U` is the burden
+    voltage in **volts** (unscaled — it doubles as a range readout), `I` is **primary**
+    amperes, `P` is always 0. `I` is only correct for the turns count actually rigged: the
+    N/100 ratio is carried by the EEPROM calibration factor (`calibrate DCCT I <1/N>`), which
+    is the *same* factor any gain trim lives in — re-rigging N overwrites the trim.
+    This pair runs G=1 with the **PGA bypassed** (2.4 V full scale is far outside the G=1
+    PGA window), so the PGA over-range alarms cannot fire; over-range is caught digitally at
+    ~98% of ±2.5 V FS and reported as `DIAG_PGA_RANGE` with `U`/`I` = NaN.
+- **Registering `DCCT` un-parks the ADS1262 mux.** With only `SHUNT_ADC` registered the mux
+  sits on CH0 and reaches its full 19.15 SPS; with both, the device scans CH0↔CH1 and each
+  channel updates at **~4.8 SPS** (every pair switch restarts conversion, ~104 ms chopped).
+  Still above the ~2.5 SPS on-air rate. Individual samples are no noisier — same gain, same
+  filter, one conversion each — but any *fixed-duration average* is ~2× less certain, since a
+  quarter as many CH0 conversions arrive. Commenting out the `samplers.add("DCCT", …)` line
+  parks CH0 again automatically.
 - NaN is **dropped, not stored**: `Point::addField` skips it, and the collector's `write_point`
   likewise skips `None`. An all-NaN sample therefore yields a point with tags, a timestamp and
   *no fields*. The current collector detects and counts those locally instead of sending them;
