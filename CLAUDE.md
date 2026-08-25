@@ -29,18 +29,24 @@ gone — old transcripts still name them.)
   investigating; it is USB, not the build.
 - **`pio device monitor` does not work here** — miniterm dies on `termios.error: Operation not
   supported by device`. Read the port with pyserial instead.
-- **OPENING THE SERIAL PORT REBOOTS THE BOARD**, and therefore drops its BLE link. This is
-  the ESP32-S3's native USB-CDC: it resets on open, and setting `dtr = False` / `rts = False`
-  before `open()` does **not** prevent it — verified 2026-08-25, where a `help` probe returned
-  a full boot banner. Consequences, both of which cost real time:
-  - Every serial read costs the collector a reconnect. A session of "just checking the log"
-    looks downstream exactly like a board with flaky BLE, and it is easy to go hunting for a
-    BlueZ or collector fault that does not exist. If you are reading serial, **you** are the
-    dropouts. Read the collector's journal instead when the board is in service.
-  - Uptime in the telemetry line resets each time, so it measures your last port open, not
-    the board's actual run.
-  Console commands still work — just sleep ~10 s after opening to ride out the reboot before
-  writing, and expect one BLE reconnect per session.
+- **Opening the serial port MAY reset the board — unconfirmed, do not rely on either answer.**
+  On 2026-08-25 a `help` probe returned a full boot banner right after an open, which looks
+  like a reset-on-open (plausible for the S3's native USB-CDC, where `dtr = False` /
+  `rts = False` before `open()` need not prevent it). But the board's own uptime counter, and
+  the collector's `started Ns ago`, both kept climbing across several later opens — which says
+  it did *not* reset. The banner was probably the tail of the preceding flash's reset. Left
+  recorded because it cost an hour of misattribution: **BLE dropouts were blamed on serial
+  access when the actual cause was collector-side** (below). Settle it with an explicit test
+  — read uptime, close, reopen, read uptime — before quoting it as fact either way.
+- **A stuck board is often a stuck COLLECTOR.** Symptom: the board advertises continuously
+  (`last advertisement 0s ago`) and delivers a healthy few minutes of data, then
+  `TimeoutError no data`, after which the collector loops `connecting to …` for minutes and
+  never re-establishes — while *other* boards keep reporting at full rate throughout. The tell
+  is `!!! received notification with no subscriber` piling up (46 in 20 min when seen):
+  notifications are arriving with no client object bound to them. `systemctl restart
+  smart-shunt-ble` clears it and the board returns immediately at full rate. Because the other
+  boards are unaffected, this looks exactly like a fault in the one board that is actually
+  fine — check the per-device rates before touching it.
 - Opening the port with default DTR/RTS can leave the board wedged and silent. If it goes
   quiet and re-flashing also fails, it needs a physical **BOOT + RESET** to re-enter download
   mode — ask, don't try to fix it over the wire.
