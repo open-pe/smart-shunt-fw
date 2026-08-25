@@ -29,15 +29,18 @@ gone — old transcripts still name them.)
   investigating; it is USB, not the build.
 - **`pio device monitor` does not work here** — miniterm dies on `termios.error: Operation not
   supported by device`. Read the port with pyserial instead.
-- **Opening the serial port MAY reset the board — unconfirmed, do not rely on either answer.**
-  On 2026-08-25 a `help` probe returned a full boot banner right after an open, which looks
-  like a reset-on-open (plausible for the S3's native USB-CDC, where `dtr = False` /
-  `rts = False` before `open()` need not prevent it). But the board's own uptime counter, and
-  the collector's `started Ns ago`, both kept climbing across several later opens — which says
-  it did *not* reset. The banner was probably the tail of the preceding flash's reset. Left
-  recorded because it cost an hour of misattribution: **BLE dropouts were blamed on serial
-  access when the actual cause was collector-side** (below). Settle it with an explicit test
-  — read uptime, close, reopen, read uptime — before quoting it as fact either way.
+- **Reading the serial port does NOT reset the board — esptool's reset sequence does.** Opening
+  the port with pyserial (`dtr = False`, `rts = False` before `open()`) leaves a running board
+  alone, so reading serial on an in-service board is safe and costs the collector nothing. What
+  *does* reboot it is any esptool invocation that drives the reset lines — `write-flash`, or
+  even `read-mac` with `--after hard-reset`. Budget one BLE reconnect per esptool call, none
+  per serial read.
+
+  Worth knowing because getting this backwards cost an hour on 2026-08-25: a `help` probe
+  returned a full boot banner and was read as reset-on-open, when the banner was simply the
+  tail of the esptool reset that had just run. **BLE dropouts were then blamed on serial access
+  when the cause was collector-side** (below). The uptime counter is the arbiter — it kept
+  climbing across serial opens, which was the clue that the attribution was wrong.
 - **A stuck board is often a stuck COLLECTOR.** Symptom: the board advertises continuously
   (`last advertisement 0s ago`) and delivers a healthy few minutes of data, then
   `TimeoutError no data`, after which the collector loops `connecting to …` for minutes and
