@@ -24,7 +24,14 @@ constexpr uint8_t AUX_PIN = PA8;
 
 constexpr gpio_num_t AUX_PIN = GPIO_NUM_9;
 #endif
-constexpr bool AUX_ACTIVE_HIGH = true; // N-channel low-side switch: HIGH = on, LOW = off
+/* Load-switch gate polarity is board-specific. The default (1) is the N-channel low-side
+ * switch the bench boards are wired for: HIGH = on, LOW = off. A board still on the old
+ * P-channel high-side switch MUST be built with -D AUX_ACTIVE_HIGH=0 -- otherwise a logical
+ * "off" drives the gate LOW and physically energises the load at boot, and "aux off" makes
+ * it more on. There is no runtime detection; polarity is a compile-time per-board fact. */
+#ifndef AUX_ACTIVE_HIGH
+#  define AUX_ACTIVE_HIGH 1
+#endif
 
 // Raw EEPROM/NVS byte offsets -- deliberately NOT slot indices. Calibration occupies bytes 16..111
 // today and its assert(ecIndex <= 16) reserves through 151, and the slot scheme is already

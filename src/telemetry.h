@@ -126,17 +126,23 @@ public:
         }
 
         processConsole();
+#if defined(ESP32) && ARDUINO_USB_MODE && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+        // A plugged USB host keeps the device awake -- deep sleep cannot wake on USB input, so
+        // sleeping would strand an attached operator. Sampled here every cycle rather than once
+        // at the idle boundary: isPlugged() has documented transient false readings (HWCDC.cpp),
+        // and a single misread at the 1-hour mark would otherwise spuriously trip sleep. Treating
+        // it as wake activity makes the IDLE_SLEEP_AFTER_US window the debounce.
+        if (Serial.isPlugged()) noteWakeEvent();
+#endif
         if (checkIdle) checkIdleSleep();
     }
 
     void checkIdleSleep() {
         if (platform::micros64() - timeLastWakeEvent > IDLE_SLEEP_AFTER_US) {
-            // Deep sleep cannot wake for USB input. Keep an attached USB console and an
-            // energised AUX output controllable instead of preserving a state nobody can change.
+            // AUX energised is not a wake event but a state that must not be frozen: sleeping
+            // with the output on locks it until the next wake, with no way to turn it off. The
+            // USB-console case is handled as wake activity in the pump above.
             bool stayAwake = ble.isConnected() || auxGet();
-#if defined(ESP32) && ARDUINO_USB_MODE
-            stayAwake = stayAwake || Serial.isPlugged();
-#endif
             if (stayAwake) {
                 noteWakeEvent();
             } else {
