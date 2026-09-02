@@ -250,7 +250,15 @@ PowerSampler_ShuntAdcHealth shuntAdcHealth{shuntAdc, 30000, 14,
  * PAIR_CH2 = J5 is the divider's assumed landing point; main_esp32.cpp has carried
  * a note anticipating exactly that since before this board existed. If the divider
  * is on J6, change this one argument to PAIR_CH3. */
+#ifdef RELAY_MUX_ONLY
+/* XIAO ESP32-S3 carrying ONLY the relay mux (env xiao_relaymux): D0/D1/D2.
+ * The XIAO breaks out just 11 GPIOs -- D0..D10 = 1,2,3,4,5,6,43,44,7,8,9 -- and
+ * GPIO2/3 are the I2C pins in the XIAO settings branch, which is why this build
+ * skips the I2C bring-up entirely: there is nothing on the bus to find. */
+static constexpr uint8_t RELAYMUX_ARM = 1, RELAYMUX_REQ_A = 2, RELAYMUX_REQ_B = 3;
+#else
 static constexpr uint8_t RELAYMUX_ARM = 17, RELAYMUX_REQ_A = 18, RELAYMUX_REQ_B = 21;
+#endif
 
 RelayMux2 relayMux{RELAYMUX_ARM, RELAYMUX_REQ_A, RELAYMUX_REQ_B};
 RelayMuxAdcBackend relayMuxAdc{relayMux, shuntAdc, Ads1262ShuntAdc::PAIR_CH2};
@@ -520,9 +528,17 @@ void setup(void) {
     /* Physical-layer check while the pins are still plain GPIOs. Not fatal: on the
      * shunt-adc board the ADS1262 is on SPI and must come up even with the I2C
      * harness unplugged. See i2c_check_pins() for what it can and cannot see. */
+#ifndef RELAY_MUX_ONLY
     i2c_check_pins(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL);
 
     Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
+#else
+    /* No I2C parts on the relay-mux bring-up board, and GPIO2/3 -- which the XIAO
+     * settings branch names as SCL/SDA -- are the relay REQ lines here. Bringing
+     * up Wire would hand those pins to the I2C peripheral and the relays would
+     * never switch. */
+    ESP_LOGI("main", "RELAY_MUX_ONLY: I2C bring-up skipped, no samplers registered");
+#endif
 
 #ifdef SHUNT_ADC_ONLY
     i2c_check_pins(TMP117_I2C2_SDA, TMP117_I2C2_SCL);
@@ -547,6 +563,8 @@ void setup(void) {
 
     if (sizeof(WireSample) != 64) assert(false);
     if (sizeof(Sample) != 32) assert(false);
+
+#ifndef RELAY_MUX_ONLY
 
 #ifdef DUAL_INA228
     /* Two plain parts, no mux, no 0x40. The names keep the series this harness has
@@ -640,6 +658,18 @@ void setup(void) {
     }
 #endif
 
+#endif /* !RELAY_MUX_ONLY -- nothing is registered on the bring-up board: no
+        * ADS1262, no INA228s, no TMP117s. Registering them would run SPI on pins
+        * the XIAO does not have (SHUNTADC_START is GPIO16) and I2C on the relay
+        * REQ lines. */
+
+#ifdef WITH_RELAY_MUX
+    /* Before initAll(), and independent of it. The relay state machine has to run
+     * even when nothing else on the board came up -- on the bring-up board there is
+     * no ADS1262, so no sampler registers and hasData() is never called. */
+    relayMux.begin();
+#endif
+
     samplers.initAll();
     samplers.startAll();
 
@@ -666,11 +696,25 @@ void setup(void) {
 [[noreturn]] void realTimeTask(void *arg) {
     (void)arg;
     while (true) {
+#ifdef WITH_RELAY_MUX
+        /* THE one call site. RelayMux2 is single-threaded by construction and this
+         * task owns it; every off-task request goes through its command inbox.
+         * Ticked before the halt check so a switching sequence already in flight
+         * completes rather than freezing with a coil energised. */
+        relayMux.tick();
+#endif
         if (g_samplingHalted) {
             vTaskDelay(10);
             continue;
         }
         samplers.updateAll();
+#ifdef RELAY_MUX_ONLY
+        /* The bring-up build registers no samplers, so updateAll() returns
+         * immediately and this loop -- priority 20, pinned to core 1 -- would spin
+         * at 100% and starve the idle task into a watchdog reset. Nothing here is
+         * time critical: the relay sequence is measured in tens of milliseconds. */
+        vTaskDelay(1);
+#endif
     }
 }
 

@@ -131,6 +131,9 @@ public:
                      (unsigned) pair, (unsigned) Ads1262ShuntAdc::PAIR_COUNT - 1);
             return false;
         }
+        /* Idempotent, and normally already done in setup() -- the relay state
+         * machine must run even when the ADC does not, or a board carrying only
+         * the mux (bring-up) could never move a contact. */
         if (!mux.begin()) return false;
         if (!dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart)) return false;
         pSck = pinSck; pMosi = pinMosi; pMiso = pinMiso; pCs = pinCs; pStart = pinStart;
@@ -214,7 +217,6 @@ public:
         /* Manual mode still ticks the state machine -- the console command needs
          * the sequence to actually run -- but publishes nothing. */
         if (manual) {
-            mux.tick();
             /* Keep pumping. If these channels are the only facades on this ADC,
              * dropping pump() would park the converter for the whole bench
              * session and the first sample after `relaymux auto` would come from
@@ -255,7 +257,11 @@ public:
             armedForCapture = false;
         }
 
-        mux.tick();
+        /* NO mux.tick() here. realTimeTask ticks the state machine once per pass,
+         * on the same task, so it advances even when no sampler is registered --
+         * which is the bring-up case, where the ADC is absent and hasData() is
+         * never called at all. Ticking here as well would be harmless but would
+         * hide that dependency. */
 
         /* Not settled: nothing to do but keep the ADC scan alive. pump() must
          * still run or the device stops producing, and the discard bookkeeping

@@ -138,6 +138,11 @@ public:
     }
 
     bool begin() {
+        /* Idempotent. begin() is now called from setup() so the state machine runs
+         * whether or not anything else on the board came up, and the ADC backend
+         * calls it too; a second call must not reset a mux that is mid-sequence or
+         * already settled on a channel. */
+        if (begun) return true;
         if (!pinsConfigured()) {
             ESP_LOGE("relaymux", "control pins unset (ARM=%u REQ_A=%u REQ_B=%u); not starting",
                      pinArm, pinReqA, pinReqB);
