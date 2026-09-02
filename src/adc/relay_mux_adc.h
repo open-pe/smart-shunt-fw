@@ -71,10 +71,47 @@ private:
      * corners only. Qualify SETTLE_MS on a scope before trusting the numbers. */
     static constexpr uint32_t DISCARD_SCANS = 2;
 
+    /* AVERAGE THIS MANY CONSECUTIVE CONVERSIONS INTO ONE PUBLISHED SAMPLE.
+     *
+     * Measured on the nest 2026-09-03: VMUX_A published two discrete levels
+     * 141 uV apart (VMUX_B, 73 uV apart) with only ~2 uV of spread WITHIN each
+     * level -- so not noise, but a dependence on WHICH conversion the capture
+     * happened to land on. The tell was in the timestamps: the outlying samples
+     * always arrived ~60 ms late, i.e. one extra conversion had slipped in before
+     * the capture.
+     *
+     * That is inherent to counting generations from `genAtSettle`. The mux's fixed
+     * settle timer is not synchronised to the ADC's conversion boundaries, so the
+     * settle instant falls either just before or just after a boundary and the
+     * whole capture shifts by ONE conversion. Counting makes the capture
+     * deterministic in COUNT, not in PHASE.
+     *
+     * MUST BE EVEN. Averaging an even number of consecutive conversions is immune
+     * to a +-1 index shift for any component that alternates between adjacent
+     * conversions, which is what the two-level data shows. Deliberately NOT
+     * justified by a specific mechanism: chop was the first suspect, but with CHOP
+     * ON one generation() is already a chop-cancelled output, so that story does
+     * not survive contact with ads1262.h. The fix does not depend on which
+     * alternating term it is -- only on it alternating.
+     *
+     * Cost is one extra conversion per dwell (~52 ms parked, ~104 ms chopped),
+     * paid on every channel visit. Raising it further buys sqrt(N) on white noise
+     * but the within-level spread is already ~2 uV, three orders below the step
+     * this exists to remove, so there is nothing there worth buying. */
+    static constexpr uint32_t AVG_CONVERSIONS = 2;
+    static_assert(AVG_CONVERSIONS >= 2 && (AVG_CONVERSIONS % 2) == 0,
+                  "AVG_CONVERSIONS must be even and >= 2, or a +-1 index shift survives it");
+
     Target serving = Target::CH_A;   ///< whose turn it is
     uint32_t genAtSettle = 0;
     uint32_t muxGenSeen = 0;
     bool armedForCapture = false;
+    /* Accumulator for the AVG_CONVERSIONS average. accN == 0 means "not started".
+     * accLastGen exists to enforce CONSECUTIVENESS: two conversions that are not
+     * adjacent may sit on the same phase of whatever alternates, and averaging
+     * those preserves exactly the error this is meant to cancel. */
+    uint32_t accN = 0, accLastGen = 0;
+    float accSum = 0.0f;
     bool initialised = false;
 
     /* Bench override. DESIGN.md's open gates require someone to observe all four
@@ -177,6 +214,12 @@ private:
     // reported, never acted on except to widen
     uint32_t settleObservedMs = 0, settleObservedMaxMs = 0, closeObservedMs = 0;
     uint32_t nNoStep = 0, nUnsettled = 0, nWidened = 0;
+    /* Times an averaging run was restarted because generation() advanced by more
+     * than one between polls -- the RT task did not get back in time. Not a fault
+     * in itself (the sample is simply delayed by one conversion), but a rising
+     * count means the loop is being starved and the averaging is costing dwell
+     * time it should not. */
+    uint32_t nPairBroken = 0;
     uint32_t lastDiagOverride = 0;
 
     void resetObservation(Target ch) {
@@ -302,11 +345,16 @@ public:
     /// Learned timings and fault counts, for the console. All milliseconds since
     /// ARM rose; settleObserved is an UPPER bound (STABLE_N conversions of
     /// granularity), closeObserved is when the step was first seen.
+    /// Conversions averaged into one published sample. Reported by the console so
+    /// the operator can tell a quiet reading from a heavily averaged one.
+    static constexpr uint32_t avgConversions() { return AVG_CONVERSIONS; }
+
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
                      uint32_t &noStep, uint32_t &unsettled, uint32_t &widened,
-                     float &spanV, float &stableEps) const {
+                     uint32_t &pairBroken, float &spanV, float &stableEps) const {
         lastMs = settleObservedMs; maxMs = settleObservedMaxMs; closeMs = closeObservedMs;
         noStep = nNoStep; unsettled = nUnsettled; widened = nWidened;
+        pairBroken = nPairBroken;
         /* The span is the number the operator needs in order to choose stableEpsV,
          * so it is reported unconditionally -- including on the fault paths, where
          * the old code recorded nothing and the console showed zeros forever while
@@ -438,6 +486,7 @@ public:
 
         if (!mux.isSettled() || mux.settledTarget() != ch) {
             armedForCapture = false;
+            accN = 0; accSum = 0.0f;
             return false;
         }
 
@@ -450,10 +499,40 @@ public:
             muxGenSeen = mux.generation();
             genAtSettle = dev.generation();
             armedForCapture = true;
+            accN = 0; accSum = 0.0f;
             return false;
         }
 
         if ((uint32_t) (dev.generation() - genAtSettle) <= DISCARD_SCANS) return false;
+
+        /* Collect AVG_CONVERSIONS CONSECUTIVE conversions, then average them.
+         * See the AVG_CONVERSIONS comment for why this exists and why even.
+         *
+         * Consecutiveness is enforced, not assumed. If generation() advanced by
+         * more than one since the last poll the run is restarted rather than
+         * completed with a gap in it: non-adjacent conversions can share a phase,
+         * and averaging those would preserve the very term this cancels. A restart
+         * costs one more conversion of dwell and nothing else.
+         *
+         * NaN is summed, not skipped. An over-ranged or otherwise invalid
+         * conversion must poison the average so the sample publishes NaN with the
+         * device's own diagnostic -- silently averaging the finite half of a pair
+         * would turn a detected fault into a plausible number. */
+        {
+            const uint32_t g = dev.generation();
+            if (accN == 0) {
+                accLastGen = g; accSum = dev.volts(pair); accN = 1;
+            } else if (g != accLastGen) {
+                if ((uint32_t) (g - accLastGen) != 1) {
+                    ++nPairBroken;
+                    accLastGen = g; accSum = dev.volts(pair); accN = 1;
+                } else {
+                    accLastGen = g; accSum += dev.volts(pair); ++accN;
+                }
+            }
+            if (accN < AVG_CONVERSIONS) return false;
+        }
+        const float vAvg = accSum / (float) AVG_CONVERSIONS;
 
         /* The fixed timer and the scan discard have both elapsed. Everything from
          * here is the EVIDENCE gate, and it can only ever delay or refuse a
@@ -489,7 +568,10 @@ public:
          * difference between the channels; so is the detectability. Below
          * moveEpsV we cannot see it, and below moveEpsV it does not matter. */
         const float mine = lastAccepted[(uint8_t) ch];
-        const float v = dev.volts(pair);
+        /* The AVERAGE, not the instantaneous conversion. Everything downstream --
+         * the step guard, the published value, lastAccepted -- must see the same
+         * number, or the guard would vet a reading the channel does not publish. */
+        const float v = vAvg;
         const bool expectMove = std::isfinite(mine) && std::isfinite(stepFrom) &&
                                 fabsf(mine - stepFrom) > moveEpsV;
 
@@ -583,6 +665,7 @@ public:
         if (std::isfinite(v)) lastAccepted[(uint8_t) ch] = v;
         lastVolts = NAN;
         armedForCapture = false;
+        accN = 0; accSum = 0.0f;
         serving = other(ch);
         mux.select(serving);
         return v;
@@ -602,7 +685,8 @@ public:
 
     static constexpr uint32_t cycleMsEstimate() {
         // both channels switch, settle, and wait out their discarded scans
-        return 2 * (RelayMux2::switchLatencyMs() + (DISCARD_SCANS + 1) * SCAN_MS_PESSIMISTIC);
+        return 2 * (RelayMux2::switchLatencyMs() +
+                    (DISCARD_SCANS + AVG_CONVERSIONS) * SCAN_MS_PESSIMISTIC);
     }
 };
 

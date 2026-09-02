@@ -166,10 +166,10 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                          (unsigned long) RelayMux2::DEAD_TIME_MS,
                          (unsigned long) relayMux.settleMs(),
                          (unsigned long) RelayMux2::SETTLE_FLOOR_MS);
-                uint32_t lastMs, maxMs, closeMs, noStep, unsettled, widened;
+                uint32_t lastMs, maxMs, closeMs, noStep, unsettled, widened, pairBroken;
                 float spanV, stableEps;
                 relayMuxAdc.settleStats(lastMs, maxMs, closeMs, noStep, unsettled, widened,
-                                        spanV, stableEps);
+                                        pairBroken, spanV, stableEps);
                 UART_LOG("  span %.6g V, stability gate %s (stableEpsV %.6g) -- set it from "
                          "the span, not by guessing",
                          (double) spanV, stableEps > 0 ? "ON" : "OFF (fixed timer only)",
@@ -182,6 +182,13 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 UART_LOG("  faults: no-step %lu, never-settled %lu, auto-widened %lu",
                          (unsigned long) noStep, (unsigned long) unsettled,
                          (unsigned long) widened);
+                /* Each published sample is the mean of AVG_CONVERSIONS CONSECUTIVE
+                 * conversions; restarts count runs where generation() jumped by more
+                 * than one, i.e. the RT task was too slow to keep the run adjacent.
+                 * A rising count is a starved loop, not a bad contact. */
+                UART_LOG("  averaging %lu consecutive conversions/sample, %lu run restarts",
+                         (unsigned long) RelayMuxAdcBackend::avgConversions(),
+                         (unsigned long) pairBroken);
                 UART_LOG("  'relaymux a|b|off|auto' | 'relaymux settle <ms>'");
                 break;
             }
