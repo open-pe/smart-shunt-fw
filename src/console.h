@@ -162,9 +162,42 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                          RelayMux2::targetName(relayMux.settledTarget()),
                          RelayMux2::targetName(relayMuxAdc.servingChannel()),
                          (unsigned long) relayMux.generation());
-                UART_LOG("  dead %lums + settle %lums per switch; 'relaymux a|b|off|auto'",
+                UART_LOG("  dead %lums + settle %lums per switch (floor %lums)",
                          (unsigned long) RelayMux2::DEAD_TIME_MS,
-                         (unsigned long) RelayMux2::SETTLE_MS);
+                         (unsigned long) relayMux.settleMs(),
+                         (unsigned long) RelayMux2::SETTLE_FLOOR_MS);
+                uint32_t lastMs, maxMs, closeMs, noStep, unsettled, widened;
+                relayMuxAdc.settleStats(lastMs, maxMs, closeMs, noStep, unsettled, widened);
+                /* Learned from the conversions the discard throws away. settle is
+                 * an UPPER bound: stability needs 3 agreeing conversions, ~156 ms
+                 * at 19.15 SPS, so a faster contact cannot be resolved here. */
+                UART_LOG("  observed: step at %lums, settled by %lums (worst %lums)",
+                         (unsigned long) closeMs, (unsigned long) lastMs, (unsigned long) maxMs);
+                UART_LOG("  faults: no-step %lu, never-settled %lu, auto-widened %lu",
+                         (unsigned long) noStep, (unsigned long) unsettled,
+                         (unsigned long) widened);
+                UART_LOG("  'relaymux a|b|off|auto' | 'relaymux settle <ms>'");
+                break;
+            }
+            if (v.startsWith("settle")) {
+                String n(v.substring(6));
+                n.trim();
+                if (n.length() == 0) {
+                    UART_LOG("relaymux settle = %lums (floor %lums)",
+                             (unsigned long) relayMux.settleMs(),
+                             (unsigned long) RelayMux2::SETTLE_FLOOR_MS);
+                    break;
+                }
+                /* Narrowing is a HUMAN decision on purpose. The firmware widens
+                 * itself when it observes a late contact, but will not shorten a
+                 * physical settle on the strength of its own measurements -- see
+                 * the auto-widen note in relay_mux_adc.h. Not persisted: it
+                 * reverts to the built-in default on reset. */
+                const uint32_t got = relayMux.setSettleMs((uint32_t) n.toInt());
+                UART_LOG("relaymux settle -> %lums%s (not persisted; the driver may widen "
+                         "it again if a contact settles later than this)",
+                         (unsigned long) got,
+                         got != (uint32_t) n.toInt() ? " (clamped to floor)" : "");
                 break;
             }
             if (v == "auto") {

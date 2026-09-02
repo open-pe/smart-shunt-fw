@@ -100,6 +100,94 @@ private:
 
     float lastVolts = NAN;
 
+    /* ---- SETTLE OBSERVATION -------------------------------------------------
+     *
+     * The conversions this backend used to throw away are the only evidence that
+     * exists about what the relay actually did. DISCARD_SCANS still discards them
+     * from the PUBLISHED value -- they are contaminated by construction -- but
+     * they are read first, and what they show decides two things the fixed timer
+     * cannot: whether the contact moved at all, and how long it really took.
+     *
+     * This costs no time. The conversions happen either way.
+     *
+     * RESOLUTION LIMIT, and it is not small: stability is declared only after
+     * STABLE_N agreeing conversions, so at the production FIR rate (19.15 SPS,
+     * ~52 ms each) no settle shorter than ~3*52 = 156 ms can ever be OBSERVED,
+     * whatever the relay actually does. This mechanism is therefore a guard and a
+     * coarse upper bound, NOT the contact-timing measurement DESIGN.md asks for.
+     * That needs a high-rate characterisation config -- sinc1 at a few kSPS, chop
+     * off -- because the FIR filter this build runs caps at 20 SPS. */
+    static constexpr uint8_t STABLE_N = 3;
+
+    /* Settled when STABLE_N consecutive conversions span <= this. It is a NOISE
+     * threshold, not an accuracy target: the question is "has the reading stopped
+     * moving by more than it moves anyway". Too SMALL is the safe direction --
+     * stability is then never declared, and the channel simply falls back to the
+     * fixed timer, which is the behaviour that existed before. Too large would
+     * declare a still-moving contact settled. Set it from the measured
+     * per-conversion spread on a quiet channel; the console reports the observed
+     * span so it can be chosen from data rather than guessed. */
+    const float stableEpsV;
+
+    /* A reading this far from the other channel's last accepted value counts as
+     * "the step happened". Also the threshold for EXPECTING a step at all: when
+     * the two channels are closer together than this, the switch is
+     * unobservable -- and, by the same arithmetic, a failure to switch would
+     * change the result by less than this too. */
+    const float moveEpsV;
+
+    /* Reason byte in the high octet, matching ads1262.h's encodeDiag() layout so
+     * the two cannot be confused downstream. */
+    static constexpr uint32_t DIAG_RELAY_NO_STEP   = 0x40u << 24;
+    static constexpr uint32_t DIAG_RELAY_UNSETTLED = 0x41u << 24;
+
+    float lastAccepted[3] = {NAN, NAN, NAN};   ///< indexed by Target
+    uint32_t armGenSeen = 0;
+    uint32_t obsGen = 0;
+    float ring[STABLE_N] = {NAN, NAN, NAN};
+    uint8_t ringIdx = 0, ringCount = 0;
+    float stepFrom = NAN;
+    bool moved = false, stable = false;
+    uint32_t tMoveMs = 0, tStableMs = 0;
+
+    // reported, never acted on except to widen
+    uint32_t settleObservedMs = 0, settleObservedMaxMs = 0, closeObservedMs = 0;
+    uint32_t nNoStep = 0, nUnsettled = 0, nWidened = 0;
+    uint32_t lastDiagOverride = 0;
+
+    void resetObservation(Target ch) {
+        ringIdx = ringCount = 0;
+        moved = stable = false;
+        tMoveMs = tStableMs = 0;
+        stepFrom = lastAccepted[(uint8_t) other(ch)];
+    }
+
+    void observe(float v, uint32_t tMs) {
+        if (!std::isfinite(v)) return;
+        ring[ringIdx] = v;
+        ringIdx = (uint8_t) ((ringIdx + 1) % STABLE_N);
+        if (ringCount < STABLE_N) ++ringCount;
+        if (ringCount == STABLE_N) {
+            float mn = ring[0], mx = ring[0];
+            for (uint8_t i = 1; i < STABLE_N; ++i) {
+                if (ring[i] < mn) mn = ring[i];
+                if (ring[i] > mx) mx = ring[i];
+            }
+            if ((mx - mn) <= stableEpsV) {
+                if (!stable) { stable = true; tStableMs = tMs; }
+            } else {
+                /* Re-open. Contact bounce is exactly a stable-then-moving-again
+                 * pattern, and latching the first quiet moment would time the
+                 * bounce rather than the settle. */
+                stable = false;
+            }
+        }
+        if (!moved && std::isfinite(stepFrom) && fabsf(v - stepFrom) > moveEpsV) {
+            moved = true;
+            tMoveMs = tMs;
+        }
+    }
+
     friend class PowerSampler_RelayMuxChannel;
 
     static Target other(Target t) { return t == Target::CH_A ? Target::CH_B : Target::CH_A; }
@@ -119,8 +207,10 @@ public:
      * which a ground-referenced divider output can exceed. Bypassed, full scale is
      * the reference itself, +-2.5 V. */
     RelayMuxAdcBackend(RelayMux2 &mux, Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair pair,
-                       uint8_t pgaGainCode = 0, bool pgaBypass = true)
-        : mux(mux), dev(dev), pair(pair), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass) {}
+                       uint8_t pgaGainCode = 0, bool pgaBypass = true,
+                       float stableEpsV = 1e-5f, float moveEpsV = 1e-3f)
+        : mux(mux), dev(dev), pair(pair), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass),
+          stableEpsV(stableEpsV), moveEpsV(moveEpsV) {}
 
     Ads1262ShuntAdc::Pair adcPair() const { return pair; }
 
@@ -175,6 +265,15 @@ public:
     void setManual(bool m) { manualReq.store(m, std::memory_order_release); }
 
     float dieTempC() const { return dev.dieTempC(); }
+
+    /// Learned timings and fault counts, for the console. All milliseconds since
+    /// ARM rose; settleObserved is an UPPER bound (STABLE_N conversions of
+    /// granularity), closeObserved is when the step was first seen.
+    void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
+                     uint32_t &noStep, uint32_t &unsettled, uint32_t &widened) const {
+        lastMs = settleObservedMs; maxMs = settleObservedMaxMs; closeMs = closeObservedMs;
+        noStep = nNoStep; unsettled = nUnsettled; widened = nWidened;
+    }
 
     /* Reports the REQUESTED mode, not the RT-task-applied one.
      *
@@ -285,6 +384,18 @@ public:
          * below needs a generation counter that is actually advancing. */
         dev.pump();
 
+        /* Observe EVERY conversion from ARM onward, settled or not. A new switch
+         * is signalled by armGeneration(), not generation(): the latter only says
+         * a switch FINISHED, which is far too late to have watched it happen. */
+        if (mux.armGeneration() != armGenSeen) {
+            armGenSeen = mux.armGeneration();
+            resetObservation(ch);
+        }
+        if (dev.generation() != obsGen) {
+            obsGen = dev.generation();
+            observe(dev.volts(pair), mux.msSinceArm());
+        }
+
         if (!mux.isSettled() || mux.settledTarget() != ch) {
             armedForCapture = false;
             return false;
@@ -304,6 +415,74 @@ public:
 
         if ((uint32_t) (dev.generation() - genAtSettle) <= DISCARD_SCANS) return false;
 
+        /* The fixed timer and the scan discard have both elapsed. Everything from
+         * here is the EVIDENCE gate, and it can only ever delay or refuse a
+         * sample -- never release one earlier than the code above already would.
+         * That asymmetry is deliberate: an adaptive mechanism that can shorten a
+         * physical settle on the strength of its own measurements is a mechanism
+         * that can talk itself into publishing a transient. */
+        const uint32_t tMs = mux.msSinceArm();
+
+        if (!stable) {
+            /* Still moving after the full settle. Give it up to twice as long
+             * again, then FAIL CLOSED: a reading that never stopped changing is
+             * not a measurement, and publishing the last value of a bouncing
+             * contact is exactly the plausible-wrong-number this driver exists to
+             * avoid. */
+            if (tMs < 3 * mux.settleMs()) return false;
+            ++nUnsettled;
+            ESP_LOGW("relaymux", "%s: never settled within %lums (span > %.3g V); publishing NaN",
+                     RelayMux2::targetName(ch), (unsigned long) tMs, (double) stableEpsV);
+            lastVolts = NAN;
+            lastDiagOverride = DIAG_RELAY_UNSETTLED;
+            return true;
+        }
+
+        /* THE RUNTIME GUARD. If both channels have a known last value and they
+         * differ by more than moveEpsV, then switching MUST have moved the
+         * reading. If it did not, the mux did not switch -- a stuck contact, an
+         * unpowered coil (the supervisor holds COIL_EN low below ~4.6 V), a
+         * broken control wire -- and the "measurement" is the OTHER channel
+         * wearing this channel's name.
+         *
+         * Coverage scales the right way. The error from a failed switch is the
+         * difference between the channels; so is the detectability. Below
+         * moveEpsV we cannot see it, and below moveEpsV it does not matter. */
+        const float mine = lastAccepted[(uint8_t) ch];
+        const bool expectMove = std::isfinite(mine) && std::isfinite(stepFrom) &&
+                                fabsf(mine - stepFrom) > moveEpsV;
+        if (expectMove && !moved) {
+            ++nNoStep;
+            ESP_LOGE("relaymux", "%s: expected a step of %.3g V and saw none -- mux did not "
+                                 "switch (coil? supply? contact?); publishing NaN",
+                     RelayMux2::targetName(ch), (double) fabsf(mine - stepFrom));
+            lastVolts = NAN;
+            lastDiagOverride = DIAG_RELAY_NO_STEP;
+            return true;
+        }
+
+        /* Learned timings, reported only. tStableMs is bounded below by
+         * STABLE_N conversions, so it is an UPPER bound on the true settle, never
+         * a tight one -- see the resolution note on STABLE_N. */
+        settleObservedMs = tStableMs;
+        if (tStableMs > settleObservedMaxMs) settleObservedMaxMs = tStableMs;
+        if (moved) closeObservedMs = tMoveMs;
+
+        /* AUTO-WIDEN ONLY. If the contact is settling later than the configured
+         * time, the configuration is wrong in the dangerous direction and is
+         * corrected immediately. Narrowing is never automatic: it is a decision to
+         * trust an estimate over a margin, and it belongs to a human with the
+         * console's reported numbers in front of them (`relaymux settle <ms>`). */
+        if (tStableMs > mux.settleMs()) {
+            const uint32_t was = mux.settleMs();
+            const uint32_t now = mux.setSettleMs(tStableMs + tStableMs / 2);
+            ++nWidened;
+            ESP_LOGW("relaymux", "%s settled at %lums, later than the configured %lums -- "
+                                 "widening to %lums",
+                     RelayMux2::targetName(ch), (unsigned long) tStableMs,
+                     (unsigned long) was, (unsigned long) now);
+        }
+
         lastVolts = dev.volts(pair);
         return true;
     }
@@ -311,8 +490,14 @@ public:
     /// Consume the reading and hand the mux to the other channel. Called only by
     /// the serving channel's getSample(), mirroring the INA228 backend's advance.
     float take(Target ch, uint32_t &diagOut) {
-        diagOut = dev.diag();
+        diagOut = lastDiagOverride ? lastDiagOverride : dev.diag();
+        lastDiagOverride = 0;
         const float v = lastVolts;
+        /* Remember what this channel actually read, so the NEXT switch away from
+         * it knows what step to expect. Only finite values: a faulted sample must
+         * not become the baseline that decides whether the following switch was
+         * observable. */
+        if (std::isfinite(v)) lastAccepted[(uint8_t) ch] = v;
         lastVolts = NAN;
         armedForCapture = false;
         serving = other(ch);

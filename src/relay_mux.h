@@ -95,8 +95,17 @@ public:
      * TRACE of the actual contacts, which is what the board's qualification plan
      * asks for anyway; the console command below exists to make that measurement
      * possible without a rebuild. */
-    static constexpr uint32_t DEAD_TIME_MS = 50;   ///< step 3: both coils released
-    static constexpr uint32_t SETTLE_MS    = 250;  ///< step 6: contact closed and quiet
+    static constexpr uint32_t DEAD_TIME_MS = 50;          ///< step 3: both coils released
+    static constexpr uint32_t SETTLE_MS_DEFAULT = 250;   ///< step 6: contact closed and quiet
+
+    /* Hard floor. No evidence from the ADC, however convincing, may publish a
+     * sample sooner than this after ARM rises, because DESIGN.md's FASTEST
+     * delay-on corner is 15.95 ms -- the contact CANNOT have closed before then,
+     * so anything the ADC reports earlier is necessarily the previous channel
+     * holding still. This is the one number in the settle path that is a real
+     * bound rather than an estimate, and it is the reason the adaptive path
+     * cannot talk itself down to zero. */
+    static constexpr uint32_t SETTLE_FLOOR_MS = 20;
 
 private:
     const uint8_t pinArm, pinReqA, pinReqB;
@@ -112,6 +121,9 @@ private:
     Target current = Target::NONE;   ///< what is (being) selected
     Target pending = Target::NONE;   ///< what select() asked for
     uint32_t tStateMs = 0;
+    uint32_t tArmMs = 0;             ///< when ARM last rose; survives the SETTLED transition
+    uint32_t armGen_ = 0;            ///< bumped once per ARM assertion (one per switch)
+    uint32_t settleMs_ = SETTLE_MS_DEFAULT;
     uint32_t generation_ = 0;        ///< bumped once per entry into SETTLED
     bool begun = false;
 
@@ -167,7 +179,7 @@ public:
         begun = true;
         ESP_LOGI("relaymux", "ready: ARM=%u REQ_A=%u REQ_B=%u, dead %lums settle %lums",
                  pinArm, pinReqA, pinReqB,
-                 (unsigned long) DEAD_TIME_MS, (unsigned long) SETTLE_MS);
+                 (unsigned long) DEAD_TIME_MS, (unsigned long) settleMs_);
         return true;
     }
 
@@ -274,11 +286,18 @@ public:
                 driveAll(HIGH, pending == Target::CH_A, pending == Target::CH_B);
                 current = pending;
                 tStateMs = now;
+                /* Separate from tStateMs, which the SETTLED transition overwrites.
+                 * Everything measuring "how long did this contact take" needs an
+                 * origin that survives the whole switch, and ARM rising is the
+                 * only defensible one -- it is the instant the coil can first be
+                 * energised. */
+                tArmMs = now;
+                ++armGen_;
                 state = State::SETTLING;
                 break;
 
             case State::SETTLING:
-                if ((uint32_t) (now - tStateMs) < SETTLE_MS) break;
+                if ((uint32_t) (now - tStateMs) < settleMs_) break;
                 tStateMs = now;
                 state = State::SETTLED;
                 ++generation_;
@@ -302,8 +321,31 @@ public:
     uint32_t generation() const { return generation_; }
 
     /// Worst-case time from select() to trustworthy data, for callers sizing their
-    /// own timeouts. Derived, never a second hardcoded copy.
-    static constexpr uint32_t switchLatencyMs() { return DEAD_TIME_MS + SETTLE_MS; }
+    /// own timeouts. Derived, never a second hardcoded copy. Uses the DEFAULT
+    /// settle: this sizes compile-time constants, and a runtime-narrowed settle
+    /// only ever makes the estimate more conservative.
+    static constexpr uint32_t switchLatencyMs() { return DEAD_TIME_MS + SETTLE_MS_DEFAULT; }
+
+    uint32_t settleMs() const { return settleMs_; }
+
+    /// Milliseconds since ARM last rose. Meaningless before the first switch;
+    /// callers gate on armGeneration() changing rather than on this value.
+    uint32_t msSinceArm() const { return (uint32_t) (millis() - tArmMs); }
+
+    /// Bumped once per ARM assertion, i.e. once per switch. A consumer watching
+    /// the contact settle uses this to know a NEW switch began -- generation()
+    /// only tells it one FINISHED, which is too late to have observed anything.
+    uint32_t armGeneration() const { return armGen_; }
+
+    /// Runtime settle override, for adopting a measured value without a reflash.
+    /// Clamped to the hard floor; returns what actually took effect. NOT
+    /// persisted -- a settle time is a claim about physics that should be
+    /// re-established from data on each boot, not inherited from an NVS byte
+    /// written by an experiment nobody remembers.
+    uint32_t setSettleMs(uint32_t ms) {
+        settleMs_ = ms < SETTLE_FLOOR_MS ? SETTLE_FLOOR_MS : ms;
+        return settleMs_;
+    }
 
     const char *stateName() const {
         switch (state) {
