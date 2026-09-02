@@ -32,6 +32,10 @@
 #include "energy_counter.h"
 #include "util.h"
 #include "adc/tmp117.h"
+#ifdef WITH_RELAY_MUX
+#include "relay_mux.h"
+#include "adc/relay_mux_adc.h"
+#endif
 
 InfluxDBClient client;
 
@@ -225,6 +229,50 @@ PowerSampler_ShuntAdcHealth shuntAdcHealth{shuntAdc, 30000, 14,
                                            SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
                                            SHUNTADC_NCS, SHUNTADC_START};
 
+#ifdef WITH_RELAY_MUX
+/* Coto 3502 relay mux (~/dev/ee/hw/dmm-mux-TMUX862/relay-mux) feeding the
+ * ads1262-divider board into ONE ADS1262 pair. Off by default -- build with
+ * -D WITH_RELAY_MUX to enable -- because turning it on costs the running rig
+ * measurably and depends on wiring that is not on the board yet:
+ *
+ *   - registering a third pair slows EVERY channel. Two registered pairs already
+ *     took SHUNT_ADC and DCCT from 19.15 to ~4.8 SPS each, because a pair switch
+ *     restarts the conversion; a third divides the scan again.
+ *   - the three control lines and the JST-XH control cable to J4 do not exist yet.
+ *
+ * PINS ARE THE WIRING, NOT A PREFERENCE. Chosen clear of every pin settings.h
+ * declares for this board -- ADS1262 SPI (4/5/6/7/16), both I2C buses (3/8 and
+ * 11/12), AUX (9), and the declared-but-unregistered ADS131 map (5/6/7/9/11/12/13)
+ * -- but they are still a guess about a harness nobody has built. Confirm against
+ * the actual cable before trusting a reading, and change them here, not in
+ * settings.h, exactly as the ADS1262 SPI pins above are handled.
+ *
+ * PAIR_CH2 = J5 is the divider's assumed landing point; main_esp32.cpp has carried
+ * a note anticipating exactly that since before this board existed. If the divider
+ * is on J6, change this one argument to PAIR_CH3. */
+static constexpr uint8_t RELAYMUX_ARM = 17, RELAYMUX_REQ_A = 18, RELAYMUX_REQ_B = 21;
+
+RelayMux2 relayMux{RELAYMUX_ARM, RELAYMUX_REQ_A, RELAYMUX_REQ_B};
+RelayMuxAdcBackend relayMuxAdc{relayMux, shuntAdc, Ads1262ShuntAdc::PAIR_CH2};
+
+/* storageId 21/22: the EEPROM calibration namespace is shared by every registered
+ * sampler AND by INA228's separate resistor/range store. Taken across all builds:
+ * 0, 2, 3, 5, 6, 9, 10, 11, 12, 13, 14, 15, 19, 20, plus 8+ for INA228 ranges;
+ * 17/18 are permanently unusable (they overlap the aux state and board prefix
+ * bytes). 21/22 are the next two free slots above CALIB_SLOT_FIRST_HIGH.
+ *
+ * dividerRatio 0: the ads1262-divider board's ratio is a bench fact measured
+ * against a reference, not a nameplate number, so both channels publish RAW ADC
+ * VOLTS until it is set. That is the same contract SHUNT_ADC uses, and it fails
+ * visibly (millivolts where volts belong) rather than plausibly. */
+PowerSampler_RelayMuxChannel relayMuxChA{relayMuxAdc, RelayMux2::Target::CH_A, 21, 0.0f,
+                                         SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
+                                         SHUNTADC_NCS, SHUNTADC_START};
+PowerSampler_RelayMuxChannel relayMuxChB{relayMuxAdc, RelayMux2::Target::CH_B, 22, 0.0f,
+                                         SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
+                                         SHUNTADC_NCS, SHUNTADC_START};
+#endif
+
 SamplerRegistry samplers;
 BleSrv bleSrv;
 
@@ -247,6 +295,36 @@ public:
         Serial.flush();
         auxArmDeepSleepHold();
         ESP.deepSleep(IDLE_SLEEP_WAKE_US);
+    }
+
+    /* The whole point of the power work is a quantity nobody could see. Reading the
+     * serial port RESETS this board (native USB-CDC), so the die temperature cannot be
+     * sampled by connecting, asking, and disconnecting -- every such reading is taken
+     * ~0.5 s after a reset and describes the reset, not the running board. The only way
+     * to watch a *running* board is to pay one reset, hold the port open, and let the
+     * board talk. Hence a periodic line rather than a console query.
+     *
+     * The BLE half is here for the same reason: updateConnParams() is a REQUEST. A
+     * central may refuse it or counter-offer, and a refusal is otherwise invisible --
+     * the code path runs, nothing errors, and the link quietly keeps the old
+     * parameters. Printing what was negotiated is what separates "asked and got it"
+     * from "asked and was ignored". */
+    void onPrint() override {
+        float itvl;
+        uint16_t lat, tmo;
+        if (ble.connSnapshot(itvl, lat, tmo)) {
+            UART_LOG("pwr: cpu %u MHz die %.1f C psram %u B heap %u B | "
+                     "ble %.1f ms lat %u (eff %.0f ms) timeout %u ms",
+                     (unsigned) getCpuFrequencyMhz(), temperatureRead(),
+                     (unsigned) ESP.getPsramSize(),
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     itvl, lat, itvl * (lat + 1), tmo);
+        } else {
+            UART_LOG("pwr: cpu %u MHz die %.1f C psram %u B heap %u B | ble no link",
+                     (unsigned) getCpuFrequencyMhz(), temperatureRead(),
+                     (unsigned) ESP.getPsramSize(),
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        }
     }
 
     void onSummary(const WireSample &ws) override {
@@ -398,8 +476,17 @@ void setup(void) {
     uartInit(0);
     delay(500);
 
-    ESP_LOGI("main", "SmartShunt ESP32-S3 started, CPU %u MHz, die %.1f C",
-             (unsigned) getCpuFrequencyMhz(), temperatureRead());
+    /* PSRAM size is in the banner because it is the ONLY external evidence of
+     * whether it came up: it is initialised by the IDF startup before app_main
+     * (CONFIG_SPIRAM_BOOT_INIT in the qio_opi sdkconfig), so nothing in this file
+     * gets a say, and a build that means to leave it powered down is otherwise
+     * indistinguishable from one that silently still initialises it. 0 = down. */
+    ESP_LOGI("main", "SmartShunt ESP32-S3 started, CPU %u MHz, die %.1f C, "
+                     "psram %u B, heap %u B free (largest block %u B)",
+             (unsigned) getCpuFrequencyMhz(), temperatureRead(),
+             (unsigned) ESP.getPsramSize(),
+             (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     // Before initAll(): the prefix is baked into each EnergyCounter's name there.
     boardPrefixLoad();
@@ -496,6 +583,15 @@ void setup(void) {
     /* dev[16] truncation: "ftr_DCCT" fits whole; a SHUNT_ADC_-prefixed name
      * would collide with SHUNT_ADC's truncation in InfluxDB. */
     samplers.add("DCCT", &shuntAdcDcct);
+#ifdef WITH_RELAY_MUX
+    /* Names: dev[16] truncates, and the board prefix is prepended, so "ftr_VMUX_A"
+     * (10 chars) leaves room. A and B are the relay mux's own input labels (J1/J2),
+     * not a physical ordering -- which of them is source and which is load is a
+     * patching decision, and naming them for a role would go stale the first time
+     * the pigtails are swapped. */
+    samplers.add("VMUX_A", &relayMuxChA);
+    samplers.add("VMUX_B", &relayMuxChB);
+#endif
     //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     //samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);  // fCLK/AVDD diagnostic series; disabled on request
 

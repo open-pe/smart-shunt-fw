@@ -8,6 +8,13 @@
 #include "util.h"
 #include "adc/ina228.h"
 #include "adc/ina228_mux.h"
+#ifdef WITH_RELAY_MUX
+#include "relay_mux.h"
+#include "adc/relay_mux_adc.h"
+/* Defined in main_esp32.cpp, which includes this header BEFORE it defines them. */
+extern RelayMux2 relayMux;
+extern RelayMuxAdcBackend relayMuxAdc;
+#endif
 
 #ifndef TARGET_STM32H5
 #include <esp_ota_ops.h>
@@ -127,7 +134,59 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 UART_LOG("board-prefix rejected (1..%u chars of [A-Za-z0-9_])",
                          (unsigned) BOARD_PREFIX_MAX);
             }
-        } else if (inp == "cpufreq" || inp.startsWith("cpufreq ")) {
+        }
+#ifdef WITH_RELAY_MUX
+        else if (inp == "relaymux" || inp.startsWith("relaymux ")) {
+            /* Bench control for the Coto relay mux. DESIGN.md's revision-A open
+             * gates require observing the contacts through supply, temperature and
+             * asynchronous-command tests, and measuring the release time the
+             * dead-time constant is currently only guessing at -- none of which is
+             * possible while the round-robin moves the contact every ~600 ms.
+             * Parking a channel is what makes that measurement available without a
+             * rebuild. Publishing stops while parked: a sample taken under manual
+             * control has no defensible channel identity. */
+            String v(inp.substring(8));
+            v.trim();
+            v.toLowerCase();
+            if (v.length() == 0) {
+                UART_LOG("relaymux %s: state=%s requested=%s settled=%s serving=%s gen=%lu",
+                         relayMuxAdc.isManual() ? "MANUAL (not publishing)" : "auto",
+                         relayMux.stateName(),
+                         RelayMux2::targetName(relayMux.requested()),
+                         RelayMux2::targetName(relayMux.settledTarget()),
+                         RelayMux2::targetName(relayMuxAdc.servingChannel()),
+                         (unsigned long) relayMux.generation());
+                UART_LOG("  dead %lums + settle %lums per switch; 'relaymux a|b|off|auto'",
+                         (unsigned long) RelayMux2::DEAD_TIME_MS,
+                         (unsigned long) RelayMux2::SETTLE_MS);
+                break;
+            }
+            if (v == "auto") {
+                relayMuxAdc.setManual(false);
+                UART_LOG("relaymux: round-robin resumed");
+                break;
+            }
+            RelayMux2::Target t;
+            if (v == "a")        t = RelayMux2::Target::CH_A;
+            else if (v == "b")   t = RelayMux2::Target::CH_B;
+            else if (v == "off") t = RelayMux2::Target::NONE;
+            else {
+                UART_LOG("relaymux: expected a, b, off or auto");
+                break;
+            }
+            relayMuxAdc.setManual(true);
+            relayMux.select(t);
+            /* The command RETURNS BEFORE THE CONTACT MOVES. select() only starts
+             * the documented sequence; ARM does not even rise until the dead time
+             * expires. Saying "selected" here would be a claim about the hardware
+             * that this firmware has not yet made, let alone verified -- so report
+             * the request and the time it will take, and let `relaymux` with no
+             * argument report what actually settled. */
+            UART_LOG("relaymux: requested %s, settles in ~%lums (re-run 'relaymux' to confirm)",
+                     RelayMux2::targetName(t), (unsigned long) RelayMux2::switchLatencyMs());
+        }
+#endif
+        else if (inp == "cpufreq" || inp.startsWith("cpufreq ")) {
             /* Read-back always reports the die temperature too, because the whole
              * point of the knob is trading clock for heat and there is otherwise no
              * number for "the chip feels warm". temperatureRead() is the S3's
@@ -193,6 +252,9 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("bootinfo              running slot + OTA verify state");
             UART_LOG("wifi on|off           enable/disable WiFi + InfluxDB telemetry");
             UART_LOG("cpufreq [80|160|240]  get/set CPU clock + die temp (not persisted)");
+#ifdef WITH_RELAY_MUX
+            UART_LOG("relaymux [a|b|off|auto] park the relay mux for bench work, or resume");
+#endif
 #endif
             UART_LOG("board-prefix [<name>] get/set this board's series-name prefix (NVS, needs reset)");
 #ifndef TARGET_STM32H5
