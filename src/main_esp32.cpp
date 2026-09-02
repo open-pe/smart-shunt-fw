@@ -267,7 +267,12 @@ RelayMuxAdcBackend relayMuxAdc{relayMux, shuntAdc, Ads1262ShuntAdc::PAIR_CH2};
  * visibly (millivolts where volts belong) rather than plausibly. */
 PowerSampler_RelayMuxChannel relayMuxChA{relayMuxAdc, RelayMux2::Target::CH_A, 21, 0.0f,
                                          SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
-                                         SHUNTADC_NCS, SHUNTADC_START};
+                                         SHUNTADC_NCS, SHUNTADC_START,
+                                         /* reportDieTemp: SHUNT_ADC is not registered in
+                                          * this build, so without this the ADS1262 die
+                                          * sensor goes unrecorded entirely. Exactly one
+                                          * channel opts in -- there is one sensor. */
+                                         true};
 PowerSampler_RelayMuxChannel relayMuxChB{relayMuxAdc, RelayMux2::Target::CH_B, 22, 0.0f,
                                          SHUNTADC_SCLK, SHUNTADC_DIN, SHUNTADC_DOUT,
                                          SHUNTADC_NCS, SHUNTADC_START};
@@ -588,18 +593,34 @@ void setup(void) {
      * (internal short, chop ON since 2026-08-15); SHUNT_ADC is normal measurement. */
     /* The bridge prefixes the sampler name with "BLE_", so these appear as
      * BLE_SHUNT_ADC and BLE_SHUNT_ADC_ZERO. Extra channels: SHUNT_ADC_ch1, ... */
+#ifdef WITH_RELAY_MUX
+    /* RELAY-MUX BUILD: EXACTLY ONE REGISTERED PAIR, AND THAT IS THE POINT.
+     *
+     * SHUNT_ADC and DCCT are deliberately not registered here. Ads1262ShuntAdc
+     * parks its internal mux whenever exactly one pair is registered, and a parked
+     * pair free-runs at the full 19.15 SPS; register a second and every pair switch
+     * restarts the conversion (td(STDR) ~104 ms chopped), which is what took those
+     * two channels to ~4.8 SPS each. A relay-mux ratio measurement wants the
+     * opposite trade: one pair, parked, converting as fast as the part allows, with
+     * the CHANNEL selection done by the relays upstream instead of by the ADC's own
+     * multiplexer. That is the whole architecture -- multiplexing after the divider
+     * so the ADC's gain error and drift cancel in the ratio.
+     *
+     * The consequence to be aware of: this build measures no shunt current and no
+     * DCCT. It is a voltage-ratio instrument, not the general-purpose board.
+     *
+     * Names: dev[16] truncates and the board prefix is prepended, so "ftr_VMUX_A"
+     * (10 chars) leaves room. A and B are the relay mux's own input labels (J1/J2),
+     * not a physical ordering -- which is source and which is load is a patching
+     * decision, and naming them for a role would go stale the first time the
+     * pigtails are swapped. */
+    samplers.add("VMUX_A", &relayMuxChA);
+    samplers.add("VMUX_B", &relayMuxChB);
+#else
     samplers.add("SHUNT_ADC", &shuntAdcIn);
     /* dev[16] truncation: "ftr_DCCT" fits whole; a SHUNT_ADC_-prefixed name
      * would collide with SHUNT_ADC's truncation in InfluxDB. */
     samplers.add("DCCT", &shuntAdcDcct);
-#ifdef WITH_RELAY_MUX
-    /* Names: dev[16] truncates, and the board prefix is prepended, so "ftr_VMUX_A"
-     * (10 chars) leaves room. A and B are the relay mux's own input labels (J1/J2),
-     * not a physical ordering -- which of them is source and which is load is a
-     * patching decision, and naming them for a role would go stale the first time
-     * the pigtails are swapped. */
-    samplers.add("VMUX_A", &relayMuxChA);
-    samplers.add("VMUX_B", &relayMuxChB);
 #endif
     //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     //samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);  // fCLK/AVDD diagnostic series; disabled on request

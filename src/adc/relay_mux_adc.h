@@ -48,7 +48,13 @@ private:
      * can close a scan that began while the contact was still moving, so one full
      * clean scan is the minimum that contains no pre-switch conversion; a second
      * covers the sinc filter's own memory of the step. Cheap here -- the relay's
-     * 300 ms already dominates -- and the failure it prevents is silent. */
+     * 300 ms already dominates -- and the failure it prevents is silent.
+     *
+     * At one registered pair the device is parked at 19.15 SPS, so this costs about
+     * 3 * 52 ms. It is also mostly insurance rather than the primary defence: the
+     * contact closes ~16-65 ms into SETTLE_MS, so the ADC has already had ~200 ms
+     * of the new input -- several full conversions -- before the discard even
+     * starts counting. The discard covers the corners that estimate does not. */
     static constexpr uint32_t DISCARD_SCANS = 2;
 
     Target serving = Target::CH_A;   ///< whose turn it is
@@ -122,6 +128,8 @@ public:
     /// Park the mux under console control and stop publishing, or hand it back.
     /// Callable from any task; the change lands on the next RT pass.
     void setManual(bool m) { manualReq = m; }
+
+    float dieTempC() const { return dev.dieTempC(); }
 
     bool isManual() const { return manual; }
     RelayMux2 &muxRef() const { return mux; }
@@ -232,10 +240,18 @@ public:
     /// Round-trip time for one channel: both channels switch and settle, and each
     /// waits out its discarded scans. Used to size the stall timeout so the two
     /// cannot drift apart.
+    /* Pessimistic time for one completed ADC scan, i.e. one generation() step.
+     * This build registers exactly ONE pair, so the device parks its internal mux
+     * and free-runs at 19.15 SPS -- ~52 ms per generation, or ~104 ms chopped.
+     * 120 ms carries margin over the chopped case without being the ~250 ms a
+     * multi-pair scan would cost, which is a configuration this build does not
+     * create. Only used to size the stall timeout, so erring high is safe (a lazier
+     * stall detector) while erring low is not (false stalls on a healthy channel). */
+    static constexpr uint32_t SCAN_MS_PESSIMISTIC = 120;
+
     static constexpr uint32_t cycleMsEstimate() {
-        // 2 channels * (switch latency + DISCARD_SCANS+1 scans at a pessimistic
-        // 250 ms each, which is the chopped 3-pair scan rate with margin)
-        return 2 * (RelayMux2::switchLatencyMs() + (DISCARD_SCANS + 1) * 250);
+        // both channels switch, settle, and wait out their discarded scans
+        return 2 * (RelayMux2::switchLatencyMs() + (DISCARD_SCANS + 1) * SCAN_MS_PESSIMISTIC);
     }
 };
 
@@ -251,6 +267,17 @@ class PowerSampler_RelayMuxChannel : public PowerSampler {
     /// wire instead of obviously unscaled ones.
     const float dividerRatio;
 
+    /* Whether THIS channel carries the ADS1262 die temperature. There is ONE
+     * sensor, so exactly one channel opts in or telemetry carries N copies of the
+     * same number. It matters more in this build than elsewhere: with SHUNT_ADC
+     * unregistered, these two facades are the only ones left, and without this the
+     * die temperature -- the x-axis for the offset and reference drift a ratio
+     * measurement lives or dies on -- would simply stop being recorded.
+     *
+     * Free to attach: pump() refreshes dieTempC_ on its own schedule
+     * (TEMP_EVERY_N_SCANS) and this only reads the cached value. */
+    const bool reportDieTemp;
+
     const int8_t pinSck, pinMosi, pinMiso, pinCs, pinStart;
     Sample lastSample{};
 
@@ -258,10 +285,10 @@ public:
     PowerSampler_RelayMuxChannel(RelayMuxAdcBackend &backend, RelayMux2::Target channel,
                                  uint8_t storageId, float dividerRatio,
                                  int8_t pinSck, int8_t pinMosi, int8_t pinMiso,
-                                 int8_t pinCs, int8_t pinStart)
+                                 int8_t pinCs, int8_t pinStart, bool reportDieTemp = false)
         : backend(backend), channel(channel), storageId(storageId),
-          dividerRatio(dividerRatio), pinSck(pinSck), pinMosi(pinMosi), pinMiso(pinMiso),
-          pinCs(pinCs), pinStart(pinStart) {}
+          dividerRatio(dividerRatio), reportDieTemp(reportDieTemp), pinSck(pinSck),
+          pinMosi(pinMosi), pinMiso(pinMiso), pinCs(pinCs), pinStart(pinStart) {}
 
     uint8_t getStorageId() const override { return storageId; }
 
@@ -300,6 +327,7 @@ public:
         lastSample.u = std::isnan(v) ? NAN : ((dividerRatio > 0) ? v * dividerRatio : v);
         lastSample.i = NAN;
         lastSample.p_ = 0.0f;   // pinned: no power measurement exists on this path
+        if (reportDieTemp) lastSample.temp = backend.dieTempC();
         lastSample.diag = diag;
         return lastSample;
     }
