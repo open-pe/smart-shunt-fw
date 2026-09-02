@@ -100,12 +100,24 @@ public:
 
     /* Hard floor. No evidence from the ADC, however convincing, may publish a
      * sample sooner than this after ARM rises, because DESIGN.md's FASTEST
-     * delay-on corner is 15.95 ms -- the contact CANNOT have closed before then,
-     * so anything the ADC reports earlier is necessarily the previous channel
-     * holding still. This is the one number in the settle path that is a real
-     * bound rather than an estimate, and it is the reason the adaptive path
-     * cannot talk itself down to zero. */
+     * delay-on corner is 15.95 ms -- the contact CANNOT have closed before then.
+     *
+     * (An earlier comment said anything read before this is "the previous channel
+     * holding still". That was wrong: steps 1-3 release BOTH coils during
+     * DEAD_TIME_MS before ARM rises, so between ARM and contact close the ADC sees
+     * an OPEN input, not the previous selection. The floor is still conservative,
+     * but the misreading matters -- it is the same one that let the step guard in
+     * relay_mux_adc.h treat "moved away from the other channel" as proof that this
+     * channel had closed.)
+     *
+     * This is the one number in the settle path that is a real bound rather than
+     * an estimate, and it is why the adaptive path cannot talk itself to zero. */
     static constexpr uint32_t SETTLE_FLOOR_MS = 20;
+
+    /* Upper clamp on the runtime settle. Bounds both the auto-widen ratchet and a
+     * fat-fingered console value; a settle beyond this is not a slow relay, it is
+     * a fault worth reporting as one. */
+    static constexpr uint32_t SETTLE_MAX_MS = 2000;
 
 private:
     const uint8_t pinArm, pinReqA, pinReqB;
@@ -343,7 +355,9 @@ public:
     /// re-established from data on each boot, not inherited from an NVS byte
     /// written by an experiment nobody remembers.
     uint32_t setSettleMs(uint32_t ms) {
-        settleMs_ = ms < SETTLE_FLOOR_MS ? SETTLE_FLOOR_MS : ms;
+        if (ms < SETTLE_FLOOR_MS) ms = SETTLE_FLOOR_MS;
+        if (ms > SETTLE_MAX_MS) ms = SETTLE_MAX_MS;
+        settleMs_ = ms;
         return settleMs_;
     }
 

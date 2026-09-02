@@ -111,23 +111,36 @@ private:
      * This costs no time. The conversions happen either way.
      *
      * RESOLUTION LIMIT, and it is not small: stability is declared only after
-     * STABLE_N agreeing conversions, so at the production FIR rate (19.15 SPS,
-     * ~52 ms each) no settle shorter than ~3*52 = 156 ms can ever be OBSERVED,
-     * whatever the relay actually does. This mechanism is therefore a guard and a
+     * STABLE_N agreeing conversions. The first lands 0..52 ms after ARM and the
+     * other two follow ~52 ms apart, so nothing below 104..156 ms can be OBSERVED
+     * at the production FIR rate (19.15 SPS), whatever the relay actually does. This mechanism is therefore a guard and a
      * coarse upper bound, NOT the contact-timing measurement DESIGN.md asks for.
      * That needs a high-rate characterisation config -- sinc1 at a few kSPS, chop
      * off -- because the FIR filter this build runs caps at 20 SPS. */
     static constexpr uint8_t STABLE_N = 3;
 
-    /* Settled when STABLE_N consecutive conversions span <= this. It is a NOISE
-     * threshold, not an accuracy target: the question is "has the reading stopped
-     * moving by more than it moves anyway". Too SMALL is the safe direction --
-     * stability is then never declared, and the channel simply falls back to the
-     * fixed timer, which is the behaviour that existed before. Too large would
-     * declare a still-moving contact settled. Set it from the measured
-     * per-conversion spread on a quiet channel; the console reports the observed
-     * span so it can be chosen from data rather than guessed. */
+    /* Settled when STABLE_N consecutive conversions span <= this. A NOISE
+     * threshold, not an accuracy target: "has the reading stopped moving by more
+     * than it moves anyway".
+     *
+     * 0 (THE DEFAULT) DISABLES THE GATE ENTIRELY, and that is deliberate.
+     *
+     * An earlier version defaulted this to 10 uV and claimed in this very comment
+     * that too small was "the safe direction -- the channel falls back to the
+     * fixed timer". That was simply false: there is no fallback. If stability is
+     * never declared the code below waits out the grace and then publishes NaN
+     * with DIAG_RELAY_UNSETTLED on EVERY sample, forever. A threshold set below
+     * the real noise does not degrade gracefully, it kills the channel -- and
+     * 10 uV at the ADC is 510 uV referred to the input through the 51:1 divider,
+     * which any live converter's ripple exceeds. The shipped default would have
+     * bricked the channel on its first real run.
+     *
+     * So the gate ships OFF: identical behaviour to before this mechanism existed.
+     * The span is measured and reported regardless, so the operator sets this from
+     * data -- `relaymux` prints the observed span -- and enables it deliberately.
+     * That also keeps the auto-widen ratchet behind an explicit opt-in. */
     const float stableEpsV;
+    bool stabilityGateEnabled() const { return stableEpsV > 0; }
 
     /* A reading this far from the other channel's last accepted value counts as
      * "the step happened". Also the threshold for EXPECTING a step at all: when
@@ -144,8 +157,19 @@ private:
     float lastAccepted[3] = {NAN, NAN, NAN};   ///< indexed by Target
     uint32_t armGenSeen = 0;
     uint32_t obsGen = 0;
+    /* A conversion arriving more than this after the previous one breaks the
+     * ring. Without it, "STABLE_N consecutive conversions" was a lie: realTimeTask
+     * ticks the mux ABOVE the g_samplingHalted check but only calls samplers below
+     * it, so an OTA quiesce (or any skipped generation) leaves the ring intact
+     * while msSinceArm() keeps climbing. Three entries straddling a 30 s halt would
+     * agree, declare stability at tStableMs ~ 30 s, and the auto-widen would set a
+     * 45 s settle. Two conversion periods at the chopped rate, with margin. */
+    static constexpr uint32_t MAX_OBS_GAP_MS = 300;
+
     float ring[STABLE_N] = {NAN, NAN, NAN};
     uint8_t ringIdx = 0, ringCount = 0;
+    uint32_t tLastObsMs = 0;
+    float spanObservedV = NAN;   ///< always measured, gate or no gate
     float stepFrom = NAN;
     bool moved = false, stable = false;
     uint32_t tMoveMs = 0, tStableMs = 0;
@@ -159,11 +183,19 @@ private:
         ringIdx = ringCount = 0;
         moved = stable = false;
         tMoveMs = tStableMs = 0;
+        tLastObsMs = 0;
         stepFrom = lastAccepted[(uint8_t) other(ch)];
     }
 
     void observe(float v, uint32_t tMs) {
         if (!std::isfinite(v)) return;
+        /* Adjacency. A gap means the ring no longer holds consecutive
+         * conversions, so it cannot support a statement about settling. */
+        if (ringCount && (uint32_t) (tMs - tLastObsMs) > MAX_OBS_GAP_MS) {
+            ringCount = ringIdx = 0;
+            stable = false;
+        }
+        tLastObsMs = tMs;
         ring[ringIdx] = v;
         ringIdx = (uint8_t) ((ringIdx + 1) % STABLE_N);
         if (ringCount < STABLE_N) ++ringCount;
@@ -173,9 +205,10 @@ private:
                 if (ring[i] < mn) mn = ring[i];
                 if (ring[i] > mx) mx = ring[i];
             }
-            if ((mx - mn) <= stableEpsV) {
+            spanObservedV = mx - mn;   // recorded even when the gate is off
+            if (stabilityGateEnabled() && (mx - mn) <= stableEpsV) {
                 if (!stable) { stable = true; tStableMs = tMs; }
-            } else {
+            } else if (stabilityGateEnabled()) {
                 /* Re-open. Contact bounce is exactly a stable-then-moving-again
                  * pattern, and latching the first quiet moment would time the
                  * bounce rather than the settle. */
@@ -208,7 +241,7 @@ public:
      * the reference itself, +-2.5 V. */
     RelayMuxAdcBackend(RelayMux2 &mux, Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair pair,
                        uint8_t pgaGainCode = 0, bool pgaBypass = true,
-                       float stableEpsV = 1e-5f, float moveEpsV = 1e-3f)
+                       float stableEpsV = 0.0f, float moveEpsV = 1e-3f)
         : mux(mux), dev(dev), pair(pair), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass),
           stableEpsV(stableEpsV), moveEpsV(moveEpsV) {}
 
@@ -270,9 +303,16 @@ public:
     /// ARM rose; settleObserved is an UPPER bound (STABLE_N conversions of
     /// granularity), closeObserved is when the step was first seen.
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
-                     uint32_t &noStep, uint32_t &unsettled, uint32_t &widened) const {
+                     uint32_t &noStep, uint32_t &unsettled, uint32_t &widened,
+                     float &spanV, float &stableEps) const {
         lastMs = settleObservedMs; maxMs = settleObservedMaxMs; closeMs = closeObservedMs;
         noStep = nNoStep; unsettled = nUnsettled; widened = nWidened;
+        /* The span is the number the operator needs in order to choose stableEpsV,
+         * so it is reported unconditionally -- including on the fault paths, where
+         * the old code recorded nothing and the console showed zeros forever while
+         * never-settled climbed. A diagnostic must not be suppressed by the fault
+         * it exists to diagnose. */
+        spanV = spanObservedV; stableEps = stableEpsV;
     }
 
     /* Reports the REQUESTED mode, not the RT-task-applied one.
@@ -423,7 +463,7 @@ public:
          * that can talk itself into publishing a transient. */
         const uint32_t tMs = mux.msSinceArm();
 
-        if (!stable) {
+        if (stabilityGateEnabled() && !stable) {
             /* Still moving after the full settle. Give it up to twice as long
              * again, then FAIL CLOSED: a reading that never stopped changing is
              * not a measurement, and publishing the last value of a bouncing
@@ -449,8 +489,35 @@ public:
          * difference between the channels; so is the detectability. Below
          * moveEpsV we cannot see it, and below moveEpsV it does not matter. */
         const float mine = lastAccepted[(uint8_t) ch];
+        const float v = dev.volts(pair);
         const bool expectMove = std::isfinite(mine) && std::isfinite(stepFrom) &&
                                 fabsf(mine - stepFrom) > moveEpsV;
+
+        /* MOVED IS NECESSARY, NOT SUFFICIENT -- and the previous version treated it
+         * as sufficient, which made this guard miss the exact faults its own
+         * comment named. An unpowered coil (supervisor holding COIL_EN low) and a
+         * broken control wire are OPEN faults: BOTH reeds release, the ADC sees the
+         * divider network's own termination, and that reading is nowhere near
+         * stepFrom -- so `moved` went true, the guard passed, and whatever the open
+         * network reads got published under this channel's name.
+         *
+         * So also require the reading to resemble THIS channel. A value far from
+         * both channels' last accepted values is neither input: open contacts, or a
+         * front end that has lost its configuration. Skipped when `mine` is unknown
+         * (first visit) -- there is nothing to compare against yet. */
+        if (std::isfinite(mine) && std::isfinite(v) && std::isfinite(stepFrom)) {
+            const float dMine = fabsf(v - mine), dOther = fabsf(v - stepFrom);
+            if (dMine > moveEpsV && dOther > moveEpsV) {
+                ++nNoStep;
+                ESP_LOGE("relaymux", "%s: reads %.6g V, matching neither channel "
+                                     "(%.6g / %.6g) -- both contacts open? publishing NaN",
+                         RelayMux2::targetName(ch), (double) v, (double) mine, (double) stepFrom);
+                lastVolts = NAN;
+                lastDiagOverride = DIAG_RELAY_NO_STEP;
+                return true;
+            }
+        }
+
         if (expectMove && !moved) {
             ++nNoStep;
             ESP_LOGE("relaymux", "%s: expected a step of %.3g V and saw none -- mux did not "
@@ -475,15 +542,31 @@ public:
          * console's reported numbers in front of them (`relaymux settle <ms>`). */
         if (tStableMs > mux.settleMs()) {
             const uint32_t was = mux.settleMs();
-            const uint32_t now = mux.setSettleMs(tStableMs + tStableMs / 2);
+            /* CAPPED. Widening is evaluated only after settleMs_ elapses, and
+             * `stable` re-opens on any span excursion, so tStableMs tracks the
+             * evaluation point: later evaluation -> later tStableMs -> larger
+             * settleMs_ -> later evaluation. That is a positive feedback loop, and
+             * with stableEpsV near the noise floor flicker is normal rather than
+             * exceptional. Uncapped it ratchets x1.5 each time until the stall
+             * detector fires. The cap turns a runaway into a bounded complaint. */
+            const uint32_t want = tStableMs + tStableMs / 2;
+            const uint32_t now = mux.setSettleMs(want);
             ++nWidened;
-            ESP_LOGW("relaymux", "%s settled at %lums, later than the configured %lums -- "
-                                 "widening to %lums",
-                     RelayMux2::targetName(ch), (unsigned long) tStableMs,
-                     (unsigned long) was, (unsigned long) now);
+            if (want > RelayMux2::SETTLE_MAX_MS) {
+                ESP_LOGE("relaymux", "%s settled at %lums; implied settle %lums exceeds the "
+                                     "%lums cap -- clamped. Bad contact, or stableEpsV is "
+                                     "below the noise floor.",
+                         RelayMux2::targetName(ch), (unsigned long) tStableMs,
+                         (unsigned long) want, (unsigned long) RelayMux2::SETTLE_MAX_MS);
+            } else {
+                ESP_LOGW("relaymux", "%s settled at %lums, later than the configured %lums -- "
+                                     "widening to %lums",
+                         RelayMux2::targetName(ch), (unsigned long) tStableMs,
+                         (unsigned long) was, (unsigned long) now);
+            }
         }
 
-        lastVolts = dev.volts(pair);
+        lastVolts = v;
         return true;
     }
 

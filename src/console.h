@@ -167,7 +167,13 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                          (unsigned long) relayMux.settleMs(),
                          (unsigned long) RelayMux2::SETTLE_FLOOR_MS);
                 uint32_t lastMs, maxMs, closeMs, noStep, unsettled, widened;
-                relayMuxAdc.settleStats(lastMs, maxMs, closeMs, noStep, unsettled, widened);
+                float spanV, stableEps;
+                relayMuxAdc.settleStats(lastMs, maxMs, closeMs, noStep, unsettled, widened,
+                                        spanV, stableEps);
+                UART_LOG("  span %.6g V, stability gate %s (stableEpsV %.6g) -- set it from "
+                         "the span, not by guessing",
+                         (double) spanV, stableEps > 0 ? "ON" : "OFF (fixed timer only)",
+                         (double) stableEps);
                 /* Learned from the conversions the discard throws away. settle is
                  * an UPPER bound: stability needs 3 agreeing conversions, ~156 ms
                  * at 19.15 SPS, so a faster contact cannot be resolved here. */
@@ -193,11 +199,22 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                  * physical settle on the strength of its own measurements -- see
                  * the auto-widen note in relay_mux_adc.h. Not persisted: it
                  * reverts to the built-in default on reset. */
-                const uint32_t got = relayMux.setSettleMs((uint32_t) n.toInt());
+                /* Parse SIGNED and reject non-positive. `relaymux settle -5` used to
+                 * become (uint32_t)-5 = 4294967291, sail past the floor check, and
+                 * install a ~49-day settle from which the mux never leaves
+                 * SETTLING -- and 3*settleMs downstream then overflowed. */
+                const long want = n.toInt();
+                if (want <= 0) {
+                    UART_LOG("relaymux settle: expected a positive millisecond value "
+                             "(%lu..%lu)", (unsigned long) RelayMux2::SETTLE_FLOOR_MS,
+                             (unsigned long) RelayMux2::SETTLE_MAX_MS);
+                    break;
+                }
+                const uint32_t got = relayMux.setSettleMs((uint32_t) want);
                 UART_LOG("relaymux settle -> %lums%s (not persisted; the driver may widen "
                          "it again if a contact settles later than this)",
                          (unsigned long) got,
-                         got != (uint32_t) n.toInt() ? " (clamped to floor)" : "");
+                         (unsigned long) got != (unsigned long) want ? " (clamped)" : "");
                 break;
             }
             if (v == "auto") {
@@ -223,8 +240,12 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
              * that this firmware has not yet made, let alone verified -- so report
              * the request and the time it will take, and let `relaymux` with no
              * argument report what actually settled. */
+            /* The LIVE settle, not switchLatencyMs()'s compile-time default -- after a
+             * `relaymux settle 40` or an auto-widen the two disagree, and the status
+             * line one command away would contradict this one. */
             UART_LOG("relaymux: requested %s, settles in ~%lums (re-run 'relaymux' to confirm)",
-                     RelayMux2::targetName(t), (unsigned long) RelayMux2::switchLatencyMs());
+                     RelayMux2::targetName(t),
+                     (unsigned long) (RelayMux2::DEAD_TIME_MS + relayMux.settleMs()));
         }
 #endif
         else if (inp == "bletx" || inp.startsWith("bletx ")) {
