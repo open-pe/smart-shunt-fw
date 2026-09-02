@@ -40,6 +40,23 @@ PowerSampler_ADS131 ads131;
 PowerSampler_INA226 ina226;
 PowerSampler_INA228 ina228_40{0x40};
 
+/* Second INA228 on the XIAO harness, strapped to 0x43 (ADD0 -> SCL). The
+ * derived storage slots do not work at this address -- 2 + 3 = 5 is TMP117
+ * 0x48 and 8 + 3 = 11 is mux channel B -- so both are passed explicitly from
+ * the free high range (see CALIB_SLOT_FIRST_HIGH in settings.h). It has no
+ * ALERT pin (Pin_INA22x_ALERT4 = 255) and samples on the 50 ms register-read
+ * fallback in hasData(). */
+PowerSampler_INA228 ina228_43{0x43, /*calibSlot=*/19, /*resistorSlot=*/20};
+
+#ifdef DUAL_INA228
+/* The 0x41 part on the two-INA228 variant is a PLAIN INA228, not a mux backend --
+ * there is no TMUX8612 on that board. Its derived slots (3 and 9) are exactly the
+ * ones INA228MuxBackend would have used for channel A and its resistor/range, so
+ * the two builds never both need them; a board reflashed between variants simply
+ * re-reads its own calibration into the same slots. */
+PowerSampler_INA228 ina228_41{0x41};
+#endif
+
 INA228MuxBackend muxBackend{0x41, settings.Pin_INA22x_ALERT2,
                             settings.Pin_Mux_S1, settings.Pin_Mux_S2, settings.Pin_Mux_Zero};
 PowerSampler_MuxChannel mux_chA{muxBackend, INA228MuxBackend::Target::CH_A, 3};
@@ -177,7 +194,8 @@ PowerSampler_ShuntAdc shuntAdcIn{shuntAdc,
  *
  * storageId 10: taken are 0 (ADS/ADS131), 1 (INA226), 2 (INA228 0x40),
  * 3/11 (mux A/B), 5/6/7 (TMP117 0x48-0x4A), 16 (TMP117 0x4B), 9 (SHUNT_ADC_ONLY
- * TMP117), 12/13/14 (shunt/zero/health), 15 (Dummy).
+ * TMP117), 12/13/14 (shunt/zero/health), 15 (Dummy), 19/20 (INA228 0x43
+ * calib + resistor/range, assigned explicitly -- see ina228_43).
  *
  * Slot 8 is NOT free despite no getStorageId() returning it: PowerSampler_INA228
  * is a SECOND consumer of this same EEPROM namespace, storing resistor/range at
@@ -401,8 +419,16 @@ void setup(void) {
     if (sizeof(WireSample) != 64) assert(false);
     if (sizeof(Sample) != 32) assert(false);
 
-#ifndef SHUNT_ADC_ONLY
+#ifdef DUAL_INA228
+    /* Two plain parts, no mux, no 0x40. The names keep the series this harness has
+     * always published: 0x41 is _2, and 0x43 takes _4 (the retired _3 was the 0x42
+     * strap). Registering the mux channels here would be worse than useless -- they
+     * would drive D8/D9, which carry this board's vbus-only jumper. */
+    samplers.add("ESP32_INA228_2", &ina228_41);
+    samplers.add("ESP32_INA228_4", &ina228_43);
+#elif !defined(SHUNT_ADC_ONLY)
     samplers.add("ESP32_INA228", &ina228_40);
+    samplers.add("ESP32_INA228_4", &ina228_43);
     samplers.add("ESP32_INA228_2A", &mux_chA);
     samplers.add("ESP32_INA228_2B", &mux_chB);
 #endif

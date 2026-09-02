@@ -2,6 +2,17 @@
 
 #include <EEPROM.h>
 
+/* Calibration slot map, shared by both targets. Slot n occupies bytes
+ * 16 + n*8 .. +7 of a 256-byte image.
+ *
+ * 16 was the cap because slot 16 ends at byte 151 and byte 152 begins the aux
+ * switch state (aux_switch.h), with the board prefix behind it at 154..162 --
+ * so slots 17 and 18 would overwrite them and are PERMANENTLY UNUSABLE, not
+ * merely unallocated. Slot 19 starts at 168, clear of the prefix; slot 29 ends
+ * at 255, the last that fits. */
+static constexpr uint8_t CALIB_SLOT_MAX = 29;
+static constexpr uint8_t CALIB_SLOT_FIRST_HIGH = 19;
+
 #ifdef TARGET_STM32H5
 #include "esp_compat.h"
 #include <cassert>
@@ -12,6 +23,7 @@ struct settings_t {
     uint8_t Pin_INA22x_ALERT = PA10;
     uint8_t Pin_INA22x_ALERT2 = PC7;
     uint8_t Pin_INA22x_ALERT3 = PC6;
+    uint8_t Pin_INA22x_ALERT4 = 255;
     uint8_t Pin_Mux_S1 = PC9;
     uint8_t Pin_Mux_S2 = PC8;
     uint8_t Pin_Mux_Zero = PB10;
@@ -34,7 +46,8 @@ static settings_t settings;
 static bool readCalibrationFactors(size_t ecIndex, float &u, float &i);
 
 static void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
-    assert(ecIndex <= 16);
+    assert(ecIndex <= CALIB_SLOT_MAX);
+    assert(ecIndex <= 16 || ecIndex >= CALIB_SLOT_FIRST_HIGH); // 17/18 hit aux state + board prefix
     EEPROM.put(16 + ecIndex * 4 * 2 + 0, u);
     EEPROM.put(16 + ecIndex * 4 * 2 + 4, i);
 }
@@ -49,7 +62,8 @@ static bool checkCalibrationFactorBounds(float f) {
 }
 
 static bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
-    assert(ecIndex <= 16);
+    assert(ecIndex <= CALIB_SLOT_MAX);
+    assert(ecIndex <= 16 || ecIndex >= CALIB_SLOT_FIRST_HIGH); // 17/18 hit aux state + board prefix
     EEPROM.get(16 + ecIndex * 4 * 2 + 0, u);
     EEPROM.get(16 + ecIndex * 4 * 2 + 4, i);
     return checkCalibrationFactorBounds(u) and checkCalibrationFactorBounds(i);
@@ -86,16 +100,42 @@ struct settings_t {
     uint8_t Pin_INA22x_ALERT = 255;
     uint8_t Pin_INA22x_ALERT2 = 255;
     uint8_t Pin_INA22x_ALERT3 = 255;
+    uint8_t Pin_INA22x_ALERT4 = 255;
     uint8_t Pin_Mux_S1 = 255;
     uint8_t Pin_Mux_S2 = 255;
     uint8_t Pin_Mux_Zero = 255;
 #elif defined(FMETAL)
     uint8_t Pin_I2C_SDA = 42, Pin_I2C_SCL = 2, Pin_INA22x_ALERT = 41; // fugu2 (fmetal)
+#elif defined(DUAL_INA228)
+    /* XIAO ESP32-S3 carrying TWO plain INA228s and NO TMUX8612 (env esp32s3_2ina228).
+     * Straps: 0x41 (ADD0 -> V+) and 0x43 (ADD0 -> SCL). 0x40 is unpopulated.
+     *
+     * The mux pins MUST stay 255 here, and not because they are merely unused:
+     * GPIO7/8 are the XIAO's D8/D9 pads, which carry this board's INA228
+     * "vbus only" jumper. INA228MuxBackend drives S1/S2/ZERO push-pull with
+     * exactly one HIGH at a time, so on a jumpered board every CH_B or ZERO
+     * selection would drive one end of that jumper high and the other low --
+     * two output drivers shorted together, on every sample cycle.
+     *
+     * ALERT4 (the 0x43 part) shares GPIO5 with the ALERT3 slot, as measured on
+     * the harness on 2026-09-02. Safe only while 0x42 is unpopulated: two fitted
+     * straps would both attachInterrupt() on GPIO5 and the second would replace
+     * the first's handler. An un-alerted INA228 is not lost either way -- it
+     * falls back to hasData()'s 50 ms register read. */
+    int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
+    uint8_t Pin_INA22x_ALERT = 1;
+    uint8_t Pin_INA22x_ALERT2 = 4;   // 0x41
+    uint8_t Pin_INA22x_ALERT3 = 5;
+    uint8_t Pin_INA22x_ALERT4 = 5;   // 0x43, shares GPIO5 with the empty 0x42 slot
+    uint8_t Pin_Mux_S1 = 255;
+    uint8_t Pin_Mux_S2 = 255;
+    uint8_t Pin_Mux_Zero = 255;
 #elif XIAO_ESP32S3
     int8_t Pin_I2C_SDA = 3, Pin_I2C_SCL = 2;
     uint8_t Pin_INA22x_ALERT = 1;
     uint8_t Pin_INA22x_ALERT2 = 4;
     uint8_t Pin_INA22x_ALERT3 = 5;
+    uint8_t Pin_INA22x_ALERT4 = 255; // no 0x43 strap on the mux variant
     uint8_t Pin_Mux_S1 = 6;
     uint8_t Pin_Mux_S2 = 7;
     uint8_t Pin_Mux_Zero = 8;
@@ -104,6 +144,7 @@ struct settings_t {
     uint8_t Pin_INA22x_ALERT = 1;
     uint8_t Pin_INA22x_ALERT2 = 4;
     uint8_t Pin_INA22x_ALERT3 = 5;
+    uint8_t Pin_INA22x_ALERT4 = 255;
     uint8_t Pin_Mux_S1 = 5;
     uint8_t Pin_Mux_S2 = 6;
     uint8_t Pin_Mux_Zero = 9;
@@ -112,11 +153,13 @@ struct settings_t {
     uint8_t Pin_INA22x_ALERT = 40;
     uint8_t Pin_INA22x_ALERT2 = 0;
     uint8_t Pin_INA22x_ALERT3 = 0;
+    uint8_t Pin_INA22x_ALERT4 = 255;
 #else
     int8_t Pin_I2C_SDA = 40, Pin_I2C_SCL = 41;
     uint8_t Pin_INA22x_ALERT = 42;
     uint8_t Pin_INA22x_ALERT2 = 21;
     uint8_t Pin_INA22x_ALERT3 = 47;
+    uint8_t Pin_INA22x_ALERT4 = 255;
 #endif
 
     /* Bus clock. 400 kHz needs real pull-ups; the boards with INA228s have them.
@@ -158,7 +201,8 @@ static settings_t settings;
 static bool readCalibrationFactors(size_t ecIndex, float &u, float &i);
 
 static void storeCalibrationFactors(uint8_t ecIndex, float u, float i) {
-    assert(ecIndex <= 16);
+    assert(ecIndex <= CALIB_SLOT_MAX);
+    assert(ecIndex <= 16 || ecIndex >= CALIB_SLOT_FIRST_HIGH); // 17/18 hit aux state + board prefix
 
     float oldU, oldI;
     if (readCalibrationFactors(ecIndex, oldU, oldI)) {
@@ -189,7 +233,8 @@ static bool checkCalibrationFactorBounds(float f) {
 }
 
 static bool readCalibrationFactors(size_t ecIndex, float &u, float &i) {
-    assert(ecIndex <= 16);
+    assert(ecIndex <= CALIB_SLOT_MAX);
+    assert(ecIndex <= 16 || ecIndex >= CALIB_SLOT_FIRST_HIGH); // 17/18 hit aux state + board prefix
     EEPROM.begin(256);
     auto u_ = EEPROM.readFloat(16 + ecIndex * 4 * 2 + 0);
     auto i_ = EEPROM.readFloat(16 + ecIndex * 4 * 2 + 4);

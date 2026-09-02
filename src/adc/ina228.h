@@ -26,7 +26,13 @@ void IRAM_ATTR ina228_alert1();
 
 void IRAM_ATTR ina228_alert2();
 
-PowerSampler_INA228 *ina228_instance[3] = {nullptr, nullptr, nullptr};
+void IRAM_ATTR ina228_alert3();
+
+/* Indexed by (i2c_addr - I2C_A0), so it must cover every ADD0 strap the part
+ * offers: 0x40..0x43. It was sized 3 while only three ALERT pins existed, which
+ * made a 0x43 device an out-of-bounds write at init() -- silently, since the
+ * bounds are never checked here. */
+PowerSampler_INA228 *ina228_instance[4] = {nullptr, nullptr, nullptr, nullptr};
 
 
 //#define INA228_SLAVE_ADDRESS        0x40
@@ -167,11 +173,20 @@ class PowerSampler_INA228 : public PowerSampler {
 
 public:
     const uint8_t storageId;
+    const uint8_t resistorSlot;
     const uint8_t i2c_addr;
 
     uint8_t getStorageId() const override { return storageId; };
 
-    explicit PowerSampler_INA228(uint8_t i2c_addr) : storageId{(uint8_t) (2 + i2c_addr - I2C_A0)}, i2c_addr(i2c_addr) {
+    /* The derived slots (2 + idx for the U/I calibration, 8 + idx for
+     * resistor/range) only stay collision-free for 0x40 and 0x41. A part at
+     * 0x43 derives 5 and 11, which are TMP117 0x48 and mux channel B -- so an
+     * INA228 above 0x41 must be given its slots explicitly. 255 keeps the
+     * historical derivation for the addresses where it is correct. */
+    explicit PowerSampler_INA228(uint8_t i2c_addr, uint8_t calibSlot = 255, uint8_t resistorSlot = 255)
+        : storageId{(uint8_t) (calibSlot != 255 ? calibSlot : (2 + i2c_addr - I2C_A0))},
+          resistorSlot{(uint8_t) (resistorSlot != 255 ? resistorSlot : (8 + i2c_addr - I2C_A0))},
+          i2c_addr(i2c_addr) {
     }
 
     bool resetPeriphery() {
@@ -184,7 +199,7 @@ public:
 
 
         float resistor = 2e-3f, range = 38.0f; // default: vishay 2mOhm, .1%, 3W
-        if (readCalibrationFactors(8 + inaAddrIdx, resistor, range)) {
+        if (readCalibrationFactors(resistorSlot, resistor, range)) {
             ESP_LOGI("ina228", "Restore resistor/range settings: %.6f/%.6f", resistor, range);
         } else {
             ESP_LOGI("ina228", "Default resistor/range settings: %.6f/%.6f", resistor, range);
@@ -192,17 +207,26 @@ public:
         setResistorRange(resistor, range, false);
 
 
-        std::array<uint8_t, 3> alertPins = {
+        std::array<uint8_t, 4> alertPins = {
             settings.Pin_INA22x_ALERT,
             settings.Pin_INA22x_ALERT2,
-            settings.Pin_INA22x_ALERT3
+            settings.Pin_INA22x_ALERT3,
+            settings.Pin_INA22x_ALERT4
         };
-        std::array<void (*)(void), 3> alerts = {&ina228_alert0, &ina228_alert1, &ina228_alert2};
+        std::array<void (*)(void), 4> alerts = {&ina228_alert0, &ina228_alert1, &ina228_alert2, &ina228_alert3};
 
-        assert(inaAddrIdx < alertPins.size());
+        assert(inaAddrIdx >= 0 && inaAddrIdx < (int) alertPins.size());
         uint8_t readyPin = alertPins[inaAddrIdx];
-        pinMode(readyPin, INPUT_PULLUP);
-        attachInterrupt(digitalPinToInterrupt(readyPin), alerts[inaAddrIdx], FALLING);
+        /* 255 = this strap has no ALERT line wired. Not fatal: hasData() re-reads
+         * the register every 50 ms regardless of the interrupt ("maybe we missed
+         * it?"), so an un-alerted part still samples at 20 Hz -- far above the
+         * ~2.5 SPS on-air rate. It loses the low-latency path, not the data. */
+        if (readyPin != 255) {
+            pinMode(readyPin, INPUT_PULLUP);
+            attachInterrupt(digitalPinToInterrupt(readyPin), alerts[inaAddrIdx], FALLING);
+        } else {
+            ESP_LOGI("ina228", "0x%02hhX: no ALERT pin configured, polling at 20 Hz", i2c_addr);
+        }
 
 
         uint16_t adc_config = 0;
@@ -288,6 +312,20 @@ public:
     }
 
 
+    /// True when `pin` is not claimed by the board pin map, i.e. driving it is safe.
+    /// Deliberately conservative: anything settings_t names is off limits.
+    static bool probePinIsFree(int pin) {
+        const uint8_t claimed[] = {
+            (uint8_t) settings.Pin_I2C_SDA, (uint8_t) settings.Pin_I2C_SCL,
+            settings.Pin_INA22x_ALERT, settings.Pin_INA22x_ALERT2,
+            settings.Pin_INA22x_ALERT3, settings.Pin_INA22x_ALERT4,
+            settings.Pin_Mux_S1, settings.Pin_Mux_S2, settings.Pin_Mux_Zero,
+        };
+        for (uint8_t c: claimed)
+            if (c != 255 && c == (uint8_t) pin) return false;
+        return true;
+    }
+
     bool pinsAreShorted(int a, int b) {
         pinMode(a, INPUT_PULLUP);
         pinMode(b, OUTPUT);
@@ -317,12 +355,28 @@ public:
 
         //channelState.shunt
 #ifndef TARGET_STM32H5
-        if (pinsAreShorted(7,8)) {
-            sleep(1);
-            ESP_LOGI("ina228", "pins 7 & 8 are shorted, measuring vbus only");
-            sleep(1);
-            channelState.shunt = false;
-            channelState.vbus = true;
+        /* Strap probe: a jumper between GPIO7 and GPIO8 on the sensor board means
+         * "vbus only". It cannot run unconditionally, because it DRIVES GPIO8 and
+         * leaves GPIO7 an input -- on the XIAO those two are Pin_Mux_S2 and
+         * Pin_Mux_Zero, already owned by INA228MuxBackend (which inits first). The
+         * probe then reads back the level it just drove and "detects" a short that
+         * is not there, silently disabling the shunt channel of whichever INA228
+         * initialises after the mux -- while also leaving the mux's select line
+         * floating as an input. Seen on 2026-09-02, the moment a second INA228
+         * (0x43) was registered on the XIAO: it came up vbus-only every boot.
+         *
+         * A pin the board map has already assigned is not a free strap, so skip. */
+        if (probePinIsFree(7) && probePinIsFree(8)) {
+            if (pinsAreShorted(7, 8)) {
+                sleep(1);
+                ESP_LOGI("ina228", "pins 7 & 8 are shorted, measuring vbus only");
+                sleep(1);
+                channelState.shunt = false;
+                channelState.vbus = true;
+            }
+        } else {
+            ESP_LOGI("ina228", "0x%02hhX: GPIO7/8 are assigned on this board, "
+                               "skipping the vbus-only strap probe", i2c_addr);
         }
 #endif
 
@@ -384,9 +438,8 @@ public:
             ESP_LOGE("ina228", "0x%02hhX: SHUNT_CAL write failed", i2c_addr);
         }
 
-        int inaAddrIdx = i2c_addr - I2C_A0;
         if (store)
-            storeCalibrationFactors(8 + inaAddrIdx, resistor, range);
+            storeCalibrationFactors(resistorSlot, resistor, range);
     }
 
     void startReading() {
@@ -652,5 +705,9 @@ void IRAM_ATTR ina228_alert1() {
 
 void IRAM_ATTR ina228_alert2() {
     if (ina228_instance[2])ina228_instance[2]->alertNewDataFromISR();
+}
+
+void IRAM_ATTR ina228_alert3() {
+    if (ina228_instance[3])ina228_instance[3]->alertNewDataFromISR();
 }
 
