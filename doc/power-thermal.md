@@ -26,8 +26,8 @@ is the coolest one the CPU clock can give, with the link set where it costs noth
 
 ## What the numbers were
 
-CPU clock, one reset, port held open across the switch, so the two halves differ only in
-the variable under test:
+CPU clock, one reset, port held open across the switch, so the halves differ only in the
+variable under test:
 
 | Config | Die °C | Rate /s |
 |---|---|---|
@@ -55,62 +55,63 @@ The same configuration, `195 ms / lat 3`, was measured three times across the ru
 **64.62 → 64.00 → 63.72 °C**. And the whole column drifts downward monotonically with
 elapsed time, regardless of what is being tested — ambient falling through the evening.
 
-**Sweep order is therefore confounded with the effect.** Later points read cooler no
-matter what they test. Every BLE difference in the table is smaller than this 0.9 K drift,
-so none of them is a measurement. The design flaw was sweeping sequentially instead of
-interleaving; a repeat point at both ends is the minimum that makes the confound visible.
+**Sweep order is therefore confounded with the effect**, and every BLE difference in the
+table is smaller than that 0.9 K. The flaw was sweeping sequentially instead of
+interleaving. The CPU A/B is unaffected: it ran 80 → 240 → 80 inside one 11-minute window,
+and the return leg confirmed the drop (70.7 → 68.7 → 66.7).
 
-The CPU A/B is not affected — it ran 80 → 240 → 80 inside one 11-minute window, and the
-return leg confirmed the drop (70.7 → 68.7 → 66.7).
+### The only BLE settings that do anything, break things
 
-### Latency does not delay our telemetry
+Point 8 (397.5 ms interval) lost **19% of samples**; a 200 ms publish period at a 195 ms
+interval lost **36%**. Both were thermally flat. `flush()` ships one indication per round
+trip and a round trip costs ~1.6 connection intervals, so a period near the interval has no
+headroom and the queue sheds. Point 8's skip window is also 1590 ms, past the 1 s budget.
 
-Points 6 and 7 isolate it at equal interval: latency 0 and latency 3 both deliver
-**2.48 points/s**. A peripheral with data queued transmits at the next connection event
-regardless of latency, so only central→device traffic is delayed. Measured, not inferred.
-
-### The knee is between 195 ms and 400 ms
-
-Point 8 is the only BLE setting that broke anything: at a 397.5 ms interval the rate fell
-to **2.01/s — 19% of samples lost**, while the temperature stayed flat like everything
-else. `flush()` ships at most one indication per round trip, so a ~400 ms interval supplies
-~2.5 events/s against a 400 ms publish tick needing 2.5 — no headroom, and the queue sheds.
-Its skip window is also 397.5 × 4 = 1590 ms, past the 1 s budget.
-
-A sweep judged on temperature alone would have called this a free win. **The throughput
-cross-check is the only thing that saw it.**
+A sweep judged on temperature alone would have called both free wins. **The throughput
+cross-check is the only thing that saw them** — and it is why `blerate`'s floor is now
+computed from the live interval instead of the fixed 200 ms that measurement disproved.
 
 ### Why BLE cannot show up
 
-Cutting RX windows 26× (30 ms → 780 ms effective) changed nothing thermally. The radio's
-*event* work is a rounding error next to a CPU and a BLE controller that never sleep.
-Which is the real finding:
+Cutting RX windows 26× (30 ms → 780 ms effective) changed nothing thermally, and a 3.5×
+change in publish rate moved it 0.2 K. The radio's *event* work is a rounding error next to
+a CPU and a BLE controller that never sleep. Which is the real finding:
 
-> The residual ~64 °C is baseline, not workload. It is the always-on cost of a chip with
-> no power management compiled in.
+> The residual ~64 °C is baseline, not workload.
 
-`CONFIG_BT_LE_SLEEP_ENABLE`, `CONFIG_PM_ENABLE` and tickless idle are all **absent** from
-the prebuilt Arduino sdkconfig. That is where the remaining heat lives, and it is not
-reachable without moving off the Arduino libraries to ESP-IDF. Anyone who wants the board
-meaningfully cooler than 64 °C is signing up for that port; nothing at the application
-level will do it.
+`CONFIG_PM_ENABLE` and tickless idle are absent from the prebuilt Arduino sdkconfig, so the
+obvious next move looks like an ESP-IDF port to switch them on.
+
+**Do not make that port for thermal reasons — it has already been tried and it does not
+work.** `~/dev/ha/nimble-ble-proxy` is a native ESP-IDF build that already sets
+`CONFIG_PM_ENABLE=y`, `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y` and
+`CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=y`. Its `docs/thermal-notes.md` records the
+result: **0 °C change, temperature flat at 57.6 °C across the soak.** Light sleep never
+engages, because the SoC refuses it while Bluetooth is enabled — boot log, verbatim:
+
+> light sleep mode will not be able to apply when bluetooth is enabled
+
+This board holds a BLE connection permanently, so the same applies. The always-on radio
+baseline is not a configuration mistake that a port would fix; it is what an ESP32-S3 costs
+while its controller is up. See "Prior art" below.
 
 ## Configuration notes
 
 ### 80 MHz is a floor, not a preference
 
-Below 80 MHz arduino-esp32 switches the CPU to the XTAL and powers the PLL down. That
-takes the 48 MHz USB-Serial-JTAG clock with it — the console disappears, recoverable only
-by a physical BOOT+RESET — and drops APB below 80 MHz, re-deriving every UART/I2C/SPI
-divider configured against it. At 80 MHz the PLL stays up and **APB stays at 80 MHz**, so
-peripheral clocks are bit-for-bit unchanged. The ADS1262 is on hardware SPI, not bit-banged,
-so its timing does not move either. NimBLE also requires ≥ 80 MHz.
-
-Override per env with `-D CPU_FREQ_MHZ=160`.
+Below 80 MHz arduino-esp32 switches the CPU to the XTAL and powers the PLL down — taking
+the 48 MHz USB-Serial-JTAG clock with it (console gone, physical BOOT+RESET to recover) and
+dropping APB below 80 MHz, re-deriving every UART/I2C/SPI divider configured against it. At
+80 MHz the PLL stays up and **APB stays at 80 MHz**, so peripheral clocks are bit-for-bit
+unchanged; the ADS1262 is on hardware SPI, not bit-banged, so its timing does not move
+either. NimBLE also requires ≥ 80 MHz. Override with `-D CPU_FREQ_MHZ=160`.
 
 ### Slave latency: keep it, for airtime not for heat
 
-What is delayed is central→device delivery (aux commands, OTA start), by at most
+Points 6 and 7 isolate it at equal interval: latency 0 and latency 3 both deliver
+**2.48 points/s**, so a peripheral with data queued does transmit at the next connection
+event regardless of latency. Measured, not inferred. What is delayed is central→device
+delivery (aux commands, OTA start), by at most
 `latency × interval` = 780 ms. OTA takes the link back to latency 0 via the existing
 `Fast` path. Supervision timeout must outlast the skipping —
 `(1 + latency) × interval_max × 2` = 1.6 s against the 4 s requested — and `bleconn`
@@ -122,17 +123,15 @@ has previously killed OTA transfers with an LL timeout.
 
 ### Console knobs (none persist)
 
-    cpufreq [80|160|240]     clock + APB + die temp
-    bletx [dBm]              TX power; radio rounds to its own ladder
-    blerate [ms]             publish period, bounded 200..700
+    cpufreq [80|160|240]        clock + APB + die temp
+    bletx [dBm]                 TX power; radio rounds to its own ladder
+    blerate [ms]                publish period; floor = 2x negotiated interval, max 700 ms
     bleconn <min> <max> <lat>   LL units (1.25 ms), refuses unsafe latency
 
-None are persisted, deliberately: a value that starves the link should be one power-cycle
-away from gone. Make one permanent with a build flag.
-
-The `blerate` bounds are load-bearing. Above ~700 ms the end-to-end sample age eats the 1 s
-budget; below the connection interval the queue fills and sheds samples — the failure
-`telemetry.h`'s catch-up-drain comment documents.
+None persist, deliberately: a value that starves the link should be one power-cycle away
+from gone. Make one permanent with a build flag. The `blerate` floor is computed live
+rather than fixed, because the central owns the interval — see the ratio table in
+`telemetry.h`.
 
 ## Measurement traps found the hard way
 
@@ -140,10 +139,11 @@ Three claims were asserted in writing before they were measured, and all three w
 They are recorded because each one is a trap this bench will set again.
 
 **1. Reading the serial port RESETS this board.** Native USB-CDC. Every
-connect-ask-disconnect temperature reading is taken ~0.5 s after a reset and describes the
-reset, not the running board. Two such readings were once compared as a before/after; they
-differed only in how long the chip had been idle in the bootloader — one followed a 20 s
-flash (cool), the other 19 minutes of running (warm), so the *improved* config read hotter.
+connect-ask-disconnect reading is taken ~0.5 s after a reset and describes the reset, not
+the running board. Two were once compared as a before/after; they differed only in how long
+the chip had been idle in the bootloader, so the *improved* config read hotter. The same
+transient flatters a touch test: the board takes ~5 minutes to climb from 50 °C to 63.7 °C,
+and anything felt inside that window feels like an improvement.
 
 > To watch a running board: pay one reset, hold the port open, and let the board talk.
 > That is why the firmware prints a periodic `pwr:` line rather than answering a query.
@@ -151,24 +151,46 @@ flash (cool), the other 19 minutes of running (warm), so the *improved* config r
 Note this contradicts the general rule in `CLAUDE.md` that serial reads are free on the
 ESP32-S3. It holds for the boards in that note; it does **not** hold here.
 
-**2. The collector's RSSI is useless for this.** It reports
-`self.advertisement.rssi`, and `smart-shunt-ble-client.py` line 2 carries its own
-`todo use bluetoothctl to get real-time rssi`. A connected peripheral does not advertise,
-so the value is frozen at the last advertisement before the current connection. A −38 → −48
-shift was briefly read as a TX change taking effect; it was a reconnect picking up a
-different advertisement.
-
-Device-side RSSI does not fix it either: measured at the peripheral, `ble_gap_conn_rssi`
-reports what the *central* transmits. Only the rpi can measure our TX power, and bumble
-owns that HCI adapter exclusively. **TX power is unmeasurable on this bench.**
+**2. The collector's RSSI is useless for this.** It reports `self.advertisement.rssi`, and
+`smart-shunt-ble-client.py` line 2 carries its own `todo use bluetoothctl to get real-time
+rssi`. A connected peripheral does not advertise, so the value is frozen at the last
+advertisement before the connection. A −38 → −48 shift was briefly read as a TX change
+taking effect; it was a reconnect picking up a different advertisement. Device-side RSSI
+does not fix it either — at the peripheral, `ble_gap_conn_rssi` reports what the *central*
+transmits. Only the rpi can measure our TX power, and bumble owns that adapter exclusively.
+**TX power is unmeasurable on this bench.**
 
 **3. PSRAM was never running.** The boot banner reads `psram 0 B`.
 `CONFIG_SPIRAM_BOOT_INIT` is set in the `qio_opi` sdkconfig, but
 `CONFIG_SPIRAM_IGNORE_NOTFOUND` silently tolerates a part that does not answer, and
-`ESP.getPsramSize()` would report 8 MB had it initialised and joined the heap
-(`SPIRAM_USE_MALLOC` is set). The claimed "8 MB clocked at 80 MHz continuously" lever never
-existed, and the bootloader-level `memory_type` change it needed — failure mode: physical
-BOOT+RESET — was correctly not made.
+`ESP.getPsramSize()` would report 8 MB had it initialised (`SPIRAM_USE_MALLOC` is set). The
+"8 MB clocked for nothing" lever never existed, and the bootloader-level `memory_type`
+change it needed — failure mode: physical BOOT+RESET — was correctly not made.
+
+## Prior art: the same investigation, on a different board
+
+`~/dev/ha/nimble-ble-proxy/docs/thermal-notes.md` ran this exercise first, on an ESP32-S3
+running WiFi STA + a NimBLE scanner. Read it before re-deriving anything here. It found the
+same shape of answer, independently:
+
+| Lever | Their result | Ours |
+|---|---|---|
+| CPU clock | −3.0 °C (160 → 80 MHz) | −6.5 K (240 → 80 MHz) |
+| Radio TX power | −1.7 °C (WiFi, 20 → 13 dBm) | 0.16 K (BLE, 21 dB span) |
+| Light sleep / CPU power-down | **0 °C** — never engages with BT on | not reachable, and moot |
+| Sensor noise | ±1.5 °C, wandered 3 steps at fixed settings | 0.9 K drift over one sweep |
+
+Two things follow. First, **we already hold both of their working levers**: this board runs
+at 80 MHz, and its WiFi radio is off entirely (`disableWifi` is the boot default), which is
+strictly better than turning its TX power down. Second, their sensor-noise caveat matches
+ours almost exactly — two independent investigations both found the per-lever deltas
+comparable to the measurement noise.
+
+Their board settles at **51.6 °C (80 MHz) to 58 °C**, against our 63.7 °C, despite *also*
+running WiFi. Since the firmware levers are already equal, the difference is not firmware:
+it is board thermal design — the XIAO is a very small PCB with little copper to spread into
+— plus ambient, airflow, and the fact that two different dies' on-die sensors are not
+cross-calibrated. **Die temperature is not comparable between boards.**
 
 ## Method — and how this sweep got it wrong
 
@@ -197,6 +219,6 @@ BOOT+RESET — was correctly not made.
 - Publish-period sweep (200 / 400 / 700 ms at a pinned 195 ms / lat 3) is re-running after
   the cumulative-state bug above. Expect it to be thermally flat and to matter only at the
   throughput and latency bounds.
-- If the board must run cooler than ~62 °C, the only remaining lever is an ESP-IDF port to
-  get `CONFIG_BT_LE_SLEEP_ENABLE` / `CONFIG_PM_ENABLE` / tickless idle. Nothing at the
-  application level will do it.
+- **No further firmware lever is known.** The ESP-IDF/light-sleep route is closed (above).
+  Getting meaningfully below ~64 °C means either disabling BLE — which is the product — or
+  changing the thermal path: airflow, or copper for the package to spread into.

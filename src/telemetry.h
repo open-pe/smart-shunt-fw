@@ -16,23 +16,34 @@ protected:
 
     unsigned long lastTimeOut = 0;
 
-    /* Publication period. Was the literal 400e3. It is a variable so the BLE power
-     * sweep can move it without a reflash per point -- and it is capped, because this
-     * is the one knob here that can silently break the product rather than merely make
-     * it worse. Two independent limits:
+    /* Publication period. Was the literal 400e3, then a variable with a FIXED 200 ms
+     * floor -- which measurement showed was not a guard at all: at a 195 ms connection
+     * interval a 200 ms period delivered 64% of its samples, shedding more than a third
+     * of the data the bound existed to protect.
      *
-     *  - Upper: end-to-end sample age is roughly this period plus one connection
-     *    interval, and the bench budget for that is 1 s. Anything past ~700 ms spends
-     *    a budget that belongs to the link, not to us.
-     *  - Lower: each tick emits one record per sampler and flush() ships at most one
-     *    indication per round trip, so a period well under the connection interval
-     *    just fills the queue and sheds samples -- the failure this file's own
-     *    catch-up-drain comment documents.
+     * The real constraint is not a constant, because the CENTRAL owns the connection
+     * interval and can change it at any time. flush() ships at most one indication per
+     * round trip, and a round trip measured ~1.6 connection intervals on this bench:
      *
-     * NOT persisted, for the same reason as cpufreq: a value that starves the link is
-     * one power-cycle away from gone. */
-    static constexpr unsigned long TELEMETRY_INTERVAL_MIN_US = 200000;
+     *     period / interval    delivered
+     *          1.01x              80%     (400 ms period, 397.5 ms interval)
+     *          1.03x              64%     (200 ms period, 195 ms interval)
+     *          2.05x             100%     (400 ms period, 195 ms interval)
+     *          3.60x             100%     (700 ms period, 195 ms interval)
+     *
+     * So the floor is 2x the NEGOTIATED interval, evaluated live. The upper bound stays
+     * absolute: end-to-end sample age is the period plus about one interval, against a
+     * 1 s bench budget.
+     *
+     * With no link the interval is unknowable, and unevaluable must not mean OK -- so an
+     * unlinked board demands the conservative NOLINK floor rather than waving the check
+     * through. NOT persisted, for the cpufreq reason. */
     static constexpr unsigned long TELEMETRY_INTERVAL_MAX_US = 700000;
+    /// Absolute sanity floor; the live check below is normally stricter.
+    static constexpr unsigned long TELEMETRY_INTERVAL_FLOOR_US = 200000;
+    /// Demanded when there is no link to measure against. 400 ms is the tested-good
+    /// shipping value, not a guess.
+    static constexpr unsigned long TELEMETRY_INTERVAL_NOLINK_US = 400000;
     unsigned long telemetryIntervalUs = 400000;
     unsigned long lastTimePrint = 0;
     int64_t timeLastWakeEvent = 0;
@@ -80,9 +91,23 @@ public:
     Telemetry(SamplerRegistry &reg, BleTransport &b) : registry(reg), ble(b) {}
 
     unsigned long getTelemetryIntervalUs() const { return telemetryIntervalUs; }
-    /// Returns false and changes nothing if out of range -- the caller reports it.
+
+    /// Smallest period the CURRENT link can actually sustain. Recomputed per call: the
+    /// central may renegotiate the interval at any time, so a cached answer would go
+    /// stale in exactly the direction that loses data.
+    unsigned long minTelemetryIntervalUs() const {
+        float itvlMs;
+        uint16_t lat, tmo;
+        if (!ble.connSnapshot(itvlMs, lat, tmo)) return TELEMETRY_INTERVAL_NOLINK_US;
+        const unsigned long need = (unsigned long) (2.0f * itvlMs * 1000.0f);
+        return need > TELEMETRY_INTERVAL_FLOOR_US ? need : TELEMETRY_INTERVAL_FLOOR_US;
+    }
+
+    /// Returns false and changes nothing if out of range -- the caller reports it, and
+    /// can call minTelemetryIntervalUs() to say what would have been accepted.
     bool setTelemetryIntervalUs(unsigned long us) {
-        if (us < TELEMETRY_INTERVAL_MIN_US || us > TELEMETRY_INTERVAL_MAX_US) return false;
+        if (us > TELEMETRY_INTERVAL_MAX_US) return false;
+        if (us < minTelemetryIntervalUs()) return false;
         telemetryIntervalUs = us;
         return true;
     }

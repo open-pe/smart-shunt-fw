@@ -27,6 +27,7 @@ extern volatile int g_wifiRequest;
  * main_esp32.cpp, where the instance is actually in scope. */
 extern unsigned long telemetryGetIntervalUs();
 extern bool telemetrySetIntervalUs(unsigned long us);
+extern unsigned long telemetryMinIntervalUs();
 #endif
 
 inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, BleTransport &ble) {
@@ -224,9 +225,13 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             }
             const long ms = v.toInt();
             if (!telemetrySetIntervalUs((unsigned long) ms * 1000))
-                UART_LOG("blerate: %ld ms out of range, still %lu ms (upper bound protects "
-                         "the 1 s end-to-end budget, lower bound the indication round trip)",
-                         ms, telemetryGetIntervalUs() / 1000);
+                /* The floor moves with the negotiated connection interval, so report the
+                 * number that actually applies right now rather than a constant the
+                 * reader would then have to go and look up. */
+                UART_LOG("blerate: %ld ms rejected, still %lu ms (allowed %lu..700 ms; the "
+                         "floor is 2x the negotiated connection interval -- one indication "
+                         "costs ~1.6 of them, and 1.03x measured 64%% delivery)",
+                         ms, telemetryGetIntervalUs() / 1000, telemetryMinIntervalUs() / 1000);
             else
                 UART_LOG("blerate %lu ms", telemetryGetIntervalUs() / 1000);
         } else if (inp.startsWith("bleconn ")) {

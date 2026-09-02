@@ -391,6 +391,9 @@ unsigned long telemetryGetIntervalUs() {
 bool telemetrySetIntervalUs(unsigned long us) {
     return telemetry && telemetry->setTelemetryIntervalUs(us);
 }
+unsigned long telemetryMinIntervalUs() {
+    return telemetry ? telemetry->minTelemetryIntervalUs() : 0;
+}
 
 #ifdef WITH_LCD
 LCD lcd;
