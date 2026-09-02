@@ -33,6 +33,22 @@ constexpr gpio_num_t AUX_PIN = GPIO_NUM_9;
 #  define AUX_ACTIVE_HIGH 1
 #endif
 
+/* Not every board carries the load switch. A bring-up rig that has none must not merely
+ * leave it "off" -- it must not drive AUX_PIN AT ALL, because on such a board that pad is
+ * usually doing something else. Concretely: on the XIAO ESP32-S3 carrying the pwr-metering
+ * shunt-adc board, GPIO9 is J2.3 / SCLK, and auxBegin()'s pinMode(OUTPUT) plus
+ * auxArmDeepSleepHold()'s gpio_hold_en() would put a held output pad in contention with the
+ * SPI peripheral's clock line. Build those with -D AUX_PIN_PRESENT=0.
+ *
+ * This suppresses the PIN, not the state machine: the console and BLE surfaces stay
+ * compiled, and both echo auxGet() after every set, so a refused request reads back "off"
+ * at the caller instead of being silently accepted. The persisted state is also ignored --
+ * an EEPROM image carried over from a board that DID have the switch would otherwise come
+ * back "ON", pin idle sleep open through stayAwake, and publish a switch that isn't there. */
+#ifndef AUX_PIN_PRESENT
+#  define AUX_PIN_PRESENT 1
+#endif
+
 // Raw EEPROM/NVS byte offsets -- deliberately NOT slot indices. Calibration occupies bytes 16..111
 // today and its assert(ecIndex <= 16) reserves through 151, and the slot scheme is already
 // over-subscribed (slot 4 is shared by INA226 range and INA228@0x42, slot 8 by TMP117@0x4B and an
@@ -80,12 +96,23 @@ inline void auxWritePersisted(bool on) {
 }
 
 inline void auxDrive(bool on) {
+#if AUX_PIN_PRESENT
     digitalWrite(AUX_PIN, (on == AUX_ACTIVE_HIGH) ? HIGH : LOW);
+#else
+    (void) on;   // no switch fitted -- AUX_PIN belongs to something else on this board
+#endif
 }
 
 /// Call early in setup(), before the long init work -- on a deep-sleep wake the load has been
 /// carried across by the pad hold and should be handed back to the firmware promptly.
 inline void auxBegin() {
+#if !AUX_PIN_PRESENT
+    // Do not read the persisted state either: see AUX_PIN_PRESENT above.
+    auxState = false;
+    ESP_LOGI("aux", "no aux switch on this board (AUX_PIN_PRESENT=0); GPIO%d left alone",
+             (int) AUX_PIN);
+    return;
+#else
     auxState = auxReadPersisted();
 
     // Order matters coming out of deep sleep, where the pad is still held at its old level:
@@ -101,11 +128,18 @@ inline void auxBegin() {
 #endif
 
     ESP_LOGI("aux", "aux switch on GPIO%d = %s (restored)", (int) AUX_PIN, auxState ? "ON" : "off");
+#endif
 }
 
 /// App-task only. Persists only on an actual change: EEPROM.commit() rewrites the whole 256-byte
 /// blob, and re-asserting a value that is already stored would burn a flash cycle for nothing.
 inline void auxSet(bool on) {
+#if !AUX_PIN_PRESENT
+    // Refuse rather than record. Both callers re-read auxGet() and report it, so the
+    // request visibly fails instead of leaving a phantom "ON" the board cannot honour.
+    if (on) ESP_LOGW("aux", "no aux switch on this board; request ignored");
+    return;
+#endif
     if (on == auxState) return;
     auxState = on;
     auxDrive(on);
@@ -116,7 +150,9 @@ inline void auxSet(bool on) {
 /// Latch the pad so the level survives deep sleep and the wake reset. Without this the switch would
 /// drop out for the whole boot interval every time the idle sleep cycles -- every 15 minutes.
 inline void auxArmDeepSleepHold() {
-#ifdef TARGET_STM32H5
+#if !AUX_PIN_PRESENT
+    return;   // holding a pad that belongs to SPI is exactly what this knob exists to prevent
+#elif defined(TARGET_STM32H5)
     // No deep-sleep pad hold on STM32H5 yet
 #else
     gpio_hold_en(AUX_PIN);

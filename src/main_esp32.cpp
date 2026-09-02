@@ -77,9 +77,11 @@ PowerSampler_TMP117 tmp117_49{0x49};
 PowerSampler_TMP117 tmp117_4a{0x4A};
 PowerSampler_TMP117 tmp117_4b{0x4B};
 
-#ifdef SHUNT_ADC_ONLY
+#if defined(SHUNT_ADC_ONLY) && !defined(XIAO_NEST)
 /* A separate controller lets another default-address part coexist with bus 0;
  * storage slot 9 is unused by every sampler registered in this build. */
+/* NOT on the XIAO: GPIO8 is D9 = J2.4/DIN there, so Wire1 would drive the
+ * ADS1262's MOSI, and GPIO3 is D2 = the relay mux REQ_B line. */
 static constexpr uint8_t TMP117_I2C2_SDA = 3;
 static constexpr uint8_t TMP117_I2C2_SCL = 8;
 static constexpr uint8_t TMP117_I2C2_STORAGE_ID = 9;
@@ -89,11 +91,36 @@ PowerSampler_TMP117 tmp117_i2c2{0x48, 1, TMP117_I2C2_STORAGE_ID};
 /* pwr-metering shunt-adc board (ADS1262) on J2. Pins are the wiring, not
  * settings.h, because settings.h has no SPI entries for this board.
  *
- * WARNING: on the XIAO these five collide with the INA228 alerts and the mux
+ * J2 is revB: 1:3V3-IN 2:GND 3:SCLK 4:DIN 5:DOUT/DRDY 6:nCS 7:NC 8:START.
+ * There is no dedicated /DRDY -- it rides DOUT (J2.5), which is why the driver
+ * holds nCS low forever (SBAS661C 9.4.5). J2.7 MUST be left unconnected: on a
+ * revA harness that pin is the isolator's /DRDY OUTPUT, so driving it is
+ * output-into-output contention. Check the board silk for the revB marker.
+ */
+#ifdef XIAO_NEST
+/* XIAO ESP32-S3, J2.3..J2.8 wired straight to D10..D5 (2026-09-02).
+ *      J2.3 SCLK -> D10 = GPIO9    J2.6 nCS   -> D7 = GPIO44
+ *      J2.4 DIN  -> D9  = GPIO8    J2.7 NC    -> not connected
+ *      J2.5 DOUT -> D8  = GPIO7    J2.8 START -> D5 = GPIO6
+ *
+ * GPIO9 is AUX_PIN (aux_switch.h). This board has no aux load switch, so the
+ * env builds with -D AUX_PIN_PRESENT=0; without it auxBegin() would pinMode()
+ * the SCLK pad to OUTPUT and auxArmDeepSleepHold() would gpio_hold_en() it,
+ * putting a held pad in contention with the SPI peripheral's clock.
+ *
+ * GPIO44 (nCS) is U0RXD and GPIO43 (D6, unused) is U0TXD. Neither is a
+ * strapping pin, and the console is USB-CDC, so UART0 is free -- but the ROM
+ * boot log still bursts out of GPIO43 at 115200 on every reset. Do not put a
+ * signal that must stay quiet at boot on D6. */
+static constexpr int8_t SHUNTADC_SCLK = 9, SHUNTADC_DIN = 8, SHUNTADC_DOUT = 7,
+                        SHUNTADC_NCS = 44, SHUNTADC_START = 6;
+#else
+/* WARNING: on the XIAO these five collide with the INA228 alerts and the mux
  * (GPIO4=ALERT2, 5=ALERT3, 6=Mux_S1, 7=Mux_S2). This wiring is the N16R8 clone
  * bring-up map; pick one or the other per board before enabling both. */
 static constexpr int8_t SHUNTADC_SCLK = 4, SHUNTADC_DIN = 5, SHUNTADC_DOUT = 6,
                         SHUNTADC_NCS = 7, SHUNTADC_START = 16;
+#endif
 
 Ads1262ShuntAdc shuntAdc;
 /* Shunt current on J3 (IIN, PAIR_CH0). uPair = PAIR_NONE means no voltage
@@ -247,21 +274,32 @@ PowerSampler_ShuntAdcHealth shuntAdcHealth{shuntAdc, 30000, 14,
  * the actual cable before trusting a reading, and change them here, not in
  * settings.h, exactly as the ADS1262 SPI pins above are handled.
  *
- * PAIR_CH2 = J5 is the divider's assumed landing point; main_esp32.cpp has carried
- * a note anticipating exactly that since before this board existed. If the divider
- * is on J6, change this one argument to PAIR_CH3. */
-#ifdef RELAY_MUX_ONLY
-/* XIAO ESP32-S3 carrying ONLY the relay mux (env xiao_relaymux): D0/D1/D2.
- * The XIAO breaks out just 11 GPIOs -- D0..D10 = 1,2,3,4,5,6,43,44,7,8,9 -- and
- * GPIO2/3 are the I2C pins in the XIAO settings branch, which is why this build
- * skips the I2C bring-up entirely: there is nothing on the bus to find. */
+ * Which pair the divider lands on is a WIRING FACT, so it is per-board. */
+#if defined(RELAY_MUX_ONLY) || defined(XIAO_NEST)
+/* XIAO ESP32-S3: relay mux control on D0/D1/D2. The XIAO breaks out just 11
+ * GPIOs -- D0..D10 = 1,2,3,4,5,6,43,44,7,8,9 -- and GPIO2/3 are the I2C pins in
+ * the XIAO settings branch, which is why these builds skip the I2C bring-up
+ * entirely: there is nothing on the bus to find.
+ *
+ * Clear of this board's ADS1262 SPI (9/8/7/44/6) -- see SHUNTADC_* above. */
 static constexpr uint8_t RELAYMUX_ARM = 1, RELAYMUX_REQ_A = 2, RELAYMUX_REQ_B = 3;
 #else
 static constexpr uint8_t RELAYMUX_ARM = 17, RELAYMUX_REQ_A = 18, RELAYMUX_REQ_B = 21;
 #endif
 
+#ifdef XIAO_NEST
+/* MEASURED ON THE RISER, not assumed: 1 V into the mux's left input (IN_B open),
+ * mux output through the voltage divider, divider into the ADS1262's CH0 = J3.
+ * Confirmed by Fab at the bench 2026-09-03. */
+#  define RELAYMUX_ADC_PAIR Ads1262ShuntAdc::PAIR_CH0
+#else
+/* PAIR_CH2 = J5 was the divider's ASSUMED landing point on the N16R8 rig and has
+ * never been confirmed against a cable. If the divider is on J6, use PAIR_CH3. */
+#  define RELAYMUX_ADC_PAIR Ads1262ShuntAdc::PAIR_CH2
+#endif
+
 RelayMux2 relayMux{RELAYMUX_ARM, RELAYMUX_REQ_A, RELAYMUX_REQ_B};
-RelayMuxAdcBackend relayMuxAdc{relayMux, shuntAdc, Ads1262ShuntAdc::PAIR_CH2};
+RelayMuxAdcBackend relayMuxAdc{relayMux, shuntAdc, RELAYMUX_ADC_PAIR};
 
 /* storageId 21/22: the EEPROM calibration namespace is shared by every registered
  * sampler AND by INA228's separate resistor/range store. Taken across all builds:
@@ -528,10 +566,16 @@ void setup(void) {
     /* Physical-layer check while the pins are still plain GPIOs. Not fatal: on the
      * shunt-adc board the ADS1262 is on SPI and must come up even with the I2C
      * harness unplugged. See i2c_check_pins() for what it can and cannot see. */
-#ifndef RELAY_MUX_ONLY
+#if !defined(RELAY_MUX_ONLY) && !defined(XIAO_NEST)
     i2c_check_pins(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL);
 
     Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
+#elif defined(XIAO_NEST)
+    /* No I2C parts on this board at all -- the XIAO carries the shunt-adc board
+     * on SPI and nothing else. The SHUNT_ADC_ONLY branch in settings.h names
+     * GPIO11/12 for I2C, which the XIAO does not even break out, so bringing
+     * Wire up would configure a peripheral onto pads that go nowhere. */
+    ESP_LOGI("main", "XIAO_NEST: I2C bring-up skipped, ADS1262 on SPI only");
 #else
     /* No I2C parts on the relay-mux bring-up board, and GPIO2/3 -- which the XIAO
      * settings branch names as SCL/SDA -- are the relay REQ lines here. Bringing
@@ -540,7 +584,7 @@ void setup(void) {
     ESP_LOGI("main", "RELAY_MUX_ONLY: I2C bring-up skipped, no samplers registered");
 #endif
 
-#ifdef SHUNT_ADC_ONLY
+#if defined(SHUNT_ADC_ONLY) && !defined(XIAO_NEST)
     i2c_check_pins(TMP117_I2C2_SDA, TMP117_I2C2_SCL);
     Wire1.begin(TMP117_I2C2_SDA, TMP117_I2C2_SCL, settings.I2C_Freq);
 #endif
@@ -602,11 +646,13 @@ void setup(void) {
      * than "TMP117" buys the room for a prefix: "ftr_t17_48" is 10. Registration
      * checks the composed names for exactly this, so a bad prefix is reported at
      * boot rather than discovered in the database. */
+#ifndef XIAO_NEST
     samplers.add("t17_48", &tmp117);
     samplers.add("t17_49", &tmp117_49);
     samplers.add("t17_4A", &tmp117_4a);
     samplers.add("t17_4B", &tmp117_4b);
-#ifdef SHUNT_ADC_ONLY
+#endif
+#if defined(SHUNT_ADC_ONLY) && !defined(XIAO_NEST)
     samplers.add("t17b_48", &tmp117_i2c2);
 #endif
     /* ONE of these two, never both: they share the ADS1262 and configure it
@@ -639,9 +685,15 @@ void setup(void) {
     samplers.add("VMUX_B", &relayMuxChB);
 #else
     samplers.add("SHUNT_ADC", &shuntAdcIn);
+#ifndef XIAO_NEST
     /* dev[16] truncation: "ftr_DCCT" fits whole; a SHUNT_ADC_-prefixed name
      * would collide with SHUNT_ADC's truncation in InfluxDB. */
+    /* NOT on the XIAO bring-up board: nothing is rigged on J4/PAIR_CH1, and
+     * registering a second pair un-parks the ADS1262 mux -- CH0 drops from
+     * 19.15 SPS to ~4.8 because every pair switch restarts the conversion. One
+     * registered pair is what keeps this at full rate. */
     samplers.add("DCCT", &shuntAdcDcct);
+#endif
 #endif
     //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     //samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);  // fCLK/AVDD diagnostic series; disabled on request
@@ -708,11 +760,22 @@ void setup(void) {
             continue;
         }
         samplers.updateAll();
-#ifdef RELAY_MUX_ONLY
-        /* The bring-up build registers no samplers, so updateAll() returns
+#ifdef WITH_RELAY_MUX
+        /* YIELD ON EVERY RELAY-MUX BUILD, not just the sampler-less bring-up one.
+         *
+         * RELAY_MUX_ONLY registers no samplers at all, so updateAll() returns
          * immediately and this loop -- priority 20, pinned to core 1 -- would spin
-         * at 100% and starve the idle task into a watchdog reset. Nothing here is
-         * time critical: the relay sequence is measured in tens of milliseconds. */
+         * at 100% and starve the idle task into a watchdog reset. But a build that
+         * DOES register VMUX_A/VMUX_B has the same hole for 300 ms at a time: while
+         * the mux sits in DEAD_TIME + SETTLING, hasDataFor() answers false for both
+         * channels by design, updateAll() does nothing, and the loop spins exactly
+         * as hard as it does with nothing registered. The window is not an edge
+         * case -- it is entered on every single channel switch.
+         *
+         * Nothing here is time critical: the relay sequence is measured in tens of
+         * milliseconds and the ADC converts at ~19 SPS, so a 1-tick yield costs no
+         * samples. It is the difference between pacing the loop and betting that
+         * some sampler always has work. */
         vTaskDelay(1);
 #endif
     }
