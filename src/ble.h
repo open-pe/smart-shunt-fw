@@ -32,6 +32,8 @@ NimBLECharacteristicCallbacks::onStatus
 #include <ota_ble.h>
 
 #include "aux_switch.h"
+#include <esp_system.h>
+#include <soc/rtc_cntl_reg.h>
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -314,6 +316,13 @@ public:
     /// Latched by the write callback on the NimBLE host task; applied by tick() on the app task,
     /// because setting the switch persists to NVS and that writes flash.
     volatile bool auxReqPending = false;
+    /* Reboot-into-ROM-downloader request, latched by the OTA control characteristic.
+     * BLE is the ONLY control channel that reaches the xiao_nest riser: its USB-CDC
+     * is dead in BOTH directions (measured 2026-09-03 -- the console `download`
+     * command was written to the port and never arrived, while the board carried on
+     * streaming telemetry throughout), so without this every reflash costs a manual
+     * BOOT+RESET at the bench. */
+    volatile bool dlReqPending = false;
     volatile bool auxReqValue = false;
     /// Last value published to the characteristic, so tick() only notifies on an actual change.
     int8_t auxPublished = -1;
@@ -691,6 +700,23 @@ public:
 
         // Apply a latched aux request here rather than in the write callback: auxSet() persists to
         // NVS, and an NVS commit is a flash write -- the one thing the BLE host task must never do.
+        if (dlReqPending) {
+            dlReqPending = false;
+            /* APP TASK, not the host callback that latched it: this never returns,
+             * and killing the NimBLE host task from inside its own callback would
+             * take the notification below with it. The delay is for the notify to
+             * actually reach the air -- at a 100-200 ms connection interval one
+             * interval is not enough, and the operator otherwise sees the link drop
+             * with no confirmation of why. */
+            ESP_LOGW("otab", "download-mode reboot requested over BLE");
+            if (pOtaCtrl) {
+                pOtaCtrl->setValue("OTAB DOWNLOAD");
+                pOtaCtrl->notify();
+            }
+            delay(600);
+            REG_SET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+            esp_restart();
+        }
         if (auxReqPending) {
             auxReqPending = false;
             auxSet(auxReqValue);
@@ -1093,6 +1119,18 @@ public:
             // Tolerate a client that sends the newline the protocol is written with.
             while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
             if (v.empty()) return;
+            /* Reboot into the ROM downloader. Lives on the OTA control channel
+             * because that is where "I am about to reflash this" belongs, and
+             * because adding a characteristic would change the GATT table --
+             * which doc/ota-over-ble.md warns makes macOS serve a stale cached
+             * attribute table to every client until it is manually busted.
+             *
+             * Latch only. This is the NimBLE host task; the app task does the
+             * reboot so the confirming notification can actually go out first. */
+            if (v == "download") {
+                srv->dlReqPending = true;
+                return;
+            }
             // A rejection is announced by the module itself, on the same OTAB status channel as
             // every other failure -- nothing to add here beyond echoing what was actually sent.
             if (otaBleSubmitCommand(v.c_str()) == OtaBleSubmit::Rejected)

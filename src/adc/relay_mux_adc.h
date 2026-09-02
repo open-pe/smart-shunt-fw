@@ -73,43 +73,57 @@ private:
 
     /* AVERAGE THIS MANY CONSECUTIVE CONVERSIONS INTO ONE PUBLISHED SAMPLE.
      *
-     * Measured on the nest 2026-09-03: VMUX_A published two discrete levels
-     * 141 uV apart (VMUX_B, 73 uV apart) with only ~2 uV of spread WITHIN each
-     * level -- so not noise, but a dependence on WHICH conversion the capture
-     * happened to land on. The tell was in the timestamps: the outlying samples
-     * always arrived ~60 ms late, i.e. one extra conversion had slipped in before
-     * the capture.
+     * THIS IS A PALLIATIVE, NOT A FIX, AND THE DISTINCTION IS MEASURED.
      *
-     * That is inherent to counting generations from `genAtSettle`. The mux's fixed
-     * settle timer is not synchronised to the ADC's conversion boundaries, so the
-     * settle instant falls either just before or just after a boundary and the
-     * whole capture shifts by ONE conversion. Counting makes the capture
-     * deterministic in COUNT, not in PHASE.
+     * Symptom on the nest: VMUX_A published a clean bimodal distribution, most
+     * samples on a floor and a few ~141 uV above it, with ~2 uV of spread WITHIN
+     * each level. Raising N halved the excursion each time and never removed it:
      *
-     * MUST BE EVEN. Averaging an even number of consecutive conversions is immune
-     * to a +-1 index shift for any component that alternates between adjacent
-     * conversions, which is what the two-level data shows. Deliberately NOT
-     * justified by a specific mechanism: chop was the first suspect, but with CHOP
-     * ON one generation() is already a chop-cancelled output, so that story does
-     * not survive contact with ads1262.h. The fix does not depend on which
-     * alternating term it is -- only on it alternating.
+     *     N = 1   141 uV        N = 2    65 uV        N = 4   34.4 uV
      *
-     * Cost is one extra conversion per dwell (~52 ms parked, ~104 ms chopped),
-     * paid on every channel visit. Raising it further buys sqrt(N) on white noise
-     * but the within-level spread is already ~2 uV, three orders below the step
-     * this exists to remove, so there is nothing there worth buying. */
-    static constexpr uint32_t AVG_CONVERSIONS = 2;
+     * That is 1/N dilution of ONE bad conversion, not cancellation of a periodic
+     * term. An earlier revision of this comment claimed the latter ("averaging N
+     * cancels any disturbance whose period divides N") and predicted ~0 uV at
+     * N = 4. The bench returned 34.4 uV. The claim was wrong; the numbers above
+     * are what actually happened.
+     *
+     * THE REAL CAUSE is upstream, in ads1262.h. Every TEMP_EVERY_N_SCANS = 64
+     * scans the driver reads die temperature, which drops chop, retunes gain and
+     * INPMUX, then restores production config and toggles START -- restarting the
+     * conversion cycle. ads1262.h:213 says it plainly: "every one of those
+     * restarts is a fresh settling transient in the middle of a precision
+     * measurement." 64 * 52.22 ms = 3.34 s, and one channel round trip was
+     * ~836 ms, so exactly one dwell in four caught the transient. That also
+     * explains why the affected samples always arrived ~60-104 ms late.
+     *
+     * So the correct fix is to DISCARD the conversions that follow a
+     * temperature-read restart, the way DISCARD_SCANS already discards the ones
+     * that follow a relay switch. Until that lands, averaging buys a 4x
+     * reduction (141 -> 34 uV) for three extra conversions of dwell, and buys
+     * sqrt(N) on white noise besides.
+     *
+     * MUST STILL BE EVEN, and the members must be genuinely adjacent -- see the
+     * adjacency caveat on accLastGen, which this code CANNOT fully enforce. */
+    static constexpr uint32_t AVG_CONVERSIONS = 4;
     static_assert(AVG_CONVERSIONS >= 2 && (AVG_CONVERSIONS % 2) == 0,
-                  "AVG_CONVERSIONS must be even and >= 2, or a +-1 index shift survives it");
+                  "AVG_CONVERSIONS must be even and >= 2");
 
     Target serving = Target::CH_A;   ///< whose turn it is
     uint32_t genAtSettle = 0;
     uint32_t muxGenSeen = 0;
     bool armedForCapture = false;
     /* Accumulator for the AVG_CONVERSIONS average. accN == 0 means "not started".
-     * accLastGen exists to enforce CONSECUTIVENESS: two conversions that are not
-     * adjacent may sit on the same phase of whatever alternates, and averaging
-     * those preserves exactly the error this is meant to cancel. */
+     *
+     * accLastGen CANNOT fully enforce physical adjacency, and an earlier comment
+     * here claimed it could. generation() advances when pump() PUBLISHES a
+     * reading, and pump() consumes at most one per call; DRDY is a flag, not a
+     * counter (ads1262.h:540), so conversions that elapse while nothing polls are
+     * never counted. After a starved interval the next pump() still steps
+     * generation() by one, `g - accLastGen == 1` passes, and two physically
+     * non-adjacent values are averaged. The check therefore catches only gaps the
+     * driver itself observed -- it is a cheap sanity check, NOT a guarantee, and
+     * nPairBroken undercounts for the same reason. A temperature-read restart is
+     * likewise invisible to it: the generations either side are consecutive. */
     uint32_t accN = 0, accLastGen = 0;
     float accSum = 0.0f;
     bool initialised = false;
@@ -220,6 +234,17 @@ private:
      * count means the loop is being starved and the averaging is costing dwell
      * time it should not. */
     uint32_t nPairBroken = 0;
+    /* Re-baselining state for the "matches neither channel" guard, per channel.
+     * That guard compares against lastAccepted[], which take() updates only on
+     * FINITE values -- so once it fires it freezes its own baseline and can never
+     * pass again. Changing the source from 1.0 V to 1.2 V on the bench
+     * (2026-09-03) silenced VMUX_A permanently: every sample NaN, forever, on a
+     * channel that was working perfectly. A guard that cannot return to PASS on
+     * healthy input is broken regardless of what it catches. */
+    static constexpr uint32_t UNMATCHED_REBASELINE = 3;
+    uint32_t nUnmatched[3] = {0, 0, 0};
+    float unmatchedV[3] = {NAN, NAN, NAN};
+    uint32_t nRebaselined = 0;
     uint32_t lastDiagOverride = 0;
 
     void resetObservation(Target ch) {
@@ -277,13 +302,41 @@ public:
      * dutifully publish NAN with DIAG_PGA_RANGE forever -- a channel that looks
      * wired-up and never produces a number.
      *
-     * So the default here is G=1 with the PGA BYPASSED, the same configuration the
-     * DCCT burden channel uses and for the same reason: at G=1 the PGA's own output
-     * swing leaves each input pin roughly -2.2..+2.2 V on these +-2.5 V rails,
-     * which a ground-referenced divider output can exceed. Bypassed, full scale is
-     * the reference itself, +-2.5 V. */
+     * The default WAS G=1 with the PGA BYPASSED, copied from the DCCT burden
+     * channel, on the grounds that at G=1 the PGA's own output swing leaves each
+     * input pin roughly -2.2..+2.2 V on these +-2.5 V rails, which a
+     * ground-referenced divider output can exceed. Bypassed, full scale is the
+     * reference itself, +-2.5 V.
+     *
+     * THAT WORST CASE IS NOT THIS SOURCE, AND BYPASS COSTS MORE THAN IT SAVES.
+     * The divider is rated 0-80 V, 100 V engineering (ads1262-divider/gen_sch.py).
+     * Ground-referenced means AINN sits at AGND, so V_cm = V_diff/2 and the PGA
+     * outputs land at V_diff and 0 -- not at +-V_diff:
+     *
+     *      80 V -> 1.569 V out -> pins at 1.569 / 0 V   (0.63 V of margin)
+     *     100 V -> 1.961 V out -> pins at 1.961 / 0 V   (0.24 V of margin)
+     *
+     * so the PGA fits across the divider's whole rated range and clips only above
+     * ~112 V, past the board's own limit. THIS MARGIN IS THE DIVIDER'S, NOT THE
+     * ADC'S: re-range the divider and this choice must be re-derived.
+     *
+     * What bypass costs is input current. Bypassed, the ADC input is the raw
+     * switched-cap modulator rather than a buffer, and the divider presents
+     * 1 M || 20 k = 19.6 kOhm. Measured on the nest 2026-09-03, both channels
+     * carried the SAME additive offset -- A read 22.79 mV where 51:1 predicts
+     * 19.61 mV, and B (open) read 3.33 mV where 0 is predicted. That ~3.3 mV over
+     * 19.6 kOhm implies ~165 nA of input bias current, and it is 17% of a 1 V
+     * reading. It is also why A-B was needed to recover 1 V instead of reading A
+     * directly. The same bias-current sensitivity is the lever the die-temperature
+     * restart pushes on to make its ~141 uV transient.
+     *
+     * So: G=1 with the PGA ENABLED. Buffered, bias should fall to picoamps and
+     * both the offset and the transient's mechanism go with it. The ~165 nA is an
+     * INFERENCE from the offset, not a datasheet figure -- SBAS661C's bypass-mode
+     * input current has not been checked -- but the prediction is self-proving: if
+     * B's 3.3 mV does not collapse toward zero, this reasoning is wrong. */
     RelayMuxAdcBackend(RelayMux2 &mux, Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair pair,
-                       uint8_t pgaGainCode = 0, bool pgaBypass = true,
+                       uint8_t pgaGainCode = 0, bool pgaBypass = false,
                        float stableEpsV = 0.0f, float moveEpsV = 1e-3f)
         : mux(mux), dev(dev), pair(pair), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass),
           stableEpsV(stableEpsV), moveEpsV(moveEpsV) {}
@@ -519,8 +572,18 @@ public:
          * device's own diagnostic -- silently averaging the finite half of a pair
          * would turn a detected fault into a plausible number. */
         {
+            /* FREEZE ONCE FULL. Without this bound the accumulator keeps taking
+             * terms while a downstream gate (the stability gate below) returns
+             * false, and the divisor stays AVG_CONVERSIONS: three terms over two
+             * publishes 3x/2 of a constant input, as a FINITE and therefore
+             * plausible number. Found by review, not by the bench -- it is dormant
+             * only because stableEpsV ships at 0 and nothing else returns false
+             * after this point today. That is a property of the current
+             * configuration, not of this code, so it is fixed here. */
             const uint32_t g = dev.generation();
-            if (accN == 0) {
+            if (accN >= AVG_CONVERSIONS) {
+                // full: hold the mean that vAvg is about to compute
+            } else if (accN == 0) {
                 accLastGen = g; accSum = dev.volts(pair); accN = 1;
             } else if (g != accLastGen) {
                 if ((uint32_t) (g - accLastGen) != 1) {
@@ -590,13 +653,54 @@ public:
         if (std::isfinite(mine) && std::isfinite(v) && std::isfinite(stepFrom)) {
             const float dMine = fabsf(v - mine), dOther = fabsf(v - stepFrom);
             if (dMine > moveEpsV && dOther > moveEpsV) {
+                /* AN UNMATCHED READING IS AMBIGUOUS, so do not treat it as proof.
+                 * "This channel's input changed" and "this channel's contact is
+                 * open" look identical in ONE sample. They separate over several:
+                 * a real source settles to a new value and REPEATS it, while an
+                 * open contact floats and does not.
+                 *
+                 * So require UNMATCHED_REBASELINE consecutive readings that agree
+                 * with each other before adopting the new value, and publish NaN
+                 * with the fault diagnostic meanwhile. That keeps the fault loud
+                 * -- nNoStep still counts every one, and the channel visibly drops
+                 * out for a few seconds -- without letting it become permanent.
+                 * The old code could not recover at all, because take() refreshes
+                 * lastAccepted[] only from finite samples. */
                 ++nNoStep;
-                ESP_LOGE("relaymux", "%s: reads %.6g V, matching neither channel "
-                                     "(%.6g / %.6g) -- both contacts open? publishing NaN",
-                         RelayMux2::targetName(ch), (double) v, (double) mine, (double) stepFrom);
-                lastVolts = NAN;
-                lastDiagOverride = DIAG_RELAY_NO_STEP;
-                return true;
+                const uint8_t i = (uint8_t) ch;
+                if (nUnmatched[i] == 0 || !std::isfinite(unmatchedV[i]) ||
+                    fabsf(v - unmatchedV[i]) > moveEpsV) {
+                    unmatchedV[i] = v;
+                    nUnmatched[i] = 1;
+                } else {
+                    ++nUnmatched[i];
+                }
+
+                if (nUnmatched[i] >= UNMATCHED_REBASELINE) {
+                    ++nRebaselined;
+                    ESP_LOGW("relaymux", "%s: %lu consecutive readings agree at %.6g V "
+                                         "(was %.6g V, other %.6g V) -- the INPUT changed, not a "
+                                         "contact; adopting it as the new baseline",
+                             RelayMux2::targetName(ch), (unsigned long) nUnmatched[i],
+                             (double) v, (double) mine, (double) stepFrom);
+                    nUnmatched[i] = 0;
+                    unmatchedV[i] = NAN;
+                    /* Fall through and publish: v is a real, repeated measurement,
+                     * and take() will make it the new lastAccepted[]. */
+                } else {
+                    ESP_LOGE("relaymux", "%s: reads %.6g V, matching neither channel "
+                                         "(%.6g / %.6g) -- open contact, or the input moved? "
+                                         "publishing NaN (%lu/%lu before re-baselining)",
+                             RelayMux2::targetName(ch), (double) v, (double) mine,
+                             (double) stepFrom, (unsigned long) nUnmatched[i],
+                             (unsigned long) UNMATCHED_REBASELINE);
+                    lastVolts = NAN;
+                    lastDiagOverride = DIAG_RELAY_NO_STEP;
+                    return true;
+                }
+            } else {
+                nUnmatched[(uint8_t) ch] = 0;
+                unmatchedV[(uint8_t) ch] = NAN;
             }
         }
 

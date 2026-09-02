@@ -533,6 +533,13 @@ void setup(void) {
     /* Before Serial.begin(): setCpuFrequencyMhz() re-derives the baud divider of every
      * HardwareSerial it knows about, and doing it first means nothing has to be
      * re-derived at all. */
+    /* Disarm the `download` console command. Its RTC-domain bit survives a CPU
+     * reset, so without this a board that entered the downloader and was reset by
+     * hand rather than flashed would return to the downloader every boot. Clearing
+     * it here means any boot that reaches the app is the last one that can.
+     * REG_CLR_BIT, not REG_WRITE(0): this register holds other fields. */
+    REG_CLR_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
     Serial.begin(115200);
     auxBegin();

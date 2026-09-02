@@ -18,6 +18,8 @@ extern RelayMuxAdcBackend relayMuxAdc;
 
 #ifndef TARGET_STM32H5
 #include <esp_ota_ops.h>
+#include <esp_system.h>
+#include <soc/rtc_cntl_reg.h>
 extern bool otaBleActive();
 extern bool disableWifi;
 extern bool wifiTimeSyncOnly;
@@ -384,6 +386,35 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                      otaBleActive() ? "ACTIVE" : "idle");
         }
 #endif
+#ifndef TARGET_STM32H5
+        else if (inp == "download") {
+            /* Reboot straight into the ROM downloader, so a board whose USB-CDC
+             * has stopped serving esptool can still be reflashed without someone
+             * physically holding BOOT and tapping RESET. That is not hypothetical:
+             * the xiao_nest riser prints nothing and refuses every upload while
+             * happily clicking relays and streaming telemetry over BLE.
+             *
+             * ONE-SHOT, AND DISARMED FROM BOTH ENDS. The bit lives in the RTC
+             * domain and survives a CPU reset, so left alone it would send EVERY
+             * subsequent boot into the downloader. Two independent things clear
+             * it: esptool zeroes it on the reset it performs after a flash
+             * (tool-esptoolpy esp32s3.py, RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK,
+             * citing arduino-esp32#6762), and setup() clears it on any boot that
+             * reaches the app. So the trap disarms itself whether the flash
+             * happens or not -- the worst case is one extra reset.
+             *
+             * COSTS: the app stops. No sampling, no telemetry, no BLE. The relays
+             * release, because nothing drives ARM/REQ and the mux board's 100k
+             * pull-downs park every relay off. Recovery is a flash, or RESET
+             * twice (once to leave the downloader, once with the bit cleared). */
+            UART_LOG("rebooting into ROM download mode -- sampling, telemetry and BLE stop, "
+                     "and the relays release. Flash to recover, or reset twice.");
+            Serial.flush();
+            delay(100);
+            REG_SET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+            esp_restart();
+        }
+#endif
         else if (inp == "help") {
             UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
             UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
@@ -393,6 +424,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("bootinfo              running slot + OTA verify state");
             UART_LOG("wifi on|off           enable/disable WiFi + InfluxDB telemetry");
             UART_LOG("cpufreq [80|160|240]  get/set CPU clock + die temp (not persisted)");
+            UART_LOG("download              reboot into ROM download mode (stops everything)");
 #ifdef WITH_RELAY_MUX
             UART_LOG("relaymux [a|b|off|auto] park the relay mux for bench work, or resume");
 #endif

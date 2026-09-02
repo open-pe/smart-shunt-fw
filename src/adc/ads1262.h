@@ -229,7 +229,21 @@ public:
     ///
     /// Nothing needs it faster. The die temperature is the x-axis for offset and
     /// reference drift, both of which move over minutes; 64 scans is ~3.3 s.
-    static constexpr uint8_t TEMP_EVERY_N_SCANS = 64;
+    /* Overridable, and 0 DISABLES the die-temperature read entirely. That exists
+     * for one experiment: this restart is the prime suspect for the ~141 uV
+     * one-in-four transient measured on the relay-mux ratio path (see
+     * AVG_CONVERSIONS in adc/relay_mux_adc.h). Making the read rare only makes the
+     * artefact rare; disabling it predicts the artefact vanishes outright, which
+     * is a far sharper test of causation. Build with
+     * -D ADS1262_TEMP_EVERY_N_SCANS=0.
+     *
+     * Costs while disabled: dieTempC() stops updating, so any sampler with
+     * reportDieTemp publishes a stale value. Diagnostic builds only -- the default
+     * stays 64. */
+#ifndef ADS1262_TEMP_EVERY_N_SCANS
+#  define ADS1262_TEMP_EVERY_N_SCANS 64
+#endif
+    static constexpr uint8_t TEMP_EVERY_N_SCANS = ADS1262_TEMP_EVERY_N_SCANS;
 
     /// Minimum gap between PGA range-alarm error lines. The alarm is latched
     /// per conversion, so an excursion logs ~19x/s and buries everything else.
@@ -2154,7 +2168,7 @@ public:
              * costs a mux change, a gain switch and two START restarts. Reading
              * it every scan was both redundant and a measurable part of why the
              * achieved rate fell short of the budget. */
-            if (++tempSkip_ >= TEMP_EVERY_N_SCANS) {
+            if (TEMP_EVERY_N_SCANS != 0 && ++tempSkip_ >= TEMP_EVERY_N_SCANS) {
                 tempSkip_ = 0;
                 readDieTemperature();
                 applyProductionConfig();
@@ -2177,7 +2191,7 @@ public:
              * it every scan was both redundant and a measurable part of why the
              * achieved rate fell short of the budget. */
             bool tempRead = false;
-            if (++tempSkip_ >= TEMP_EVERY_N_SCANS) {
+            if (TEMP_EVERY_N_SCANS != 0 && ++tempSkip_ >= TEMP_EVERY_N_SCANS) {
                 tempSkip_ = 0;
                 readDieTemperature();
                 tempRead = true;
