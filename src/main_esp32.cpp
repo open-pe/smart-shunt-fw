@@ -474,7 +474,13 @@ void setup(void) {
     //samplers.add("SHUNT_ADC_ZERO", &shuntAdcZero);
     //samplers.add("SHUNT_ADC_HEALTH", &shuntAdcHealth);  // fCLK/AVDD diagnostic series; disabled on request
 
-#ifndef SHUNT_ADC_ONLY
+/* DUAL_INA228 must be excluded here, not just from samplers.add(): the backend
+ * talks to 0x41, which on that variant is ina228_41's OWN device. Leaving this
+ * call in gave the part two drivers -- the backend rewrote its DIAG_ALRT and
+ * SHUNT_CAL and attached a second ISR to Pin_INA22x_ALERT2, the same GPIO4 the
+ * plain sampler uses -- and drove pinMode(255) three times over, which the HAL
+ * logs as "Invalid IO 255 selected" on every boot. */
+#if !defined(SHUNT_ADC_ONLY) && !defined(DUAL_INA228)
     if (!muxBackend.init()) {
         ESP_LOGW("main", "INA228 mux backend (0x41) init failed");
     }
