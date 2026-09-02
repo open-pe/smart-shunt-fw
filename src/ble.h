@@ -394,25 +394,32 @@ public:
         assert(pServer == nullptr);
         BLEDevice::init("smart-shunt");
 
-        /* TX power. The bench link runs at RSSI -38 dBm against a receiver that needs
-         * about -90, i.e. ~50 dB of margin, so the stack default is paying for range
-         * nobody uses. Backing off 12 dB spends 12 of those 50.
+        /* TX power is deliberately NOT set here. It was, briefly, at -3 dBm; the sweep
+         * that justified it then refuted it.
          *
-         * This is an HONEST BUT SMALL lever, and the reason is worth writing down so
-         * nobody re-derives it: the radio's duty cycle here is tiny. One indication
-         * every ~400 ms, each a fraction of a millisecond of actual transmit, against
-         * a CPU that never sleeps -- so TX energy is far down the list. It is applied
-         * because it is free and cannot hurt, not because it will be visible.
+         * Measured 2026-09-02, 240 s per point on the bench link: +9 dBm 64.50 C,
+         * -3 dBm 64.62 C, -12 dBm 64.66 C. A 21 dB span moved the die 0.16 K, and not
+         * even monotonically -- while a REPEAT of the -3 dBm point drifted 0.6 K from
+         * its own first reading. The error bar is four times the effect. The reason is
+         * structural, not a limit of the measurement: one indication per 400 ms, each a
+         * fraction of a millisecond of transmit, against a CPU and a BLE controller
+         * that never sleep (no CONFIG_BT_LE_SLEEP_ENABLE, no CONFIG_PM_ENABLE). Event
+         * energy is a rounding error next to the always-on baseline.
          *
-         * The board has no antenna fitted, which is exactly why this is a knob and not
-         * a constant: -D BLE_TX_POWER_DBM=<n> puts it back. A drop in RSSI at the
-         * collector is the signal that it went too far. */
-#ifndef BLE_TX_POWER_DBM
-#define BLE_TX_POWER_DBM (-3)
-#endif
+         * So reducing it spends link margin -- on a board with NO ANTENNA FITTED -- to
+         * buy nothing measurable. Worse, it cannot even be checked: the collector
+         * reports advertisement RSSI, and a connected peripheral does not advertise, so
+         * the number is frozen for the life of the connection (see doc/power-thermal.md).
+         * A knob whose benefit is unmeasurable and whose cost is unmeasurable defaults
+         * to off.
+         *
+         * -D BLE_TX_POWER_DBM=<n> sets it explicitly, and the `bletx` console command
+         * changes it at runtime, for whoever can measure RSSI properly. */
+#ifdef BLE_TX_POWER_DBM
         if (!NimBLEDevice::setPower(BLE_TX_POWER_DBM)) {
             ESP_LOGW("ble", "setPower(%d dBm) failed, keeping stack default", BLE_TX_POWER_DBM);
         }
+#endif
 
         if (!NimBLEDevice::setMTU(MTU)) {
             ESP_LOGW("ble", "BLE server set MTU failed");
