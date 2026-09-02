@@ -367,14 +367,39 @@ constexpr auto RT_PRIO = 20;
 
 void uartInit(int port_num);
 
+/* Clock the CPU down from the board default of 240 MHz.
+ *
+ * This firmware is I/O bound, not compute bound: two INA228s at ~120 Hz over a
+ * 400 kHz I2C bus, a ~2.5 Hz BLE indication, and a realTimeTask that spends most of
+ * every pass blocked in a task notification. 240 MHz buys nothing here and costs
+ * roughly 25 mA of continuous core current -- which is what makes the part warm to
+ * the touch, and which the XIAO's LDO then dissipates a second time as (Vin-3.3)*I.
+ *
+ * 80 MHz is the FLOOR, not merely a choice. Below it arduino-esp32 switches the CPU
+ * to the XTAL and powers the PLL down, which takes the 48 MHz USB-Serial-JTAG clock
+ * with it (console gone, no recovery except BOOT+RESET) and drops APB below 80 MHz,
+ * re-deriving every UART/I2C/SPI divider that was configured against it. At 80 the
+ * PLL stays up and APB stays at 80 MHz, so the peripheral clocks -- ADS1262 hardware
+ * SPI included -- are bit-for-bit unchanged. NimBLE also requires >= 80 MHz.
+ *
+ * Overridable per env (-D CPU_FREQ_MHZ=160) for a board that turns out to need the
+ * headroom; the `cpufreq` console command changes it at runtime for A/B testing
+ * without a reflash. The default itself lives in settings.h, so the console can
+ * report what a reboot returns to. */
+
 void setup(void) {
     bootWatchdogArm();
+    /* Before Serial.begin(): setCpuFrequencyMhz() re-derives the baud divider of every
+     * HardwareSerial it knows about, and doing it first means nothing has to be
+     * re-derived at all. */
+    setCpuFrequencyMhz(CPU_FREQ_MHZ);
     Serial.begin(115200);
     auxBegin();
     uartInit(0);
     delay(500);
 
-    ESP_LOGI("main", "SmartShunt ESP32-S3 started");
+    ESP_LOGI("main", "SmartShunt ESP32-S3 started, CPU %u MHz, die %.1f C",
+             (unsigned) getCpuFrequencyMhz(), temperatureRead());
 
     // Before initAll(): the prefix is baked into each EnergyCounter's name there.
     boardPrefixLoad();

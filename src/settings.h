@@ -2,6 +2,14 @@
 
 #include <EEPROM.h>
 
+/* Boot CPU clock for the ESP32 targets. 80 MHz is both the default and the floor --
+ * the reasoning, and what breaks below it, is in main_esp32.cpp next to the call.
+ * Declared here so the console's `cpufreq` command can report what a reboot returns
+ * to. Override per env with -D CPU_FREQ_MHZ=160. */
+#ifndef CPU_FREQ_MHZ
+#define CPU_FREQ_MHZ 80
+#endif
+
 /* Calibration slot map, shared by both targets. Slot n occupies bytes
  * 16 + n*8 .. +7 of a 256-byte image.
  *

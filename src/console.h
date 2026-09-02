@@ -127,6 +127,42 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 UART_LOG("board-prefix rejected (1..%u chars of [A-Za-z0-9_])",
                          (unsigned) BOARD_PREFIX_MAX);
             }
+        } else if (inp == "cpufreq" || inp.startsWith("cpufreq ")) {
+            /* Read-back always reports the die temperature too, because the whole
+             * point of the knob is trading clock for heat and there is otherwise no
+             * number for "the chip feels warm". temperatureRead() is the S3's
+             * on-die sensor: coarse (a few K) and self-heated, so it is a trend
+             * indicator, not a calibrated measurement. */
+            String v(inp.substring(7));
+            v.trim();
+            if (v.length() == 0) {
+                UART_LOG("cpufreq %u MHz (xtal %u, apb %u), die %.1f C",
+                         (unsigned) getCpuFrequencyMhz(), (unsigned) getXtalFrequencyMhz(),
+                         (unsigned) (getApbFrequency() / 1000000), temperatureRead());
+                break;
+            }
+            const long mhz = v.toInt();
+            /* 80 is the floor: below it the PLL powers down, taking the
+             * USB-Serial-JTAG console with it -- i.e. the command would remove the
+             * only way to undo itself, recoverable only by a physical BOOT+RESET.
+             * See the CPU_FREQ_MHZ note in main_esp32.cpp. */
+            if (mhz != 80 && mhz != 160 && mhz != 240) {
+                UART_LOG("cpufreq: only 80, 160 or 240 (80 is the floor: lower kills the PLL and this console)");
+                break;
+            }
+            const unsigned was = getCpuFrequencyMhz();
+            if (!setCpuFrequencyMhz((uint32_t) mhz)) {
+                UART_LOG("cpufreq: setCpuFrequencyMhz(%ld) refused, still %u MHz", mhz, was);
+                break;
+            }
+            /* NOT persisted. A frequency that turns out to break sampling or BLE is
+             * then one power-cycle away from gone, instead of latched into NVS on a
+             * board that may no longer be reachable. Make it permanent by building
+             * with -D CPU_FREQ_MHZ=<n>. */
+            UART_LOG("cpufreq %u -> %u MHz (apb %u MHz, die %.1f C) -- not persisted, reboots to %u",
+                     was, (unsigned) getCpuFrequencyMhz(),
+                     (unsigned) (getApbFrequency() / 1000000), temperatureRead(),
+                     (unsigned) CPU_FREQ_MHZ);
         } else if (inp == "bootinfo") {
             const esp_partition_t *running = esp_ota_get_running_partition();
             esp_ota_img_states_t st;
@@ -156,6 +192,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
 #ifndef TARGET_STM32H5
             UART_LOG("bootinfo              running slot + OTA verify state");
             UART_LOG("wifi on|off           enable/disable WiFi + InfluxDB telemetry");
+            UART_LOG("cpufreq [80|160|240]  get/set CPU clock + die temp (not persisted)");
 #endif
             UART_LOG("board-prefix [<name>] get/set this board's series-name prefix (NVS, needs reset)");
 #ifndef TARGET_STM32H5
