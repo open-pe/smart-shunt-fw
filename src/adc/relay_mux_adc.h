@@ -176,7 +176,24 @@ public:
 
     float dieTempC() const { return dev.dieTempC(); }
 
-    bool isManual() const { return manual; }
+    /* Reports the REQUESTED mode, not the RT-task-applied one.
+     *
+     * `manual` is only synced from `manualReq` inside hasDataFor(), which runs off
+     * the back of a registered sampler. The bring-up build (RELAY_MUX_ONLY)
+     * registers none, so hasDataFor() is never called and `manual` stays false
+     * forever -- the console reported "auto" immediately after a `relaymux a` had
+     * parked the mux. Harmless there (nothing publishes and reArm() is never
+     * reached), but a status line that contradicts the command just given is worse
+     * than no status line, and the same staleness would appear on any board where
+     * the ADC failed to come up.
+     *
+     * The requested value is the authoritative answer to "what mode am I in": it is
+     * what the operator asked for, and `manual` only lags it by one RT pass in
+     * builds that have one. stallTimeoutUs() reading this is also correct, and
+     * marginally more responsive. reArm() deliberately keeps using RT-owned
+     * `manual`, because it must not act on a mode change the RT task has not yet
+     * applied. */
+    bool isManual() const { return manualReq.load(std::memory_order_acquire); }
     RelayMux2 &muxRef() const { return mux; }
     Target servingChannel() const { return serving; }
 
