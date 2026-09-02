@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include "util.h"
 
 /*
@@ -19,13 +20,20 @@
  *   VALID_B = ARM and REQ_B and NREQ_A
  *
  * One-hot is decoded in 74HCT11/74HCT14 logic, so "both requests high" energises
- * NEITHER coil -- the board cannot be commanded into a make-before-break overlap by
- * a firmware bug. A TPS3840 supervisor and a common-return MOSFET (Q3, gated by ARM)
- * cut coil current independently of either driver. Every J4 logic input carries a
- * 10k series resistor into a 100k pull-down, so all three lines LOW -- which is also
- * what a floating, unprogrammed or reset MCU presents -- means both coils released.
- * There is no state to restore at boot and no way for this firmware to leave a coil
- * energised by crashing.
+ * NEITHER coil: no firmware bug can COMMAND two coils at once. That is a statement
+ * about coil drive and nothing more -- it does not prove the mechanical contacts
+ * cannot overlap, which depends on release and operate times DESIGN.md still lists
+ * as qualification items. A TPS3840 supervisor and a common-return MOSFET (Q3,
+ * gated by ARM) cut coil current independently of either driver. Every J4 logic
+ * input carries a 10k series resistor into a 100k pull-down, so all three lines LOW
+ * -- which is also what a floating, unprogrammed or reset MCU presents -- means both
+ * coils released.
+ *
+ * So there is no state to restore at boot, and a RESET releases both coils. A HANG
+ * does not: a wedged task leaves the output latches driving whatever they last
+ * drove, ARM included. DESIGN.md accepts static ARM for revision A and leaves a
+ * watchdog-qualified ARM as an open system-level option; this firmware does not
+ * provide one.
  *
  * WHAT THE HARDWARE DOES NOT DO, and is therefore this driver's whole job: the
  * documented switching sequence, and the waiting.
@@ -41,12 +49,15 @@
  * loudly -- it publishes a plausible voltage measured through a contact that was
  * still bouncing, or through the wrong input entirely.
  *
- * 3.3 V DRIVE IS IN SPEC. J4 asks for VOH >= 3.10 V. The logic inputs are ~110k to
- * ground and draw ~30 uA, so an ESP32 pin sits at essentially VDD: 3.3 V through the
- * 10k/100k divider puts 3.0 V on the HCT input against a 2.0 V VIH, and 3.0 V on
- * Q3's gate against the PMV20XNEAR's 2.5 V specification. Both are better than the
- * board's own stated worst-case corner. The board still needs its own +5V_CTRL --
- * this drives logic only, never a coil.
+ * 3.3 V DRIVE: ARGUED, NOT GUARANTEED. J4's contract is that it receives at least
+ * VOH 3.10 V. The logic inputs are ~110k to ground and draw ~30 uA, so an ESP32 pin
+ * loaded this lightly sits at essentially VDD; 3.3 V through the 10k/100k divider
+ * puts 3.0 V on the HCT input against a 2.0 V VIH, and 3.0 V on Q3's gate against
+ * the PMV20XNEAR's 2.5 V specification. The arithmetic holds, but "VDD at 30 uA" is
+ * a nominal-plus-light-load argument, not a datasheet VOH bound over supply,
+ * temperature and cable drop -- and DESIGN.md leaves confirmation of all three
+ * outputs open. MEASURE ARM/REQ_A/REQ_B at J4 before trusting a marginal harness.
+ * The board still needs its own +5V_CTRL -- this drives logic only, never a coil.
  */
 class RelayMux2 {
 public:
@@ -105,8 +116,8 @@ private:
     bool begun = false;
 
     /// Written by any task via requestFromOtherTask(), consumed only in tick().
-    volatile Target inboxTarget = Target::NONE;
-    volatile bool inboxPending = false;
+    std::atomic<uint8_t> inboxTarget{(uint8_t) Target::NONE};
+    std::atomic<bool> inboxPending{false};
 
     void driveAll(bool arm, bool reqA, bool reqB) const {
         digitalWrite(pinArm, arm);
@@ -176,16 +187,28 @@ public:
      * operation instead of the backstop it is meant to be, which is precisely what
      * the comment in select() claims this driver does not do.
      *
-     * So off-task callers post here and the RT task applies it in tick(). One
-     * aligned 32-bit store, no lock, and the state machine stays single-threaded
-     * by construction. A second request arriving before the first is consumed
-     * replaces it -- last writer wins, which is the right semantic for "what
-     * channel do you want" and cannot queue up stale switching.
-     */
+     * So off-task callers post here and the RT task applies it in tick(), and the
+     * state machine stays single-threaded by construction. A second request
+     * arriving before the first is consumed replaces it -- last writer wins, which
+     * is the right semantic for "what channel do you want" and cannot queue up
+     * stale switching.
+     *
+     * std::atomic with explicit ordering, NOT volatile. volatile orders volatile
+     * accesses against each other within one thread and nothing else: it is not a
+     * synchronisation primitive and carries no release/acquire edge, so the
+     * consumer has no guarantee of seeing the target store that preceded the flag
+     * store. (An earlier version of this comment also claimed "one aligned 32-bit
+     * store" -- both fields are a single byte, so that was wrong as well as
+     * insufficient.) The release/acquire pair below is what actually publishes the
+     * target, and the exchange makes claim-and-clear one operation. */
     void requestFromOtherTask(Target t) {
-        inboxTarget = t;
-        inboxPending = true;   // set LAST: tick() reads the flag to gate the value
+        inboxTarget.store((uint8_t) t, std::memory_order_relaxed);
+        inboxPending.store(true, std::memory_order_release);   // publishes the store above
     }
+
+    /// Drop an unconsumed request. Used when authority over the mux changes hands,
+    /// where applying a request posted under the old owner would be wrong.
+    void clearInbox() { inboxPending.store(false, std::memory_order_relaxed); }
 
     /// Ask for a channel. Idempotent: re-selecting what is already settled does
     /// NOT re-run the sequence, so a caller may spam this every pass without ever
@@ -222,9 +245,11 @@ public:
     /// Non-blocking. Safe to call at any rate; it only looks at the clock.
     void tick() {
         if (!begun) return;
-        if (inboxPending) {
-            inboxPending = false;      // clear FIRST: a request racing us re-posts
-            select(inboxTarget);
+        /* exchange, not load-then-store: claim-and-clear is one operation, so a
+         * request posted concurrently either loses the race and is seen next tick
+         * or wins and re-arms the flag. Acquire pairs with the release above. */
+        if (inboxPending.exchange(false, std::memory_order_acquire)) {
+            select((Target) inboxTarget.load(std::memory_order_relaxed));
         }
         const uint32_t now = millis();
         switch (state) {

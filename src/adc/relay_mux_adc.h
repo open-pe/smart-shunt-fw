@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cmath>
 #include "ads1262.h"
 #include "sampling.h"
@@ -48,15 +49,26 @@ private:
     /* Completed ADC scans to throw away after the contact settles, ON TOP OF
      * waiting for the scan in progress to finish. The first boundary after settle
      * can close a scan that began while the contact was still moving, so one full
-     * clean scan is the minimum that contains no pre-switch conversion; a second
-     * covers the sinc filter's own memory of the step. Cheap here -- the relay's
+     * clean scan is the minimum that contains no pre-switch conversion; a second is
+     * margin. It is NOT filter settling: this device runs the FIR filter, which
+     * SBAS661C sec.9.4.2 documents as zero latency, giving the result in a single
+     * cycle -- which is why Ads1262ShuntAdc discards ZERO after its own mux change.
+     * The discard here exists for the analog step the ADC cannot see. Cheap -- the relay's
      * 300 ms already dominates -- and the failure it prevents is silent.
      *
      * At one registered pair the device is parked at 19.15 SPS, so this costs about
-     * 3 * 52 ms. It is also mostly insurance rather than the primary defence: the
-     * contact closes ~16-65 ms into SETTLE_MS, so the ADC has already had ~200 ms
-     * of the new input -- several full conversions -- before the discard even
-     * starts counting. The discard covers the corners that estimate does not. */
+     * 3 * 52 ms.
+     *
+     * IT IS NOT THE PRIMARY DEFENCE, AND IT CANNOT BE. The guarantee that a
+     * published conversion is uncontaminated rests entirely on SETTLE_MS being
+     * longer than the real contact-close-plus-settle time, and that time is
+     * unqualified -- DESIGN.md derives only the FASTEST delay-on corner (15.95 ms)
+     * and lists contact release, operate and bounce as qualification items. The
+     * "~16-65 ms to close" figure used to size SETTLE_MS is an ESTIMATE, not a
+     * bound: a slow or leaky delay network, late operation or prolonged bounce
+     * would be declared settled and publish a plausible wrong ratio, and no amount
+     * of scan discarding downstream would catch it. The discards cover the ADC-side
+     * corners only. Qualify SETTLE_MS on a scope before trusting the numbers. */
     static constexpr uint32_t DISCARD_SCANS = 2;
 
     Target serving = Target::CH_A;   ///< whose turn it is
@@ -78,7 +90,7 @@ private:
     /// mux.select() directly, which is a state-machine mutation from the wrong
     /// task. One aligned bool crossing the boundary, and the transition itself
     /// happens where every other mutation happens.
-    volatile bool manualReq = false;
+    std::atomic<bool> manualReq{false};
 
     /// Retained from init() so the reset-recovery path below can bring the shared
     /// ADC back up without asking a channel facade for them.
@@ -141,13 +153,23 @@ public:
     /// and starve the very channel it is trying to recover.
     void reArm() {
         if (!initialised) return;
+        /* NEVER override manual parking. Manual mode publishes nothing on purpose,
+         * so EnergyCounter sees no samples, declares the channel stalled after
+         * stallTimeoutUs() and calls startReading() -- which lands here. Without
+         * this guard, `relaymux off` re-energised a relay a few seconds later and a
+         * parked A/B target silently jumped back to the round-robin's `serving`.
+         * The fixture would move under the scope, mid-measurement, with nothing on
+         * the console to say why -- destroying the exact qualification run the mode
+         * exists to enable. stallTimeoutUs() also returns 0 while parked so the
+         * detector does not fire in the first place; this is the backstop. */
+        if (manual) return;
         mux.select(serving);
         armedForCapture = false;
     }
 
     /// Park the mux under console control and stop publishing, or hand it back.
     /// Callable from any task; the change lands on the next RT pass.
-    void setManual(bool m) { manualReq = m; }
+    void setManual(bool m) { manualReq.store(m, std::memory_order_release); }
 
     float dieTempC() const { return dev.dieTempC(); }
 
@@ -169,10 +191,24 @@ public:
         /* Apply a console-requested mode change here, on the RT task, rather than
          * in setManual(). Resuming has to re-drive select(), and select() may only
          * run on the task that calls tick(). */
-        if (manualReq != manual) {
-            manual = manualReq;
+        const bool wantManual = manualReq.load(std::memory_order_acquire);
+        if (wantManual != manual) {
+            manual = wantManual;
             armedForCapture = false;
-            if (!manual) mux.select(serving);   // resume where the round-robin left off
+            if (!manual) {
+                /* Discard any request still sitting in the mux inbox before
+                 * resuming. `relaymux b` posts the mode and the target as two
+                 * separate writes; a fast `relaymux auto` behind it could be
+                 * applied first, and tick() would then consume the stale manual
+                 * target AFTER the round-robin resumed. `serving` and the settled
+                 * target would disagree, every capture would be rejected, and both
+                 * channels would stall until EnergyCounter's stall path repaired it
+                 * seconds later -- with the console having already said "round-robin
+                 * resumed". Authority over the mux is changing hands here, so a
+                 * request posted under the old owner is void by definition. */
+                mux.clearInbox();
+                mux.select(serving);   // resume where the round-robin left off
+            }
         }
 
         /* Manual mode still ticks the state machine -- the console command needs
@@ -326,6 +362,13 @@ public:
     /// backend's own constants rather than restated, and multiplied by 3 so a
     /// single slow cycle is not a stall.
     int64_t stallTimeoutUs() const override {
+        /* 0 disables stall detection (energy_counter.h: `if (stallTimeout <= 0)
+         * return;`). While the mux is parked under console control this channel
+         * publishes nothing BY DESIGN, so a stall verdict would be false -- and its
+         * recovery would move the relay. Not-publishing-because-parked and
+         * not-publishing-because-dead are genuinely different states, and the
+         * detector cannot tell them apart without being told. */
+        if (backend.isManual()) return 0;
         return (int64_t) RelayMuxAdcBackend::cycleMsEstimate() * 3000;
     }
 
