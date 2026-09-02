@@ -12,6 +12,21 @@ public:
     virtual void tick() = 0;
     virtual bool isConnected() const = 0;
     virtual void publishAux(bool on) = 0;
+
+    /// Sweep hook: ask the central for these steady-state parameters (LL units). A
+    /// transport with no negotiable link ignores it.
+    virtual void requestConnParams(uint16_t itvlMin, uint16_t itvlMax, uint16_t latency) {
+        (void) itvlMin, (void) itvlMax, (void) latency;
+    }
+
+    /// Negotiated link parameters, for status reporting. Not pure: a transport with no
+    /// real link (the STM32 stub, the UART bridge) has nothing to report and says so by
+    /// returning false, rather than every such transport having to stub it out.
+    /// intervalMs/timeoutMs are in milliseconds; latency counts skippable events.
+    virtual bool connSnapshot(float &intervalMs, uint16_t &latency, uint16_t &timeoutMs) const {
+        (void) intervalMs, (void) latency, (void) timeoutMs;
+        return false;
+    }
 };
 
 class StubBleTransport : public BleTransport {

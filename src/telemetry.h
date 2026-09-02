@@ -15,6 +15,25 @@ protected:
     BleTransport &ble;
 
     unsigned long lastTimeOut = 0;
+
+    /* Publication period. Was the literal 400e3. It is a variable so the BLE power
+     * sweep can move it without a reflash per point -- and it is capped, because this
+     * is the one knob here that can silently break the product rather than merely make
+     * it worse. Two independent limits:
+     *
+     *  - Upper: end-to-end sample age is roughly this period plus one connection
+     *    interval, and the bench budget for that is 1 s. Anything past ~700 ms spends
+     *    a budget that belongs to the link, not to us.
+     *  - Lower: each tick emits one record per sampler and flush() ships at most one
+     *    indication per round trip, so a period well under the connection interval
+     *    just fills the queue and sheds samples -- the failure this file's own
+     *    catch-up-drain comment documents.
+     *
+     * NOT persisted, for the same reason as cpufreq: a value that starves the link is
+     * one power-cycle away from gone. */
+    static constexpr unsigned long TELEMETRY_INTERVAL_MIN_US = 200000;
+    static constexpr unsigned long TELEMETRY_INTERVAL_MAX_US = 700000;
+    unsigned long telemetryIntervalUs = 400000;
     unsigned long lastTimePrint = 0;
     int64_t timeLastWakeEvent = 0;
 
@@ -53,9 +72,20 @@ protected:
 
     virtual void onSummary(const WireSample &ws) { (void)ws; }
     virtual void onTelemetryFlush() {}
+    /// Per-print-tick (~2 s) status line. Rides the existing print cadence rather than
+    /// carrying its own timer, so it can never out-talk the sampler lines it annotates.
+    virtual void onPrint() {}
 
 public:
     Telemetry(SamplerRegistry &reg, BleTransport &b) : registry(reg), ble(b) {}
+
+    unsigned long getTelemetryIntervalUs() const { return telemetryIntervalUs; }
+    /// Returns false and changes nothing if out of range -- the caller reports it.
+    bool setTelemetryIntervalUs(unsigned long us) {
+        if (us < TELEMETRY_INTERVAL_MIN_US || us > TELEMETRY_INTERVAL_MAX_US) return false;
+        telemetryIntervalUs = us;
+        return true;
+    }
     virtual ~Telemetry() = default;
     void noteWakeEvent() { timeLastWakeEvent = platform::micros64(); }
 
@@ -91,7 +121,7 @@ public:
          * interleave between its sends. */
         ble.flush();
 
-        if (nowTime - lastTimeOut > 400e3) {
+        if (nowTime - lastTimeOut > telemetryIntervalUs) {
             auto print = nowTime - lastTimePrint > 2000e3;
 
             bool anyPowerVote = false, anyActive = false;
@@ -118,6 +148,7 @@ public:
             onTelemetryFlush();
 
             if (print) {
+                onPrint();
                 if (registry.size() > 1) UART_LOG("");
                 lastTimePrint = nowTime;
             }

@@ -378,6 +378,15 @@ public:
 
 EspTelemetry *telemetry = nullptr;
 
+/* Console bridge -- see the note in console.h for why these are free functions.
+ * Null-safe: the console can be reached before setup() constructs the instance. */
+unsigned long telemetryGetIntervalUs() {
+    return telemetry ? telemetry->getTelemetryIntervalUs() : 0;
+}
+bool telemetrySetIntervalUs(unsigned long us) {
+    return telemetry && telemetry->setTelemetryIntervalUs(us);
+}
+
 #ifdef WITH_LCD
 LCD lcd;
 #endif

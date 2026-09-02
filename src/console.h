@@ -22,6 +22,11 @@ extern bool otaBleActive();
 extern bool disableWifi;
 extern bool wifiTimeSyncOnly;
 extern volatile int g_wifiRequest;
+/* Free functions, not the Telemetry object: telemetry.h includes THIS header to call
+ * handleConsoleInput(), so including it back would be a cycle. Defined in
+ * main_esp32.cpp, where the instance is actually in scope. */
+extern unsigned long telemetryGetIntervalUs();
+extern bool telemetrySetIntervalUs(unsigned long us);
 #endif
 
 inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, BleTransport &ble) {
@@ -175,7 +180,9 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 break;
             }
             relayMuxAdc.setManual(true);
-            relayMux.select(t);
+            /* NOT select(): that mutates the state machine, and this handler runs
+             * on appTask while tick() runs on realTimeTask. */
+            relayMux.requestFromOtherTask(t);
             /* The command RETURNS BEFORE THE CONTACT MOVES. select() only starts
              * the documented sequence; ARM does not even rise until the dead time
              * expires. Saying "selected" here would be a claim about the hardware
@@ -186,6 +193,74 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                      RelayMux2::targetName(t), (unsigned long) RelayMux2::switchLatencyMs());
         }
 #endif
+        else if (inp == "bletx" || inp.startsWith("bletx ")) {
+            String v(inp.substring(5));
+            v.trim();
+            if (v.length() == 0) {
+                UART_LOG("bletx %d dBm", NimBLEDevice::getPower());
+                break;
+            }
+            const long dbm = v.toInt();
+            /* The radio accepts only a discrete ladder and rounds to it, so the
+             * READ-BACK after the set is the truth, not the argument. Out-of-range
+             * setPower() fails and the old value stands, which would otherwise be
+             * indistinguishable from a successful set. */
+            if (dbm < -27 || dbm > 20) {
+                UART_LOG("bletx: -27..20 dBm");
+                break;
+            }
+            const int was = NimBLEDevice::getPower();
+            if (!NimBLEDevice::setPower((int8_t) dbm))
+                UART_LOG("bletx: setPower(%ld) refused, still %d dBm", dbm, was);
+            else
+                UART_LOG("bletx %d -> %d dBm (radio rounds to its own ladder)",
+                         was, NimBLEDevice::getPower());
+        } else if (inp == "blerate" || inp.startsWith("blerate ")) {
+            String v(inp.substring(7));
+            v.trim();
+            if (v.length() == 0) {
+                UART_LOG("blerate %lu ms", telemetryGetIntervalUs() / 1000);
+                break;
+            }
+            const long ms = v.toInt();
+            if (!telemetrySetIntervalUs((unsigned long) ms * 1000))
+                UART_LOG("blerate: %ld ms out of range, still %lu ms (upper bound protects "
+                         "the 1 s end-to-end budget, lower bound the indication round trip)",
+                         ms, telemetryGetIntervalUs() / 1000);
+            else
+                UART_LOG("blerate %lu ms", telemetryGetIntervalUs() / 1000);
+        } else if (inp.startsWith("bleconn ")) {
+            /* bleconn <itvlMin> <itvlMax> <latency>, in the LL's own 1.25 ms / event
+             * units, so what is typed is what goes on the air. */
+            String a(inp.substring(8));
+            a.trim();
+            const int s1 = a.indexOf(' '), s2 = a.indexOf(' ', s1 + 1);
+            if (s1 < 0 || s2 < 0) {
+                UART_LOG("bleconn <itvlMin> <itvlMax> <latency>   (1.25ms units)");
+                break;
+            }
+            const long mn = a.substring(0, s1).toInt(), mx = a.substring(s1 + 1, s2).toInt(),
+                       lat = a.substring(s2 + 1).toInt();
+            if (mn < 6 || mx < mn || mx > 3200 || lat < 0 || lat > 30) {
+                UART_LOG("bleconn: itvl 6..3200 (min<=max), latency 0..30");
+                break;
+            }
+            /* Supervision timeout is fixed at 4000 ms, so the skip window must stay
+             * well inside it or a quiet stretch drops the link:
+             * (1 + latency) * itvlMax * 1.25 ms, doubled for margin. Refusing here
+             * beats discovering it as a reconnect loop on a board across the bench. */
+            const float skipMs = (1 + lat) * mx * 1.25f;
+            if (skipMs * 2 >= 4000.f) {
+                UART_LOG("bleconn: (1+%ld)*%ld*1.25 = %.0f ms skip window needs a supervision "
+                         "timeout > %.0f ms, but it is fixed at 4000 -- refused",
+                         lat, mx, skipMs, skipMs * 2);
+                break;
+            }
+            ble.requestConnParams((uint16_t) mn, (uint16_t) mx, (uint16_t) lat);
+            UART_LOG("bleconn requested %.1f-%.1f ms lat %ld (skip window %.0f ms); the central "
+                     "may refuse -- watch the pwr: line for what landed",
+                     mn * 1.25f, mx * 1.25f, lat, skipMs);
+        }
         else if (inp == "cpufreq" || inp.startsWith("cpufreq ")) {
             /* Read-back always reports the die temperature too, because the whole
              * point of the knob is trading clock for heat and there is otherwise no

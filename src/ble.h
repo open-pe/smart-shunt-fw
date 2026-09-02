@@ -285,11 +285,19 @@ public:
     /// Pending connection-parameter change, applied from the app task. NOT from onConnect: issuing
     /// a device-initiated LL update synchronously inside the connect callback trips a controller
     /// assert (lld_con.c:3275) -- fugu paid for that one.
-    enum class ConnParams : uint8_t { None, Default, Fast };
+    enum class ConnParams : uint8_t { None, Default, Fast, LowPower };
     /// App task (tick()) is the ONLY writer -- see the single-writer rule above. There is
     /// deliberately no "wanted" companion field: nothing outside tick() gets to request a
     /// parameter change, because the steady-state answer is "ask for nothing".
     ConnParams connParamsApplied = ConnParams::None;
+
+    /* Console-driven sweep override for the steady-state parameters. App task is still
+     * the only thing that CALLS updateConnParams(); these are just the numbers it uses,
+     * and requestConnParams() re-arms connParamsApplied so tick() reissues the request
+     * on its next pass -- the console must never issue an LL update itself, for the
+     * same controller-assert reason onConnect must not. */
+    bool lowPowerOverride = false;
+    uint16_t ovItvlMin = 80, ovItvlMax = 160, ovLatency = 3;
 
     /// OTA status stream (device -> host). The status hook appends here from the app task and the
     /// control characteristic's write callback appends from the NimBLE host task, so unlike the
@@ -354,12 +362,58 @@ public:
 
     bool isConnected() const override { return pServer && pServer->getConnectedCount() > 0; }
 
+    /// Sweep hook: set the steady-state connection parameters and make tick() reissue
+    /// the request. Intervals are in 1.25 ms units, latency in events -- the LL's own
+    /// units, so what is typed is what goes on the air.
+    void requestConnParams(uint16_t itvlMin, uint16_t itvlMax, uint16_t latency) override {
+        ovItvlMin = itvlMin;
+        ovItvlMax = itvlMax;
+        ovLatency = latency;
+        lowPowerOverride = true;
+        connParamsApplied = ConnParams::None; // force tick() to re-request
+    }
+
+    /// Negotiated link parameters, for the periodic status line. false when there is no
+    /// link, so the caller prints "no link" rather than a stale set of numbers.
+    /// intervalMs/timeoutMs are already converted out of the LL's 1.25 ms / 10 ms units.
+    bool connSnapshot(float &intervalMs, uint16_t &latency, uint16_t &timeoutMs) const override {
+        if (!pServer || !haveConn) return false;
+        NimBLEConnInfo info = pServer->getPeerInfoByHandle(connHandle);
+        const uint16_t itvl = info.getConnInterval();
+        if (!itvl) return false; // handle went stale between haveConn and the lookup
+        intervalMs = itvl * 1.25f;
+        latency = info.getConnLatency();
+        timeoutMs = info.getConnTimeout() * 10;
+        return true;
+    }
+
     BleSrv() : serverCallbacks{this}, chrCallbacks{this}, otaCtrlCallbacks{this}, auxCallbacks{this} {
     }
 
     void begin() override {
         assert(pServer == nullptr);
         BLEDevice::init("smart-shunt");
+
+        /* TX power. The bench link runs at RSSI -38 dBm against a receiver that needs
+         * about -90, i.e. ~50 dB of margin, so the stack default is paying for range
+         * nobody uses. Backing off 12 dB spends 12 of those 50.
+         *
+         * This is an HONEST BUT SMALL lever, and the reason is worth writing down so
+         * nobody re-derives it: the radio's duty cycle here is tiny. One indication
+         * every ~400 ms, each a fraction of a millisecond of actual transmit, against
+         * a CPU that never sleeps -- so TX energy is far down the list. It is applied
+         * because it is free and cannot hurt, not because it will be visible.
+         *
+         * The board has no antenna fitted, which is exactly why this is a knob and not
+         * a constant: -D BLE_TX_POWER_DBM=<n> puts it back. A drop in RSSI at the
+         * collector is the signal that it went too far. */
+#ifndef BLE_TX_POWER_DBM
+#define BLE_TX_POWER_DBM (-3)
+#endif
+        if (!NimBLEDevice::setPower(BLE_TX_POWER_DBM)) {
+            ESP_LOGW("ble", "setPower(%d dBm) failed, keeping stack default", BLE_TX_POWER_DBM);
+        }
+
         if (!NimBLEDevice::setMTU(MTU)) {
             ESP_LOGW("ble", "BLE server set MTU failed");
         }
@@ -549,6 +603,11 @@ public:
         // consumes sessionChanged.
         subscribed = false;
         sessionChanged = true;
+        /* Connection parameters do not survive the connection. Without this reset the
+         * low-power request is made once in the process's life and every reconnection
+         * afterwards silently runs on whatever the central chose -- which looks
+         * identical in the log to a request that was made and honoured. */
+        connParamsApplied = ConnParams::None;
         // Undelivered OTA status belongs to the session that just ended. Carrying it over would
         // hand the next client the previous one's READY/FAIL lines -- the same trap the telemetry
         // buffer avoids via sessionChanged, and it would desynchronise a host's line parser.
@@ -575,10 +634,26 @@ public:
             //
             // The only time we ask for anything is during an OTA, where the transfer genuinely
             // needs the throughput -- and then we hand the link back when it is done.
-            ConnParams want = otaBleActive() ? ConnParams::Fast
-                                             : (connParamsApplied == ConnParams::Fast
-                                                    ? ConnParams::Default
-                                                    : connParamsApplied);
+            /* Steady state now ASKS, where it used to accept whatever the central chose.
+             * What it asks for is slave latency: permission to skip connection events it
+             * has nothing to say in. The interval is left where the bench central already
+             * puts it (100-200 ms, ble-conn-params.service) -- that mitigation exists
+             * because BLE and WiFi share one radio on the rpi, and fighting it is what
+             * killed OTA transfers with an LL timeout twice.
+             *
+             * Latency is free for OUR traffic and costs only THEIRS. A peripheral with
+             * data queued transmits at the next connection event no matter what latency
+             * is set, so telemetry is not delayed by a single event; what is delayed is
+             * central-to-device delivery -- an aux command, an OTA start -- by at most
+             * latency * interval_max = 3 * 200 ms = 600 ms, inside the 1 s budget.
+             *
+             * Supervision timeout has to outlast the skipping or the link drops on a
+             * quiet stretch: (1 + latency) * interval_max * 2 = 1.6 s against the 4 s
+             * asked for here.
+             *
+             * OTA still takes the link back to latency 0 via Fast, because a transfer is
+             * exactly the case where every central-to-device packet is on the hot path. */
+            ConnParams want = otaBleActive() ? ConnParams::Fast : ConnParams::LowPower;
             if (want != connParamsApplied) {
                 // 15-30ms during OTA, NOT the 7.5-15ms fugu uses. The bench rpi deliberately widens
                 // its connection interval to 100-200ms (ble-conn-params.service) because BLE and
@@ -588,6 +663,17 @@ public:
                 // negotiated (509-byte chunks) this is far more headroom than the transfer needs.
                 if (want == ConnParams::Fast)
                     pServer->updateConnParams(connHandle, 12, 24, 0, 400);
+                else if (want == ConnParams::LowPower && lowPowerOverride)
+                    /* Sweep override, set from the console. Same code path as the
+                     * default so an experiment cannot accidentally measure a
+                     * different mechanism than the one that will ship. */
+                    pServer->updateConnParams(connHandle, ovItvlMin, ovItvlMax, ovLatency, 400);
+                else if (want == ConnParams::LowPower)
+                    /* Same 100-200 ms window the central already asks for, plus 3 events
+                     * of slave latency. A central is free to refuse or to shorten this;
+                     * the periodic status line prints what was actually negotiated, so a
+                     * refusal shows up as latency 0 rather than as a silent no-op. */
+                    pServer->updateConnParams(connHandle, 80, 160, 3, 400);
                 else
                     // Post-OTA: relax to the coex-friendly end, matching what the bench central
                     // asks for anyway. NOT the old 24/48/180, which is what caused the drops.

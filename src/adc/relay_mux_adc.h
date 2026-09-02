@@ -65,6 +65,13 @@ private:
      * hand has no defensible channel identity. */
     bool manual = false;
 
+    /// Written by the console on appTask, applied by the RT task in hasDataFor().
+    /// Same reasoning as RelayMux2's command inbox: setManual(false) used to call
+    /// mux.select() directly, which is a state-machine mutation from the wrong
+    /// task. One aligned bool crossing the boundary, and the transition itself
+    /// happens where every other mutation happens.
+    volatile bool manualReq = false;
+
     /// Retained from init() so the reset-recovery path below can bring the shared
     /// ADC back up without asking a channel facade for them.
     int8_t pSck = -1, pMosi = -1, pMiso = -1, pCs = -1, pStart = -1;
@@ -113,12 +120,8 @@ public:
     }
 
     /// Park the mux under console control and stop publishing, or hand it back.
-    void setManual(bool m) {
-        if (!initialised) return;
-        manual = m;
-        armedForCapture = false;
-        if (!m) mux.select(serving);   // resume the round-robin where it left off
-    }
+    /// Callable from any task; the change lands on the next RT pass.
+    void setManual(bool m) { manualReq = m; }
 
     bool isManual() const { return manual; }
     RelayMux2 &muxRef() const { return mux; }
@@ -134,6 +137,15 @@ public:
     bool hasDataFor(Target ch) {
         if (!initialised) return false;
         if (ch != serving) return false;
+
+        /* Apply a console-requested mode change here, on the RT task, rather than
+         * in setManual(). Resuming has to re-drive select(), and select() may only
+         * run on the task that calls tick(). */
+        if (manualReq != manual) {
+            manual = manualReq;
+            armedForCapture = false;
+            if (!manual) mux.select(serving);   // resume where the round-robin left off
+        }
 
         /* Manual mode still ticks the state machine -- the console command needs
          * the sequence to actually run -- but publishes nothing. */

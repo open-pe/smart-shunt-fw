@@ -104,6 +104,10 @@ private:
     uint32_t generation_ = 0;        ///< bumped once per entry into SETTLED
     bool begun = false;
 
+    /// Written by any task via requestFromOtherTask(), consumed only in tick().
+    volatile Target inboxTarget = Target::NONE;
+    volatile bool inboxPending = false;
+
     void driveAll(bool arm, bool reqA, bool reqB) const {
         digitalWrite(pinArm, arm);
         digitalWrite(pinReqA, reqA);
@@ -151,9 +155,44 @@ public:
         return true;
     }
 
+    /* CROSS-TASK COMMAND INBOX.
+     *
+     * select() mutates the state machine and MUST run only on the task that calls
+     * tick() -- realTimeTask here. The console runs on appTask
+     * (handleConsoleInput() is called from Telemetry::update()), so a console
+     * command calling select() directly races tick().
+     *
+     * The race is not theoretical and not benign. select() writes `state` and
+     * `tStateMs` as two separate stores; with `state` written first, tick() on the
+     * other core can observe state == DEAD_TIME carrying the PREVIOUS tStateMs,
+     * find the dead time already long expired, and assert ARM immediately. That
+     * skips the entire contact-release wait -- the one thing this driver exists to
+     * guarantee -- and re-energises the other coil while the first contact may
+     * still be closed, briefly bridging two floating 0-80 V inputs.
+     *
+     * The board survives it: the 1 M/100 nF delay-on network cannot engage a coil
+     * for at least ~16 ms (DESIGN.md's fastest corner), which is exactly why that
+     * network exists. But that makes the hardware interlock load bearing in normal
+     * operation instead of the backstop it is meant to be, which is precisely what
+     * the comment in select() claims this driver does not do.
+     *
+     * So off-task callers post here and the RT task applies it in tick(). One
+     * aligned 32-bit store, no lock, and the state machine stays single-threaded
+     * by construction. A second request arriving before the first is consumed
+     * replaces it -- last writer wins, which is the right semantic for "what
+     * channel do you want" and cannot queue up stale switching.
+     */
+    void requestFromOtherTask(Target t) {
+        inboxTarget = t;
+        inboxPending = true;   // set LAST: tick() reads the flag to gate the value
+    }
+
     /// Ask for a channel. Idempotent: re-selecting what is already settled does
     /// NOT re-run the sequence, so a caller may spam this every pass without ever
     /// letting the contact stay closed long enough to measure through.
+    ///
+    /// NOT SAFE from a task other than the one calling tick() -- use
+    /// requestFromOtherTask() for that.
     void select(Target t) {
         if (!begun) return;
         if (t == pending && (state != State::OFF || t == Target::NONE)) return;
@@ -167,8 +206,12 @@ public:
          * bearing in normal operation instead of being the backstop it is. */
         driveAll(LOW, LOW, LOW);
         current = Target::NONE;
-        state = State::DEAD_TIME;
+        /* Timestamp BEFORE the state it belongs to, always. Even now that the
+         * cross-task path is gone this is the correct order: a state observed with
+         * a stale timestamp expires instantly, and every failure of that kind
+         * shortens a wait that exists for physical reasons. */
         tStateMs = millis();
+        state = State::DEAD_TIME;
     }
 
     /// Release both coils and stop. The board reaches the same state on its own if
@@ -179,6 +222,10 @@ public:
     /// Non-blocking. Safe to call at any rate; it only looks at the clock.
     void tick() {
         if (!begun) return;
+        if (inboxPending) {
+            inboxPending = false;      // clear FIRST: a request racing us re-posts
+            select(inboxTarget);
+        }
         const uint32_t now = millis();
         switch (state) {
             case State::OFF:
@@ -188,22 +235,22 @@ public:
             case State::DEAD_TIME:
                 if ((uint32_t) (now - tStateMs) < DEAD_TIME_MS) break;
                 if (pending == Target::NONE) {
-                    state = State::OFF;
                     tStateMs = now;
+                    state = State::OFF;
                     break;
                 }
                 // Steps 4 and 5: preload exactly one request, then arm.
                 driveAll(LOW, pending == Target::CH_A, pending == Target::CH_B);
                 driveAll(HIGH, pending == Target::CH_A, pending == Target::CH_B);
                 current = pending;
-                state = State::SETTLING;
                 tStateMs = now;
+                state = State::SETTLING;
                 break;
 
             case State::SETTLING:
                 if ((uint32_t) (now - tStateMs) < SETTLE_MS) break;
-                state = State::SETTLED;
                 tStateMs = now;
+                state = State::SETTLED;
                 ++generation_;
                 break;
         }
