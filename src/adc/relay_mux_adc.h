@@ -42,6 +42,8 @@ private:
     RelayMux2 &mux;
     Ads1262ShuntAdc &dev;
     const Ads1262ShuntAdc::Pair pair;
+    const uint8_t pgaGainCode;
+    const bool pgaBypass;
 
     /* Completed ADC scans to throw away after the contact settles, ON TOP OF
      * waiting for the scan in progress to finish. The first boundary after settle
@@ -91,8 +93,22 @@ private:
     static Target other(Target t) { return t == Target::CH_A ? Target::CH_B : Target::CH_A; }
 
 public:
-    RelayMuxAdcBackend(RelayMux2 &mux, Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair pair)
-        : mux(mux), dev(dev), pair(pair) {}
+    /* FRONT-END GAIN. The device default is G=32 (PGA_GAIN_CODE = 5), whose full
+     * scale is +-2.5 V / 32 = +-78 mV, because every other consumer of this ADC is
+     * a millivolt-scale shunt. A relay mux fed through the divider board is NOT:
+     * an 80 V input through the 51:1 divider arrives as ~1.57 V. At G=32 that
+     * over-ranges on every conversion, and the driver's own over-range path would
+     * dutifully publish NAN with DIAG_PGA_RANGE forever -- a channel that looks
+     * wired-up and never produces a number.
+     *
+     * So the default here is G=1 with the PGA BYPASSED, the same configuration the
+     * DCCT burden channel uses and for the same reason: at G=1 the PGA's own output
+     * swing leaves each input pin roughly -2.2..+2.2 V on these +-2.5 V rails,
+     * which a ground-referenced divider output can exceed. Bypassed, full scale is
+     * the reference itself, +-2.5 V. */
+    RelayMuxAdcBackend(RelayMux2 &mux, Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair pair,
+                       uint8_t pgaGainCode = 0, bool pgaBypass = true)
+        : mux(mux), dev(dev), pair(pair), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass) {}
 
     Ads1262ShuntAdc::Pair adcPair() const { return pair; }
 
@@ -106,6 +122,10 @@ public:
         if (!mux.begin()) return false;
         if (!dev.init(pinSck, pinMosi, pinMiso, pinCs, pinStart)) return false;
         pSck = pinSck; pMosi = pinMosi; pMiso = pinMiso; pCs = pinCs; pStart = pinStart;
+        /* Gain BEFORE registerPair(): registerPair() re-selects the pair, which is
+         * what programs MODE2, so a setPairGain() after it would not take effect
+         * until the next selection. Same ordering PowerSampler_ShuntAdc uses. */
+        dev.setPairGain(pair, pgaGainCode, pgaBypass);
         dev.registerPair(pair);
         serving = Target::CH_A;
         mux.select(serving);
@@ -188,6 +208,10 @@ public:
             lastReinitMs = now;
             ESP_LOGW("relaymux", "re-initialising ADS1262 after device reset");
             if (!dev.init(pSck, pMosi, pMiso, pCs, pStart)) return false;
+            /* init() reprograms the front end to the device default G=32. Without
+             * re-applying the gain the channel would come back from a reset
+             * permanently over-ranged -- recovered in name only. */
+            dev.setPairGain(pair, pgaGainCode, pgaBypass);
             dev.registerPair(pair);
             /* The relay is untouched by an ADC reset, but the capture baseline
              * was taken against a generation counter that has just restarted.
