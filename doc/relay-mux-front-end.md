@@ -229,11 +229,13 @@ absorption does, thermal EMF does not.
 
 Regressing bias on step size at the earliest reachable instant:
 
-    t=157 ms   slope -25.68 +- 1.38 uV/V (18.6 sigma)
-               intercept -0.07 +- 0.22 uV (0.3 sigma)
+    t=157 ms   slope -25.73 +- 0.86 uV/V (29.9 sigma)
+               intercept -0.06 +- 0.09 uV (0.7 sigma)
 
 DA predicted a significant slope and a zero intercept. Thermal EMF predicted a
-zero slope and a **-13.07 uV** intercept, which this **excludes at 59 sigma**.
+zero slope and a **-13.07 uV** intercept, which this excludes at **33.7 sigma** via the
+intercept -- and at **145 sigma** via the zero-step plateau below, which does not
+depend on the -13.07 anchor or its +-0.32 at all.
 The 2 V plateau decides it on its own: thermal EMF predicted -13.07 uV there, DA
 predicted -1.03, and the measurement is **-1.26 +- 0.41 uV**. This is why the LOW
 plateaus are the sharp test and not the high ones -- the noise floor is ADC noise
@@ -281,6 +283,26 @@ herring.** A and B do bias toward each other, but B's input is open: it has no
 step to absorb, so nothing about B's magnitude constrains a step-proportional
 mechanism on A.
 
+### What this does and does not establish
+
+It establishes a **slow relaxation, linear in the input step, tau ~ 102 +- 7 ms**,
+and it excludes both a fixed series offset (thermal EMF) and any V^2-driven
+mechanism such as resistor self-heating.
+
+It does **not** on its own localise that relaxation to the shunt-adc board's
+`CD1`-`CD4`. Dielectric effects in the common-mode caps, the relay package or the
+wiring, and slow memory in the ADC front end, all remain consistent with a linear
+step-proportional relaxation. `CD1`-`CD4` is the prime suspect because it is the
+largest dielectric in the loop by two orders of magnitude and sits directly
+across the measured pair -- and the cap swap is itself the experiment that
+closes the question.
+
+(An earlier revision of this section quoted tau = 75 ms, an effective DA of
+0.097%, and a 59 sigma exclusion. The 75 ms was carried over from the earlier
+bench-bus run rather than fitted to this one; the DA loop resistance omitted the
+filter's own series pair; and the 59 sigma omitted the uncertainty on the value
+being excluded. Corrected after an independent review.)
+
 ### What to do about it
 
 **Done 2026-09-03:** `CD1`-`CD4` on the shunt-adc board moved to
@@ -297,8 +319,9 @@ dielectric absorption". That is true of the ADC side, and it is why this defect
 was not anticipated -- **DA's error develops across the SOURCE**, which this
 fixture changed from the Kelvin-sensed ~0 Ohm burden shunt the filter was designed
 for to the divider's 19.6 kOhm. Correct that comment wherever the part is
-respecified. The implied DA branch is ~772 MOhm with C_da ~ 97 pF at tau = 75 ms,
-an effective DA of 0.097% -- entirely ordinary for X7R, and harmless in the
+respecified. The implied DA branch follows from tau = 102 +- 7 ms across the 21.6 kOhm loop
+(19.6 kOhm source plus the filter's own 2 kOhm series pair),
+an effective DA of ~0.123% -- entirely ordinary for X7R, and harmless in the
 application the filter was drawn for.
 
 The fix is passive: C0G or film in place of the 100 nF X7R, a smaller value, or a
