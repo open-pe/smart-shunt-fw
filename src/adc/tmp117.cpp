@@ -32,8 +32,14 @@ bool PowerSampler_TMP117::init() {
     }
 
     if (i2c_read_buf(i2cPort, address, REG_DEVICE_ID, buf, 2) != ESP_OK) {
-        ESP_LOGE(TAG, "bus %hhu 0x%02hhX: no response reading DEVICE_ID", i2cPort, address);
-        return false;
+        delay(50);
+        if (i2c_read_buf(i2cPort, address, REG_DEVICE_ID, buf, 2) != ESP_OK) {
+            ESP_LOGE(TAG, "bus %hhu 0x%02hhX: no response reading DEVICE_ID (2 attempts)",
+                     i2cPort, address);
+            return false;
+        }
+        ESP_LOGW(TAG, "bus %hhu 0x%02hhX: DEVICE_ID read succeeded on retry",
+                 i2cPort, address);
     }
     const uint16_t id = ((uint16_t) buf[0] << 8 | buf[1]) & 0x0FFF;
     if (id != DEVICE_ID) {

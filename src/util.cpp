@@ -250,7 +250,7 @@ void scan_i2c() {
     byte error, address;
     int nDevices;
 
-    ESP_LOGI(TAG, "Scanning I2C... (SDA=%hhu, SCL=%hhu)", settings.Pin_I2C_SDA,
+    ESP_LOGI(TAG, "Scanning I2C bus 0... (SDA=%hhu, SCL=%hhu)", settings.Pin_I2C_SDA,
              settings.Pin_I2C_SCL);
 
     nDevices = 0;
@@ -259,16 +259,36 @@ void scan_i2c() {
         error = Wire.endTransmission();
 
         if (error == 0) {
-            ESP_LOGI(TAG, "Device found at address 0x%02hhX", address);
+            ESP_LOGI(TAG, "Bus 0: device at 0x%02hhX", address);
             nDevices++;
         } else if (error != 2) {
-            ESP_LOGW(TAG, "Unknown error %hhu at address 0x%02hhX", error, address);
+            ESP_LOGW(TAG, "Bus 0: error %hhu at 0x%02hhX", error, address);
         }
     }
     if (nDevices == 0)
-        ESP_LOGI(TAG, "No I2C devices found");
+        ESP_LOGI(TAG, "Bus 0: no devices found");
     else
-        ESP_LOGI(TAG, "I2C scan done, %d devices found", nDevices);
+        ESP_LOGI(TAG, "Bus 0: %d devices found", nDevices);
+
+#if defined(SHUNT_ADC_ONLY) && !defined(XIAO_NEST)
+    ESP_LOGI(TAG, "Scanning I2C bus 1 (Wire1)...");
+    int nDevices1 = 0;
+    for (address = 1; address < 127; address++) {
+        Wire1.beginTransmission(address);
+        error = Wire1.endTransmission();
+
+        if (error == 0) {
+            ESP_LOGI(TAG, "Bus 1: device at 0x%02hhX", address);
+            nDevices1++;
+        } else if (error != 2) {
+            ESP_LOGW(TAG, "Bus 1: error %hhu at 0x%02hhX", error, address);
+        }
+    }
+    if (nDevices1 == 0)
+        ESP_LOGI(TAG, "Bus 1: no devices found");
+    else
+        ESP_LOGI(TAG, "Bus 1: %d devices found", nDevices1);
+#endif
 
     delay(5000);
 }
