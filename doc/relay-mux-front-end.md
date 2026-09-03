@@ -139,6 +139,107 @@ no diagnostics set. The `DIAG_RELAY_UNMATCHED` path itself has not yet been obse
 on hardware — it only fires at the moment of a change, and the next source step will
 exercise it.
 
+## The settle campaign: 250 ms buys two time constants of something unidentified
+
+Measured 2026-09-03 on the nest with A on the 26.225 V bench bus (raw 0.5147 V,
+implied divider ratio 50.95) and B open. `env:xiao_nest_sweep` steps settleMs and
+publishes the value in force as `P`.
+
+**The method had to be fixed once before it measured anything.** The first sweep
+walked the settle list repeatedly, on the stated grounds that repetition averaged
+thermal drift out. It does not: the walk is always in the same order, so a monotonic
+drift maps onto the settle axis identically on every pass, and repeating it averages
+the noise while preserving the correlation exactly. Split in half, that run carried
+~8 uV more apparent bias in its second half at EVERY settle value including ones
+certainly long enough -- a clock, not a relay. The reported "sharp break at 50 ms"
+was drift.
+
+The fix is to alternate ref, test, ref and compare each test block against the mean
+of the two references either side, which cancels drift to first order, with the
+reference value left in the test list as a NULL CONTROL. That control is what makes
+the rest of the table readable: it comes out at **+0.17 +- 0.62 uV**, i.e. zero.
+
+| sample instant | A bias | B bias |
+|---|---|---|
+| 366 ms (null control) | **+0.17 +- 0.62 uV** | -1.30 +- 0.50 |
+| 313 ms | -1.48 +- 0.61 | +1.65 +- 0.39 |
+| 261 ms | -3.60 +- 0.25 | +4.25 +- 3.56 |
+| 209 ms | -6.35 +- 0.44 | +5.42 +- 0.52 |
+| 157 ms | **-13.07 +- 0.32** | +5.82 +- 0.32 |
+
+A is an exponential in the time from ARM with **tau ~ 75 ms**. B is opposite in sign,
+2.25x smaller, and flattens rather than continuing to grow.
+
+**The settle axis is quantised, and nine values are five experiments.** The sample
+instant is `ceil(S / 52.22) * 52.22 + 104.44`, so S=150 and S=120 return *identical*
+biases -- they are the same experiment run twice. The measured dwells confirm it:
+50/35/20 ms all give 365.5 ms, 90/70 give 418, 150/120 give 470.
+
+## 157 ms is a hardware floor, and DISCARD_SCANS = 2 is exactly right
+
+It is tempting to read the quantisation as an invitation to cut the discards. It is
+not, and doing so would return a *better* number for the worst reason.
+
+The ARM path is an RC delay-on (1 MOhm x 100 nF into an HCT14) whose slow corner puts
+contact close at **65 ms**. The first conversion boundary strictly after that is
+2 x 52.22 = 104.4 ms, and that conversion runs to **156.7 ms**. So the earliest
+entirely-post-close conversion ends at 157 ms, which is exactly where DISCARD_SCANS=2
+puts it. At DISCARD_SCANS=1 the used conversion would span 52->104 ms, straddling
+contact close: contaminated, and biased in the direction that looks like success.
+
+Predicted minimum dwell 50 + 157 + 3 x 52.2 = 364 ms against 365.5 measured.
+
+Going below 157 ms needs the ARM RC shortened or a faster data rate. It is not a
+firmware lever.
+
+## Duty cycle
+
+`dwell = 125 + settle + 50 x AVG`, integration is `50 x AVG`, so at the floor settle
+`duty = 52.2A / (154.8 + 52.2A)`:
+
+| AVG | dwell | duty | alternation |
+|---|---|---|---|
+| 4 (today, settle 250) | 575 ms | **34.8%** | 1.15 s |
+| 4 (floor settle) | 364 ms | 57% | 0.73 s |
+| 8 (floor settle) | 572 ms | **73%** | 1.14 s |
+| 16 (floor settle) | 990 ms | 84% | 1.98 s |
+
+Averaging MORE raises duty, because averaging is the ADC doing useful work; only dead
+time, settle and discards are waste. Cutting AVG_CONVERSIONS to 1 now that the PGA has
+removed the transient it was a palliative for would take duty to 12%.
+
+**But the floor settle is the -13 uV condition.** Duty and the uV tail trade directly,
+and having both requires removing the tail at its source.
+
+## What the tail is: unresolved, two candidates
+
+- **Dielectric absorption in the 100 nF X7R** differential cap. `sch_design.py:727`
+  chose X7R over C0G and justified it partly as "with the PGA enabled the input is
+  1 GOhm so there is no charge-transfer path for dielectric absorption". True for the
+  ADC side; DA's error here develops across the SOURCE, which went from Kelvin-sensed
+  ~0 Ohm to the divider's 19.6 kOhm. 13.07 uV across 19.6 kOhm from a 0.515 V step
+  needs a DA branch of ~772 MOhm, and at tau = 75 ms that is C_da ~ 97 pF -- an
+  effective DA of **0.097%**, entirely ordinary for X7R. (An earlier revision of this
+  note called DA "not physical" on the strength of a division error. It fits.)
+- **Thermal EMF in the Coto 3502**, whose series is literally sold as "Low Thermal EMF
+  Reed Relays" with grades <10 / <5 / <3 / <1 / <0.5 uV, and whose coil is 350 Ohm at
+  5 V -- 71 mW into the package the instant the contact closes. Decisively, the rating
+  is specified "measured after 5 minutes at nominal coil voltage": the first hundreds
+  of ms are explicitly OUTSIDE the spec, and that is the window measured here.
+
+The evidence splits. A and B bias *toward each other*, which is a memory of the
+previous channel. But their magnitudes are asymmetric (13.07 vs 5.82 uV) and B
+flattens while A grows, which two different relays warming differently explains and a
+shared step-proportional mechanism does not.
+
+**The discriminator is a voltage plateau sweep**: DA and contamination scale with the
+step, thermal EMF is a fixed series offset. 15..80 V gives a 5.3x span against a
+~0.6 uV method floor. The filter's own RC is excluded either way -- 21.6 kOhm x 100 nF
+= 2.16 ms, i.e. e^-73 by 157 ms.
+
+Which suffix is fitted on the 3502s is not recorded anywhere in the hardware sources;
+the grades span 20x.
+
 ## VMUX_B's oscillation is not a fault
 
 B (open input) shows ~50 µV peak-to-peak of slow sine. That is mains reaching the
