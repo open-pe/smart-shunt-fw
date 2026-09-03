@@ -128,16 +128,37 @@ private:
      * which on this rig is a 29 mV step, so the residual appears as a BIAS in the
      * mean and is visible far below the noise floor.
      *
-     * The list is walked repeatedly rather than once, so that thermal drift over
-     * the run averages across every step instead of aliasing onto one of them. */
+     * EVERY TEST BLOCK IS BRACKETED BY A REFERENCE BLOCK, and that is not a
+     * refinement -- the first version of this sweep was WRONG without it. It
+     * walked the list repeatedly and claimed that repetition averaged drift out.
+     * It does not: the walk is always in the same order, so a monotonic drift maps
+     * onto the settle axis the SAME WAY on every pass, and repeating it averages
+     * the noise while preserving the correlation exactly. The 2026-09-03 run
+     * showed it plainly -- split in half, the second half carried ~8 uV more
+     * apparent bias at EVERY settle value including ones that are certainly long
+     * enough, which is a clock, not a relay.
+     *
+     * So the order is ref, test, ref, test, ... and a test block is compared with
+     * the mean of the two reference blocks either side of it. That cancels drift
+     * to first order, which is all a ~30 s bracket needs.
+     *
+     * The reference value appears in the test list too, as a NULL CONTROL: ref
+     * against ref must come out at zero bias, and if it does not, nothing else in
+     * the run means anything. */
+    static constexpr uint32_t SWEEP_REF_MS = 250;
     static constexpr uint32_t SWEEP_MS[] = {250, 200, 150, 120, 90, 70, 50, 35, 20};
     static constexpr uint8_t SWEEP_N = sizeof(SWEEP_MS) / sizeof(SWEEP_MS[0]);
-    /* PUBLICATIONS per step, counted across BOTH channels -- so half this many per
-     * channel. 96 gives 48 per channel, enough that a bias of ~1/5 of the ~1 uV sd
-     * is resolvable, and ~45 s per step. */
-    static constexpr uint32_t SWEEP_PUBS_PER_STEP = 96;
+    /* PUBLICATIONS per block, across BOTH channels -- half this many per channel.
+     * Short blocks keep the bracket span short, which is what makes the linear-drift
+     * assumption safe; the statistics are recovered by repeating the cycle, which
+     * DOES work once drift is bracketed out. */
+    static constexpr uint32_t SWEEP_PUBS_PER_STEP = 48;
+    /* Reference blocks publish P + this, so the analysis can tell a reference block
+     * at 250 ms from the test block at 250 ms. */
+    static constexpr uint32_t SWEEP_REF_TAG = 10000;
     uint8_t sweepIdx = 0;
     uint32_t sweepPubs = 0;
+    bool sweepOnRef = true;
 #endif
     static_assert(AVG_CONVERSIONS >= 2 && (AVG_CONVERSIONS % 2) == 0,
                   "AVG_CONVERSIONS must be even and >= 2");
@@ -460,6 +481,14 @@ public:
     /// The settle time currently in force. Reported so a characterisation run can
     /// label each sample with the setting that produced it.
     uint32_t settleMsNow() const { return mux.settleMs(); }
+
+#ifdef RELAYMUX_SETTLE_SWEEP
+    /// settleMs, offset by SWEEP_REF_TAG on reference blocks so the analysis can
+    /// separate the reference at 250 ms from the null-control test at 250 ms.
+    uint32_t sweepTaggedSettleMs() const {
+        return mux.settleMs() + (sweepOnRef ? SWEEP_REF_TAG : 0);
+    }
+#endif
 
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
                      uint32_t &noStep, uint32_t &unsettled, uint32_t &widened,
@@ -833,10 +862,16 @@ public:
          * next dwell rather than half of it. */
         if (++sweepPubs >= SWEEP_PUBS_PER_STEP) {
             sweepPubs = 0;
-            sweepIdx = (uint8_t) ((sweepIdx + 1) % SWEEP_N);
-            const uint32_t applied = mux.setSettleMs(SWEEP_MS[sweepIdx]);
-            ESP_LOGW("relaymux", "settle sweep -> %lums (requested %lums)",
-                     (unsigned long) applied, (unsigned long) SWEEP_MS[sweepIdx]);
+            if (sweepOnRef) {
+                sweepOnRef = false;
+                sweepIdx = (uint8_t) ((sweepIdx + 1) % SWEEP_N);
+                mux.setSettleMs(SWEEP_MS[sweepIdx]);
+            } else {
+                sweepOnRef = true;
+                mux.setSettleMs(SWEEP_REF_MS);
+            }
+            ESP_LOGW("relaymux", "settle sweep -> %lums (%s)",
+                     (unsigned long) mux.settleMs(), sweepOnRef ? "ref" : "test");
         }
 #endif
         serving = other(ch);
@@ -945,7 +980,7 @@ public:
         /* P carries the settle time in ms for this sample. Overriding the pin is
          * safe only because this build exists to be grouped by it; the production
          * build keeps P at 0 so nothing downstream reports a plausible wattage. */
-        lastSample.p_ = (float) backend.settleMsNow();
+        lastSample.p_ = (float) backend.sweepTaggedSettleMs();
 #else
         lastSample.p_ = 0.0f;   // pinned: no power measurement exists on this path
 #endif
