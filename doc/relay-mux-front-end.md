@@ -245,8 +245,36 @@ drift control (first and last plateau, both at 20 V) agrees to 0.6 sigma. And th
 fitted slope reproduces the earlier 26 V bench-bus anchor of -13.07 uV / 0.5147 V
 = -25.4 uV/V, from a completely different source.
 
-At 366 ms the slope falls to 0.5 sigma -- the tail is simply gone by then, which
+At 366 ms the slope falls to ~1 sigma -- the tail is simply gone by then, which
 is the same statement the original null control made, arrived at independently.
+
+**The decisive point came for free.** After the sweep switched the supply off the
+board kept alternating, giving a plateau at step ~ 0:
+
+| plateau | step | t=157 ms | t=209 ms | t=261 ms |
+|---|---|---|---|---|
+| 0 V | 0.0001 V | **-0.06 +- 0.09** | +0.18 +- 0.13 | +0.20 +- 0.16 |
+
+The relay is switching exactly as before -- same contacts, same ~71 mW coil, same
+cadence -- so thermal EMF is fully present there and still predicts -13.07 uV.
+Measured -0.06 +- 0.09 uV: excluded at **145 sigma at the point**, not by
+extrapolating a fitted intercept to a step nothing was measured at.
+
+**And the exponent identifies the mechanism, where the slope only discriminated
+it.** Several mechanisms scale with the step; they differ in the power.
+chi2/dof at t=157 ms over seven plateaus:
+
+| model | mechanism | chi2/dof |
+|---|---|---|
+| **y = a*step** | **dielectric absorption** | **1.10** |
+| y = b*step^2 | resistor self-heating (V^2/R) | 42.2 |
+| y = const | thermal EMF, or any fixed offset | 181.2 |
+
+The exponent is 1, which rules out self-heating in the divider's 1 MOhm
+resistors -- the most plausible remaining step-correlated alternative. Together
+with tau ~ 75 ms, which no lumped RC here can produce (the filter's own is
+2.16 ms; 75 ms across 19.6 kOhm would need 3.8 uF), what survives is dielectric
+relaxation.
 
 **So the asymmetry that pointed at two relays warming differently was a red
 herring.** A and B do bias toward each other, but B's input is open: it has no
@@ -254,6 +282,14 @@ step to absorb, so nothing about B's magnitude constrains a step-proportional
 mechanism on A.
 
 ### What to do about it
+
+**Done 2026-09-03:** `CD1`-`CD4` on the shunt-adc board moved to
+`GRM3195C1H104JA05D`, 100 nF C0G 50 V 1206 (`pwr-metering` `hw/shunt-adc`
+finding F23). Board regenerated and re-verified -- ERC 0/0, DRC 0/0,
+`audit_pcb.py` all PASS with every guard calibrated, 0 unrouted, input-pair
+mismatch still 0.0 um. **Unconfirmed on hardware:** C0G's own DA is a literature
+expectation, not a datasheet number, so re-run the plateau sweep on the rebuilt
+board before believing the tail is gone rather than merely smaller.
 
 `hw/shunt-adc/sch_design.py:727` chose X7R over C0G and justified it partly as
 "with the PGA enabled the input is 1 GOhm so there is no charge-transfer path for
