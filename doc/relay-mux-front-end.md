@@ -94,33 +94,50 @@ has a lever. Hence the last table row: temp read on, artefact absent.
 The 165 nA is **inferred from the offset, not read from SBAS661C**. It has not been
 checked against the bypass-mode input-current spec.
 
-## Defect 3 — the step guard could silence a healthy channel permanently
+## Defect 3 — the step guard silenced a healthy channel on every input change
 
-Raising the source 1.0 → 1.2 V made VMUX_A publish NaN forever. The new reading
-matched neither `lastAccepted[A]` (the stale 22.79 mV) nor B, so the "both contacts
-open?" branch fired — and `take()` refreshes `lastAccepted[]` only from *finite*
-samples, so the stale baseline froze and every later sample failed identically.
+Raising the source 1.0 → 1.2 V made VMUX_A publish NaN forever. Raising it again,
+1.2 → 1.5 V, did it a second time. Both times the channel was working perfectly.
 
-A guard that cannot return to PASS on healthy input is broken whatever else it
-catches.
+The mechanism: the new reading matched neither `lastAccepted[A]` (the stale old
+value) nor B, so the "matches neither channel" branch fired — and `take()` refreshes
+`lastAccepted[]` only from *finite* samples, so the first NaN froze the baseline the
+test compares against and every later sample failed identically.
 
-**The obvious fix is also wrong, and review caught it.** Requiring three agreeing
-readings before adopting the new value rests on "a real source repeats, an open
-contact floats". It does not: with the mux open the ADC still sees the divider's
-own termination through the 20 kΩ low leg, so an **open contact reads a perfectly
-stable value**. Three agreeing readings would adopt it, `take()` would store it,
-and every later open reading would then match and publish forever — trading
-permanent silence for a permanent plausible wrong number, which is the worse
-failure and the one the guard exists to prevent.
+**Two fixes were tried and both were wrong.**
 
-One channel's readings cannot separate "the input moved" from "the contact opened";
-the information is not there. So the shipped behaviour is the safe one: publish
-NaN, count it, say so loudly, and let a **reboot** clear it — which on this board
-costs nothing, since it reflashes and reboots over BLE. Auto-adoption survives only
-behind `rebaselineOnUnmatched`, default false.
+*Withholding on the mismatch* assumes the input is static between visits. That is
+false by construction for an instrument whose job is to track a changing voltage —
+which is why it fired on both deliberate source changes and on nothing else.
 
-A second latch also survives and is *not* fixed: if A changes to within `moveEpsV`
-of B, `expectMove && !moved` fires and NaN persists indefinitely.
+*Adopting after N agreeing readings* rests on "a real source repeats, an open
+contact floats". Also false: with the mux open the tap is tied to the Kelvin return
+through the 20 kΩ low leg, so an open contact reads a **perfectly stable** value.
+The agreeing readings adopt it and publish it forever — permanent silence traded for
+a permanent plausible wrong number, the worse failure.
+
+**The shipped behaviour publishes the value and flags the doubt.** One channel's
+readings cannot separate "the input moved" from "the contact opened"; the
+information is not there, and neither NaN nor adoption can manufacture it. So the
+number goes out — it exists, and it is far more often a changed input than a failed
+relay — carrying `DIAG_RELAY_UNMATCHED` in the diagnostic field, where a consumer
+can see it, query it, and decide. The console reports a running count.
+
+That does not leave the open-contact fault unguarded. An open contact reads the
+network termination, and whenever the other channel is not sitting on that same
+termination, `expectMove && !moved` fires on it and still publishes NaN. On this rig
+that is measured, not assumed: B's input is open and reads −14 µV, exactly where an
+open A would land. What is genuinely lost is the case where both the fault *and* the
+other channel sit near the termination — and that case was never separable here.
+
+`moveEpsV` came down 1 mV → **100 µV** at the same time. With the PGA enabled the
+noise floor is ~1 µV sd, so 1 mV was ~1000 σ: it disarmed the guard across a band far
+wider than any real ambiguity. 100 µV is still ~100 σ.
+
+Verified after the fix, source at 1.5 V: **29190.1 µV, spread 4.4 µV, sd 1.14 µV**,
+no diagnostics set. The `DIAG_RELAY_UNMATCHED` path itself has not yet been observed
+on hardware — it only fires at the moment of a change, and the next source step will
+exercise it.
 
 ## VMUX_B's oscillation is not a fault
 
@@ -145,12 +162,16 @@ corrupting timing as well as amplitude.
   Enabling the PGA removed the symptom on this path by removing the *mechanism*
   (bias current into a 19.6 kΩ source); the restart itself is untouched.
 - **The BLE `download` trigger** is on the board but has never been fired.
-- **`moveEpsV = 1 mV` is wrong for this instrument** and is knowingly left alone.
-  At ~20 mV raw that is 5% — 50,000 ppm. Worse, when the two inputs differ by less
-  than 1 mV the switch-integrity guard **disables itself**, which is exactly the
-  ratio case it is most needed for. With the PGA enabled the noise floor is ~0.9 µV
-  sd, so it can come down two or three orders — but the value is a bench fact about
-  the contacts, not a guess.
+- **`DIAG_RELAY_UNMATCHED` has never been seen set.** The code path is reached only
+  on a source change; the fix was verified by the channel *recovering*, not by the
+  flag appearing.
+- **`moveEpsV = 100 µV` is a reasoned choice, not a measured one.** It is ~100× the
+  noise floor, which bounds false "moved" verdicts, but the value that matters is
+  how far apart the two channels must be before a stuck contact is worth catching,
+  and that is a bench fact about the contacts.
+- **The implied divider ratio moved with the source**: 51.21 at 1.2 V, 51.39 at
+  1.5 V (0.35%). That is within a bench supply's dial accuracy and is not evidence
+  of divider nonlinearity — but it has not been checked against a DMM.
 - **The BLE OTA/control surface is unauthenticated.** Any nearby client can write
   `download` and force the board into the ROM downloader; secure boot is disabled,
   so an attacker could already push a chosen image. Recoverable (power cycle), but

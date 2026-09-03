@@ -224,6 +224,10 @@ private:
      * the two cannot be confused downstream. */
     static constexpr uint32_t DIAG_RELAY_NO_STEP   = 0x40u << 24;
     static constexpr uint32_t DIAG_RELAY_UNSETTLED = 0x41u << 24;
+    /* Published WITH a value, not instead of one: the reading matches neither
+     * channel's last value. See the guard below for why that is a doubt and not
+     * a verdict. */
+    static constexpr uint32_t DIAG_RELAY_UNMATCHED = 0x42u << 24;
 
     float lastAccepted[3] = {NAN, NAN, NAN};   ///< indexed by Target
     uint32_t armGenSeen = 0;
@@ -254,39 +258,10 @@ private:
      * count means the loop is being starved and the averaging is costing dwell
      * time it should not. */
     uint32_t nPairBroken = 0;
-    /* Re-baselining state for the "matches neither channel" guard, per channel.
-     * That guard compares against lastAccepted[], which take() updates only on
-     * FINITE values -- so once it fires it freezes its own baseline and can never
-     * pass again. Changing the source from 1.0 V to 1.2 V on the bench
-     * (2026-09-03) silenced VMUX_A permanently: every sample NaN, forever, on a
-     * channel that was working perfectly. A guard that cannot return to PASS on
-     * healthy input is broken regardless of what it catches. */
-    static constexpr uint32_t UNMATCHED_REBASELINE = 3;
-    /* AUTO-ADOPT IS OFF BY DEFAULT, because the premise it was written on is false.
-     *
-     * The idea was "a real source settles and repeats, an open contact floats and
-     * does not". Review killed it: with the mux open the ADC still sees the
-     * divider's own termination -- the tap is tied to the Kelvin return through the
-     * 20 kOhm low leg -- so an open contact reads a PERFECTLY STABLE value. Three
-     * agreeing readings therefore adopt it, take() writes it to lastAccepted[], and
-     * every later open reading then matches "mine" and is published forever.
-     *
-     * That trades permanent silence for a permanent plausible wrong number, which
-     * is the worse of the two failures and the one this whole guard exists to
-     * prevent. (See ~/dev/kb/adc/floating-mux-input-mirrors-previous-channel.md: a
-     * floating mux input can mirror the previous channel rather than produce noise.)
-     *
-     * One channel's readings cannot distinguish "the input moved" from "the contact
-     * opened" -- the information is not there. So the shipped behaviour is the safe
-     * one: publish NaN, count it, say so loudly, and let a REBOOT clear it (nothing
-     * here is persisted). On the nest that costs nothing: it reflashes and reboots
-     * over BLE without anyone at the bench.
-     *
-     * Set true only on a rig where a wrong number is cheaper than a dark channel. */
-    bool rebaselineOnUnmatched = false;
+    /* State for the "matches neither channel" test, which is a DOUBT and not a
+     * verdict -- see the guard below. Counted and reported; never a reason to
+     * withhold a reading. */
     uint32_t nUnmatched[3] = {0, 0, 0};
-    float unmatchedV[3] = {NAN, NAN, NAN};
-    uint32_t nRebaselined = 0;
     uint32_t lastDiagOverride = 0;
 
     void resetObservation(Target ch) {
@@ -386,7 +361,7 @@ public:
      * B's 3.3 mV does not collapse toward zero, this reasoning is wrong. */
     RelayMuxAdcBackend(RelayMux2 &mux, Ads1262ShuntAdc &dev, Ads1262ShuntAdc::Pair pair,
                        uint8_t pgaGainCode = 0, bool pgaBypass = false,
-                       float stableEpsV = 0.0f, float moveEpsV = 1e-3f)
+                       float stableEpsV = 0.0f, float moveEpsV = 1e-4f)
         : mux(mux), dev(dev), pair(pair), pgaGainCode(pgaGainCode), pgaBypass(pgaBypass),
           stableEpsV(stableEpsV), moveEpsV(moveEpsV) {}
 
@@ -453,10 +428,12 @@ public:
 
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
                      uint32_t &noStep, uint32_t &unsettled, uint32_t &widened,
-                     uint32_t &pairBroken, float &spanV, float &stableEps) const {
+                     uint32_t &pairBroken, uint32_t &unmatched,
+                     float &spanV, float &stableEps) const {
         lastMs = settleObservedMs; maxMs = settleObservedMaxMs; closeMs = closeObservedMs;
         noStep = nNoStep; unsettled = nUnsettled; widened = nWidened;
         pairBroken = nPairBroken;
+        unmatched = nUnmatched[1] + nUnmatched[2];
         /* The span is the number the operator needs in order to choose stableEpsV,
          * so it is reported unconditionally -- including on the fault paths, where
          * the old code recorded nothing and the console showed zeros forever while
@@ -504,8 +481,6 @@ public:
         if (wantManual != manual) {
             manual = wantManual;
             armedForCapture = false;
-            nUnmatched[1] = nUnmatched[2] = 0;
-            unmatchedV[1] = unmatchedV[2] = NAN;
             if (!manual) {
                 /* Discard any request still sitting in the mux inbox before
                  * resuming. `relaymux b` posts the mode and the target as two
@@ -563,8 +538,6 @@ public:
              * was taken against a generation counter that has just restarted.
              * Drop it and re-arm against the new one. */
             armedForCapture = false;
-            nUnmatched[1] = nUnmatched[2] = 0;
-            unmatchedV[1] = unmatchedV[2] = NAN;
         }
 
         /* NO mux.tick() here. realTimeTask ticks the state machine once per pass,
@@ -593,11 +566,6 @@ public:
         if (!mux.isSettled() || mux.settledTarget() != ch) {
             armedForCapture = false;
             accN = 0; accSum = 0.0f;
-            /* Drop any part-built re-baseline candidate too. "Three CONSECUTIVE
-             * readings" must mean consecutive PUBLICATIONS of this channel, not
-             * three readings with a manual-mode excursion, an ADC reinit or a
-             * settle failure in between. */
-            nUnmatched[(uint8_t) ch] = 0; unmatchedV[(uint8_t) ch] = NAN;
             return false;
         }
 
@@ -696,69 +664,58 @@ public:
         const bool expectMove = std::isfinite(mine) && std::isfinite(stepFrom) &&
                                 fabsf(mine - stepFrom) > moveEpsV;
 
-        /* MOVED IS NECESSARY, NOT SUFFICIENT -- and the previous version treated it
-         * as sufficient, which made this guard miss the exact faults its own
-         * comment named. An unpowered coil (supervisor holding COIL_EN low) and a
-         * broken control wire are OPEN faults: BOTH reeds release, the ADC sees the
-         * divider network's own termination, and that reading is nowhere near
-         * stepFrom -- so `moved` went true, the guard passed, and whatever the open
-         * network reads got published under this channel's name.
+        /* MOVED IS NECESSARY, NOT SUFFICIENT. An unpowered coil (the supervisor
+         * holding COIL_EN low) and a broken control wire are OPEN faults: BOTH
+         * reeds release and the ADC reads the divider network's own termination.
+         * If the other channel happens to sit somewhere else, `moved` goes true,
+         * the guard passes, and the open network's reading is published under
+         * this channel's name.
          *
-         * So also require the reading to resemble THIS channel. A value far from
-         * both channels' last accepted values is neither input: open contacts, or a
-         * front end that has lost its configuration. Skipped when `mine` is unknown
-         * (first visit) -- there is nothing to compare against yet. */
+         * The only extra evidence available is whether the reading resembles what
+         * THIS channel read last time. It is recorded, and it is NOT acted on,
+         * because acting on it was a bug in both directions:
+         *
+         *  - Withholding on it assumes THE INPUT IS STATIC BETWEEN VISITS, which
+         *    is false by construction for an instrument whose job is to track a
+         *    changing voltage. Two deliberate source changes on the bench --
+         *    1.0 -> 1.2 V and 1.2 -> 1.5 V (2026-09-03) -- each silenced VMUX_A
+         *    PERMANENTLY: take() refreshes lastAccepted[] only from finite
+         *    samples, so the first NaN froze the baseline the test compares
+         *    against and every later sample failed identically. A guard that
+         *    cannot return to PASS on healthy input is broken whatever it catches.
+         *
+         *  - Adopting on it (N agreeing readings, then re-baseline) rests on "a
+         *    real source repeats, an open contact floats". Also false: with the
+         *    mux open the tap is tied to the Kelvin return through the 20 kOhm low
+         *    leg, so an open contact reads a PERFECTLY STABLE value. The agreeing
+         *    readings adopt it and it is published forever -- permanent silence
+         *    traded for a permanent plausible wrong number, the worse failure.
+         *    (~/dev/kb/adc/floating-mux-input-mirrors-previous-channel.md)
+         *
+         * One channel's readings cannot separate "the input moved" from "the
+         * contact opened"; the information is not there, and neither NaN nor
+         * adoption can manufacture it. So publish the number -- it exists, and it
+         * is far more often a changed input than a failed relay -- and carry the
+         * doubt in the DIAGNOSTIC, where a consumer can see it, query it and
+         * decide, instead of destroying the measurement on a coin flip.
+         *
+         * The fault this was meant to catch is not thereby unguarded: an open
+         * contact reads the network termination, and whenever the other channel is
+         * not sitting on that same termination `expectMove && !moved` below fires
+         * on it. On this rig that is measured -- B's input is open and reads
+         * -14 uV, exactly where an open A would land. What is genuinely lost is
+         * the case where BOTH the fault and the other channel sit near the
+         * termination, and that case was never separable here anyway. */
         if (std::isfinite(mine) && std::isfinite(v) && std::isfinite(stepFrom)) {
             const float dMine = fabsf(v - mine), dOther = fabsf(v - stepFrom);
             if (dMine > moveEpsV && dOther > moveEpsV) {
-                /* AN UNMATCHED READING IS AMBIGUOUS, so do not treat it as proof.
-                 * "This channel's input changed" and "this channel's contact is
-                 * open" look identical in ONE sample. They separate over several:
-                 * a real source settles to a new value and REPEATS it, while an
-                 * open contact floats and does not.
-                 *
-                 * So require UNMATCHED_REBASELINE consecutive readings that agree
-                 * with each other before adopting the new value, and publish NaN
-                 * with the fault diagnostic meanwhile. That keeps the fault loud
-                 * -- nNoStep still counts every one, and the channel visibly drops
-                 * out for a few seconds -- without letting it become permanent.
-                 * The old code could not recover at all, because take() refreshes
-                 * lastAccepted[] only from finite samples. */
-                ++nNoStep;
-                const uint8_t i = (uint8_t) ch;
-                if (nUnmatched[i] == 0 || !std::isfinite(unmatchedV[i]) ||
-                    fabsf(v - unmatchedV[i]) > moveEpsV) {
-                    unmatchedV[i] = v;
-                    nUnmatched[i] = 1;
-                } else {
-                    ++nUnmatched[i];
-                }
-
-                if (rebaselineOnUnmatched && nUnmatched[i] >= UNMATCHED_REBASELINE) {
-                    ++nRebaselined;
-                    ESP_LOGW("relaymux", "%s: %lu consecutive readings agree at %.6g V "
-                                         "(was %.6g V, other %.6g V) -- the INPUT changed, not a "
-                                         "contact; adopting it as the new baseline",
-                             RelayMux2::targetName(ch), (unsigned long) nUnmatched[i],
-                             (double) v, (double) mine, (double) stepFrom);
-                    nUnmatched[i] = 0;
-                    unmatchedV[i] = NAN;
-                    /* Fall through and publish: v is a real, repeated measurement,
-                     * and take() will make it the new lastAccepted[]. */
-                } else {
-                    ESP_LOGE("relaymux", "%s: reads %.6g V, matching neither channel "
-                                         "(%.6g / %.6g) -- an OPEN CONTACT and a CHANGED INPUT "
-                                         "look identical here; publishing NaN. If you changed the "
-                                         "source, reboot to re-baseline (%lu consecutive)",
-                             RelayMux2::targetName(ch), (double) v, (double) mine,
-                             (double) stepFrom, (unsigned long) nUnmatched[i]);
-                    lastVolts = NAN;
-                    lastDiagOverride = DIAG_RELAY_NO_STEP;
-                    return true;
-                }
-            } else {
-                nUnmatched[(uint8_t) ch] = 0;
-                unmatchedV[(uint8_t) ch] = NAN;
+                ++nUnmatched[(uint8_t) ch];
+                ESP_LOGW("relaymux", "%s: reads %.6g V, matching neither channel "
+                                     "(%.6g / %.6g) -- most likely the INPUT changed; "
+                                     "publishing it with DIAG_RELAY_UNMATCHED (%lu so far)",
+                         RelayMux2::targetName(ch), (double) v, (double) mine,
+                         (double) stepFrom, (unsigned long) nUnmatched[(uint8_t) ch]);
+                lastDiagOverride = DIAG_RELAY_UNMATCHED;
             }
         }
 

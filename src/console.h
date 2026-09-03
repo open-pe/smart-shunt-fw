@@ -168,10 +168,10 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                          (unsigned long) RelayMux2::DEAD_TIME_MS,
                          (unsigned long) relayMux.settleMs(),
                          (unsigned long) RelayMux2::SETTLE_FLOOR_MS);
-                uint32_t lastMs, maxMs, closeMs, noStep, unsettled, widened, pairBroken;
+                uint32_t lastMs, maxMs, closeMs, noStep, unsettled, widened, pairBroken, unmatched;
                 float spanV, stableEps;
                 relayMuxAdc.settleStats(lastMs, maxMs, closeMs, noStep, unsettled, widened,
-                                        pairBroken, spanV, stableEps);
+                                        pairBroken, unmatched, spanV, stableEps);
                 UART_LOG("  span %.6g V, stability gate %s (stableEpsV %.6g) -- set it from "
                          "the span, not by guessing",
                          (double) spanV, stableEps > 0 ? "ON" : "OFF (fixed timer only)",
@@ -184,6 +184,12 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 UART_LOG("  faults: no-step %lu, never-settled %lu, auto-widened %lu",
                          (unsigned long) noStep, (unsigned long) unsettled,
                          (unsigned long) widened);
+                /* NOT a fault: the reading matched neither channel's last value,
+                 * which is what a changed input looks like. Published anyway, with
+                 * DIAG_RELAY_UNMATCHED. It rises once per deliberate source change
+                 * and stays put; a count that climbs steadily is worth a look. */
+                UART_LOG("  unmatched (published, diag-flagged): %lu",
+                         (unsigned long) unmatched);
                 /* Each published sample is the mean of AVG_CONVERSIONS CONSECUTIVE
                  * conversions; restarts count runs where generation() jumped by more
                  * than one, i.e. the RT task was too slow to keep the run adjacent.
