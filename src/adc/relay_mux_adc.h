@@ -108,6 +108,37 @@ private:
      * MUST STILL BE EVEN, and the members must be genuinely adjacent -- see the
      * adjacency caveat on accLastGen, which this code CANNOT fully enforce. */
     static constexpr uint32_t AVG_CONVERSIONS = 4;
+
+#ifdef RELAYMUX_SETTLE_SWEEP
+    /* SETTLE CHARACTERISATION BUILD. Not for production -- it deliberately drives
+     * the settle time below anything trustworthy in order to find where the
+     * measurement breaks.
+     *
+     * SETTLE_MS_DEFAULT = 250 ms is a MARGIN, never a measurement: the driver only
+     * ever widens it, and narrowing is left to a human with observed numbers in
+     * front of them. Nobody has ever had those numbers on this rig, because the
+     * console that reports them is unreachable (USB-CDC is dead on the nest) and
+     * the stability observer cannot resolve below ~150 ms anyway -- it needs
+     * STABLE_N=3 agreeing conversions at 50 ms each.
+     *
+     * So measure it from the OUTSIDE instead, where the resolution is not limited
+     * by the conversion rate. Step settleMs through the list below, publish the
+     * value in use as `P`, and let InfluxDB group by it. A settle that is too short
+     * does not merely add noise: the reading is pulled toward the OTHER channel,
+     * which on this rig is a 29 mV step, so the residual appears as a BIAS in the
+     * mean and is visible far below the noise floor.
+     *
+     * The list is walked repeatedly rather than once, so that thermal drift over
+     * the run averages across every step instead of aliasing onto one of them. */
+    static constexpr uint32_t SWEEP_MS[] = {250, 200, 150, 120, 90, 70, 50, 35, 20};
+    static constexpr uint8_t SWEEP_N = sizeof(SWEEP_MS) / sizeof(SWEEP_MS[0]);
+    /* PUBLICATIONS per step, counted across BOTH channels -- so half this many per
+     * channel. 96 gives 48 per channel, enough that a bias of ~1/5 of the ~1 uV sd
+     * is resolvable, and ~45 s per step. */
+    static constexpr uint32_t SWEEP_PUBS_PER_STEP = 96;
+    uint8_t sweepIdx = 0;
+    uint32_t sweepPubs = 0;
+#endif
     static_assert(AVG_CONVERSIONS >= 2 && (AVG_CONVERSIONS % 2) == 0,
                   "AVG_CONVERSIONS must be even and >= 2");
 
@@ -426,6 +457,10 @@ public:
     /// the operator can tell a quiet reading from a heavily averaged one.
     static constexpr uint32_t avgConversions() { return AVG_CONVERSIONS; }
 
+    /// The settle time currently in force. Reported so a characterisation run can
+    /// label each sample with the setting that produced it.
+    uint32_t settleMsNow() const { return mux.settleMs(); }
+
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
                      uint32_t &noStep, uint32_t &unsettled, uint32_t &widened,
                      uint32_t &pairBroken, uint32_t &unmatched,
@@ -741,7 +776,15 @@ public:
          * corrected immediately. Narrowing is never automatic: it is a decision to
          * trust an estimate over a margin, and it belongs to a human with the
          * console's reported numbers in front of them (`relaymux settle <ms>`). */
+#ifdef RELAYMUX_SETTLE_SWEEP
+        /* AUTO-WIDEN OFF. It fires precisely when settleMs is short -- which is the
+         * whole point of the sweep -- and would ratchet every step back up toward
+         * the value being tested against, so the run would measure the widener
+         * rather than the relay. */
+        if (false) {
+#else
         if (tStableMs > mux.settleMs()) {
+#endif
             const uint32_t was = mux.settleMs();
             /* CAPPED. Widening is evaluated only after settleMs_ elapses, and
              * `stable` re-opens on any span excursion, so tStableMs tracks the
@@ -785,6 +828,17 @@ public:
         lastVolts = NAN;
         armedForCapture = false;
         accN = 0; accSum = 0.0f;
+#ifdef RELAYMUX_SETTLE_SWEEP
+        /* Applied HERE, before select(), so the new value governs the whole of the
+         * next dwell rather than half of it. */
+        if (++sweepPubs >= SWEEP_PUBS_PER_STEP) {
+            sweepPubs = 0;
+            sweepIdx = (uint8_t) ((sweepIdx + 1) % SWEEP_N);
+            const uint32_t applied = mux.setSettleMs(SWEEP_MS[sweepIdx]);
+            ESP_LOGW("relaymux", "settle sweep -> %lums (requested %lums)",
+                     (unsigned long) applied, (unsigned long) SWEEP_MS[sweepIdx]);
+        }
+#endif
         serving = other(ch);
         mux.select(serving);
         return v;
@@ -887,7 +941,14 @@ public:
          * 0 V would be a measurement this channel never made. */
         lastSample.u = std::isnan(v) ? NAN : ((dividerRatio > 0) ? v * dividerRatio : v);
         lastSample.i = NAN;
+#ifdef RELAYMUX_SETTLE_SWEEP
+        /* P carries the settle time in ms for this sample. Overriding the pin is
+         * safe only because this build exists to be grouped by it; the production
+         * build keeps P at 0 so nothing downstream reports a plausible wattage. */
+        lastSample.p_ = (float) backend.settleMsNow();
+#else
         lastSample.p_ = 0.0f;   // pinned: no power measurement exists on this path
+#endif
         if (reportDieTemp) lastSample.temp = backend.dieTempC();
         lastSample.diag = diag;
         return lastSample;
