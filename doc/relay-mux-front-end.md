@@ -211,34 +211,71 @@ removed the transient it was a palliative for would take duty to 12%.
 **But the floor settle is the -13 uV condition.** Duty and the uV tail trade directly,
 and having both requires removing the tail at its source.
 
-## What the tail is: unresolved, two candidates
+## What the tail is: RESOLVED -- dielectric absorption in the 100 nF X7R
 
-- **Dielectric absorption in the 100 nF X7R** differential cap. `sch_design.py:727`
-  chose X7R over C0G and justified it partly as "with the PGA enabled the input is
-  1 GOhm so there is no charge-transfer path for dielectric absorption". True for the
-  ADC side; DA's error here develops across the SOURCE, which went from Kelvin-sensed
-  ~0 Ohm to the divider's 19.6 kOhm. 13.07 uV across 19.6 kOhm from a 0.515 V step
-  needs a DA branch of ~772 MOhm, and at tau = 75 ms that is C_da ~ 97 pF -- an
-  effective DA of **0.097%**, entirely ordinary for X7R. (An earlier revision of this
-  note called DA "not physical" on the strength of a division error. It fits.)
-- **Thermal EMF in the Coto 3502**, whose series is literally sold as "Low Thermal EMF
-  Reed Relays" with grades <10 / <5 / <3 / <1 / <0.5 uV, and whose coil is 350 Ohm at
-  5 V -- 71 mW into the package the instant the contact closes. Decisively, the rating
-  is specified "measured after 5 minutes at nominal coil voltage": the first hundreds
-  of ms are explicitly OUTSIDE the spec, and that is the window measured here.
+Measured 2026-09-03 by a six-plateau sweep at 20/12/8/4/2/20 V on the E3633A
+(`pwr-metering` `plans/relay-mux-settle-tail.md`, raw data archived alongside it).
+The discriminator was whether the bias scales with the input step: dielectric
+absorption does, thermal EMF does not.
 
-The evidence splits. A and B bias *toward each other*, which is a memory of the
-previous channel. But their magnitudes are asymmetric (13.07 vs 5.82 uV) and B
-flattens while A grows, which two different relays warming differently explains and a
-shared step-proportional mechanism does not.
+| plateau | step at ADC | t=157 ms | t=209 ms | t=261 ms | null control |
+|---|---|---|---|---|---|
+| 20 V #1 | 0.3989 V | -9.64 +- 0.73 | -5.70 +- 0.46 | -3.17 +- 0.42 | +0.20 +- 0.62 |
+| 12 V | 0.2393 V | -6.60 +- 0.24 | -3.36 +- 0.31 | -1.58 +- 0.45 | +0.18 +- 0.19 |
+| 8 V | 0.1596 V | -3.91 +- 0.17 | -2.30 +- 1.15 | -1.11 +- 0.35 | +0.00 +- 0.13 |
+| 4 V | 0.0799 V | -2.17 +- 0.16 | -0.84 +- 0.30 | -0.86 +- 0.22 | -0.13 +- 0.36 |
+| 2 V | 0.0401 V | -1.26 +- 0.41 | -0.25 +- 0.26 | -0.32 +- 0.23 | +0.42 +- 0.40 |
+| 20 V #6 | 0.3992 V | -11.22 +- 2.58 | -- | -4.45 +- 0.38 | +2.63 +- 0.83 |
 
-**The discriminator is a voltage plateau sweep**: DA and contamination scale with the
-step, thermal EMF is a fixed series offset. 15..80 V gives a 5.3x span against a
-~0.6 uV method floor. The filter's own RC is excluded either way -- 21.6 kOhm x 100 nF
-= 2.16 ms, i.e. e^-73 by 157 ms.
+Regressing bias on step size at the earliest reachable instant:
 
-Which suffix is fitted on the 3502s is not recorded anywhere in the hardware sources;
-the grades span 20x.
+    t=157 ms   slope -25.68 +- 1.38 uV/V (18.6 sigma)
+               intercept -0.07 +- 0.22 uV (0.3 sigma)
+
+DA predicted a significant slope and a zero intercept. Thermal EMF predicted a
+zero slope and a **-13.07 uV** intercept, which this **excludes at 59 sigma**.
+The 2 V plateau decides it on its own: thermal EMF predicted -13.07 uV there, DA
+predicted -1.03, and the measurement is **-1.26 +- 0.41 uV**. This is why the LOW
+plateaus are the sharp test and not the high ones -- the noise floor is ADC noise
+and stays at ~0.6 uV, while the gap between the predictions grows as the input
+falls.
+
+Three independent checks agree. The null control is zero on every plateau. The
+drift control (first and last plateau, both at 20 V) agrees to 0.6 sigma. And the
+fitted slope reproduces the earlier 26 V bench-bus anchor of -13.07 uV / 0.5147 V
+= -25.4 uV/V, from a completely different source.
+
+At 366 ms the slope falls to 0.5 sigma -- the tail is simply gone by then, which
+is the same statement the original null control made, arrived at independently.
+
+**So the asymmetry that pointed at two relays warming differently was a red
+herring.** A and B do bias toward each other, but B's input is open: it has no
+step to absorb, so nothing about B's magnitude constrains a step-proportional
+mechanism on A.
+
+### What to do about it
+
+`hw/shunt-adc/sch_design.py:727` chose X7R over C0G and justified it partly as
+"with the PGA enabled the input is 1 GOhm so there is no charge-transfer path for
+dielectric absorption". That is true of the ADC side, and it is why this defect
+was not anticipated -- **DA's error develops across the SOURCE**, which this
+fixture changed from the Kelvin-sensed ~0 Ohm burden shunt the filter was designed
+for to the divider's 19.6 kOhm. Correct that comment wherever the part is
+respecified. The implied DA branch is ~772 MOhm with C_da ~ 97 pF at tau = 75 ms,
+an effective DA of 0.097% -- entirely ordinary for X7R, and harmless in the
+application the filter was drawn for.
+
+The fix is passive: C0G or film in place of the 100 nF X7R, a smaller value, or a
+lower source impedance. Then settle can fall toward the 157 ms hardware floor and
+ADC duty rises from 35% to ~73%. Re-run the plateau sweep afterwards to confirm
+the tail is gone rather than merely smaller.
+
+**No relay change is needed.** That branch was also the expensive one: the fitted
+part is `3502-05-511`, already Coto's best thermal-EMF grade (<0.5 uV
+differential), with stock 0 and 0 on order.
+
+The filter's own RC was never a candidate: 21.6 kOhm x 100 nF = 2.16 ms, i.e.
+e^-73 by 157 ms.
 
 ## VMUX_B's oscillation is not a fault
 
