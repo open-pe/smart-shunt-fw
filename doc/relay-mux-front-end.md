@@ -305,13 +305,31 @@ being excluded. Corrected after an independent review.)
 
 ### What to do about it
 
-**Done 2026-09-03:** `CD1`-`CD4` on the shunt-adc board moved to
+**Done and CONFIRMED 2026-09-03.** `CD1`-`CD4` on the shunt-adc board moved to
 `GRM3195C1H104JA05D`, 100 nF C0G 50 V 1206 (`pwr-metering` `hw/shunt-adc`
-finding F23). Board regenerated and re-verified -- ERC 0/0, DRC 0/0,
+finding F23), the board regenerated and re-verified (ERC 0/0, DRC 0/0,
 `audit_pcb.py` all PASS with every guard calibrated, 0 unrouted, input-pair
-mismatch still 0.0 um. **Unconfirmed on hardware:** C0G's own DA is a literature
-expectation, not a datasheet number, so re-run the plateau sweep on the rebuilt
-board before believing the tail is gone rather than merely smaller.
+mismatch still 0.0 um), then the identical sweep re-run:
+
+| | slope at t=157 ms |
+|---|---|
+| X7R 0603 | -25.73 +- 0.86 uV/V (29.9 sigma) |
+| **C0G 1206** | **-0.24 +- 2.04 uV/V (0.1 sigma -- consistent with zero)** |
+| difference | 25.49 +- 2.21 = **11.5 sigma** |
+
+Per plateau at t=157 ms: 20 V -9.64 -> **-0.81 +- 0.91**, 12 V -6.60 ->
+**-1.13 +- 0.52**, 8 V -3.91 -> **+0.08 +- 0.15**, 2 V -1.26 -> **-0.24 +- 0.14**.
+At the 20 V plateau the bias goes from 3.9x the 2.5 uV target to inside it.
+
+**This also closes the localisation gap above.** Only `CD1`-`CD4` changed --
+same relays, divider, wiring, ADC and firmware -- and the tail vanished, so the
+mechanism was in those capacitors and not in the CM caps, the relay package, the
+wiring or the ADC front end.
+
+**So the 250 ms settle is no longer buying anything**, and settle can fall
+toward the 157 ms hardware floor: ADC duty 35 % -> ~73 % at AVG 8. Residual to
+watch: t=209 ms reads -4.06 +- 1.09 uV/V (3.7 sigma) on n=4, which cannot be a
+real tail while t=157 ms reads 0.1 sigma, but should be re-checked.
 
 `hw/shunt-adc/sch_design.py:727` chose X7R over C0G and justified it partly as
 "with the PGA enabled the input is 1 GOhm so there is no charge-transfer path for
@@ -344,6 +362,25 @@ hit by the FIR's 50/60 Hz notch — beating at the grid's own drift against the
 notch. The ADC node itself is ~20 kΩ either way; what differs is that A's divider
 top is driven by a low-impedance source that shorts the pickup out, while B's
 floats. Expect it to collapse when B is connected to anything real.
+
+**Its visibility is set by the settle time, which is why it arrives in bursts
+during a settle sweep.** Median block sd on B against A, over the 2026-09-03
+runs:
+
+| settle | B (open) | A (driven) |
+|---|---|---|
+| 250 ms | 2.6 uV | 1.1 uV |
+| 120 ms | 16.3 uV | 1.2 uV |
+| 35 ms | 17.2 uV | 1.0 uV |
+
+A is flat at ~1 uV at every settle; only B varies, monotonically. After the
+contact closes, B's node -- 1 MOhm into an unterminated pigtail -- settles
+through picoamp currents, and the residual at the sample instant depends on the
+mains phase *at the moment of closure*, which is random from switch to switch.
+The tell that it is a random-phase transient and not an offset: B's MEAN stays
+at -14 uV across every tag while its spread changes 6x. On a Grafana trace this
+looks like bursts of noise every ~20 s, which is simply the firmware stepping to
+the next settle value. It does not enter the A measurement.
 
 Its *character* changed when the temperature read was disabled: the restart had
 been jittering the sample interval (1008–1208 ms), smearing the alias. Without it
