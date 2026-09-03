@@ -95,10 +95,65 @@ public:
      * TRACE of the actual contacts, which is what the board's qualification plan
      * asks for anyway; the console command below exists to make that measurement
      * possible without a rebuild. */
-    static constexpr uint32_t DEAD_TIME_MS = 50;          ///< step 3: both coils released
+    /* DEAD TIME -- now sourced from the datasheet rather than guessed (2026-09-03).
+     *
+     * Coto's own 3500-series datasheet gives the 3502 a RELEASE TIME of 0.1 ms
+     * typical (operate, including bounce, is 0.75 ms). This was previously 50 ms,
+     * a margin over an unmeasured quantity, and DESIGN.md's open gate still asks
+     * for a scope-measured release time -- which remains worth having, because
+     * 0.1 ms is TYPICAL and Coto publishes no maximum.
+     *
+     * The dead window is NOT the only non-overlap margin, and this is what makes
+     * 5 ms comfortable rather than brave. After it expires ARM rises, and the NEW
+     * coil's delay-on network still needs 15.95 ms in its FASTEST corner
+     * (DESIGN.md, derived expressly to bound how soon a coil can engage) before
+     * it can pull in. So the real margin is dead + 15.95 ms = 20.95 ms against a
+     * 0.1 ms release: 209x. Even at dead = 0 it would be 159x.
+     *
+     * NOTE FOR ANYONE TIGHTENING THIS FURTHER: the ADC cannot check your work.
+     * A brief overlap dumps charge onto the divider output, which decays through
+     * the divider's ~19.6 kOhm into 100 nF -- tau ~ 2 ms -- while the published
+     * conversion ends 157 ms after ARM, some 80 tau later. A dead-time sweep read
+     * by this ADC therefore returns "not detectable", never "not present". Use a
+     * scope on the contacts, which is what DESIGN.md asked for in the first place. */
+    static constexpr uint32_t DEAD_TIME_MS = 5;           ///< step 3: both coils released
     /// Lower clamp on the runtime dead time. Not a measurement -- see setDeadMs().
     static constexpr uint32_t DEAD_MIN_MS = 1;
-    static constexpr uint32_t SETTLE_MS_DEFAULT = 250;   ///< step 6: contact closed and quiet
+    /* SETTLE -- 250 ms until 2026-09-03, when the reason for it was removed.
+     *
+     * 250 ms was a margin against the settling tail measured on this fixture, and
+     * that tail was dielectric absorption in the shunt-adc board's X7R input caps.
+     * With those replaced by C0G the tail is gone: the bias-vs-step slope at the
+     * earliest reachable sample instant fell from -25.73 +- 0.86 to -0.24 +- 2.04
+     * uV/V, consistent with zero (pwr-metering hw/shunt-adc finding F23).
+     *
+     * 30 ms is not an accuracy choice -- the published conversion still ends
+     * 157 ms after ARM either way, because the converter free-runs and
+     * DISCARD_SCANS = 2 lands the sample on the same conversion for ANY settle up
+     * to one conversion period. It is a RATE choice: dead + settle <= 52.22 ms
+     * keeps the dwell one whole conversion shorter. See the static_assert in
+     * relay_mux_adc.h, which fails the build if that stops holding.
+     *
+     * IT WAS 45 ms FOR ONE DAY, AND THAT WAS TOO CLOSE TO THE EDGE. dead + settle
+     * = 50 ms left 2.2 ms of margin against the 52.22 ms conversion, and the bench
+     * spent most of its time on the wrong side of the boundary: round trips
+     * quantised to 45 / 46 / 47 conversions (2.350 / 2.402 / 2.461 s) with 47 the
+     * mode, against the 44 predicted. Cutting 15 ms moved the WHOLE distribution
+     * down by one conversion per dwell, to 44 / 45 -- which a 15 ms change cannot
+     * do to a ceil() of a 35-50 ms argument unless the argument is bigger than
+     * dead + settle. It is: this timer is evaluated by realTimeTask, which also
+     * ticks the mux and updates every sampler on each pass, so what gets rounded
+     * up is dead + settle + LATENCY.
+     *
+     * 30 ms leaves 17.2 ms for that latency and stays 10 ms above SETTLE_FLOOR_MS.
+     * Do not spend the margin. It does NOT buy determinism -- two thirds of round
+     * trips still take the extra conversion, and that residual is unexplained (see
+     * doc/relay-mux-front-end.md) -- but it is worth a whole conversion per dwell.
+     *
+     * The contact's own close is covered by the discards, not by this number: the
+     * delay-on slow corner is 65 ms and the published conversion does not START
+     * until 104.4 ms after ARM. */
+    static constexpr uint32_t SETTLE_MS_DEFAULT = 30;    ///< step 6: contact closed and quiet
 
     /* Hard floor. No evidence from the ADC, however convincing, may publish a
      * sample sooner than this after ARM rises, because DESIGN.md's FASTEST

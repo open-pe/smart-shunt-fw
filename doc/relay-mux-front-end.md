@@ -199,7 +199,7 @@ firmware lever.
 
 | AVG | dwell | duty | alternation |
 |---|---|---|---|
-| 4 (today, settle 250) | 575 ms | **34.8%** | 1.15 s |
+| 4, settle 250 (until 2026-09-03) | 575 ms | **34.8%** | 1.15 s |
 | 4 (floor settle) | 364 ms | 57% | 0.73 s |
 | 8 (floor settle) | 572 ms | **73%** | 1.14 s |
 | 16 (floor settle) | 990 ms | 84% | 1.98 s |
@@ -354,6 +354,102 @@ differential), with stock 0 and 0 on order.
 The filter's own RC was never a candidate: 21.6 kOhm x 100 nF = 2.16 ms, i.e.
 e^-73 by 157 ms.
 
+## The production retune: least dead time, half the switching frequency
+
+With the tail gone the settle margin no longer buys anything, so the timing was
+re-derived from what the parts actually specify. Requested outcome: the smallest
+defensible dead time, and half the switching rate.
+
+| | before | after |
+|---|---|---|
+| `DEAD_TIME_MS` | 50 | **5** |
+| `SETTLE_MS_DEFAULT` | 250 | **30** |
+| `AVG_CONVERSIONS` | 4 | **20** |
+| round trip, **measured** | **1.149 s** (22 conv, no spread) | **2.298 / 2.356 s** (44 / 45 conv), mean 2.338 |
+| switching frequency | 0.870 Hz | **0.428 Hz — down 50.8%** |
+| duty (integration / dwell) | 36.4% | **89.3%** |
+| sample instant after ARM | 157 ms | 157 ms (unchanged) |
+
+Both round-trip figures are measured from the published sample timestamps, not
+derived: 3109 points/hour for eight hours before the change, all at 1.149 s with
+median equal to mode, and 179 points over seven minutes after it.
+
+Two things make this free rather than a trade.
+
+**The sample instant does not move.** The converter free-runs, so `settleMs` does not
+decide *when* the sample is taken -- only which free-running conversion the discards
+land on. Every settle from 1 to 52.22 ms yields the same 157 ms instant. Dropping 250
+to 30 therefore costs nothing in settling, and there is no point going below it either.
+A's spread over the seven minutes was 6.1 uV.
+
+**The dead time is bounded by the datasheet, not by a guess.** `DEAD_TIME_MS` exists to
+guarantee the outgoing contact has released before the incoming one closes; the Coto
+3502 datasheet gives **release 0.1 ms typical**. 5 ms is 50x that, and it is a floor
+chosen for the state machine's own comfort, not for the relay.
+
+That number was *not* measurable on this rig, and the attempt is worth recording. A
+dead-time sweep was written to read the ADC at the end of the dead window and look for
+the moment the reading stops being the channel just left. It was flashed before the
+flaw was noticed: **B's node discharges through the divider's 19.6 kOhm into 100 nF,
+tau ~ 2 ms, while the sample is 157-366 ms later.** Whatever the contacts were doing
+had decayed by e^-75 before anything looked. The firmware comment that justified the
+sweep claimed tau ~ 100 ms through the 1 MOhm leg and had simply ignored the 20 kOhm
+low leg. **An ADC behind a divider cannot measure contact overlap** -- that needs a
+scope on the node, and DESIGN.md's qualification item stays open. 0.1 ms is *typical*;
+Coto publishes no maximum.
+
+### The rate cliff is real, and 45 ms was on the wrong side of it
+
+The dwell is a whole number of conversions,
+`ceil((dead + settle) / 52.22) + 1 + AVG_CONVERSIONS`, so keeping `dead + settle`
+inside one conversion is worth a whole conversion *per dwell*, i.e. two per round trip.
+The first production build set settle to 45 ms -- `dead + settle = 50`, satisfying the
+inequality with 2.2 ms to spare -- and the bench returned round trips of **45 / 46 / 47
+conversions (2.350 / 2.402 / 2.461 s), with 47 the mode**, against the 44 predicted.
+
+Settle went to **30 ms**, and the whole distribution moved down by exactly one
+conversion per dwell: **44 / 45 conversions, 31% / 68%**. A 15 ms change cannot move a
+`ceil` whose argument is 35-50 ms against a 52.22 ms period -- unless the argument is
+larger than `dead + settle`. It is: the timer is evaluated by `realTimeTask`, which
+also runs `relayMux.tick()` and `samplers.updateAll()` on every pass, so the quantity
+being rounded up is `dead + settle + latency`.
+
+The `static_assert` bound therefore went from 52 to **40**, so the build fails while
+there is still headroom for that latency rather than only once the inequality itself
+breaks. At 45 ms the inequality held and the cliff was fallen off anyway.
+
+### What is still not deterministic, and why 50.8% rather than 50.0%
+
+The old configuration was perfectly repeatable -- 1.149 s, no second mode, over
+thousands of samples. The new one is not: two thirds of round trips take one conversion
+more than the other third. Since `dead + settle = 35 ms` now sits 17.2 ms below the
+boundary and the loop's own yield is `vTaskDelay(1)`, a simple 1 ms poll granularity
+does not account for it, and **the mechanism is not established.**
+
+What can be said is the size of it: 0.4 conversions per dwell on average, 2.3% of the
+round trip, which is why the switching frequency fell by 50.8% rather than 50.0%.
+`AVG_CONVERSIONS` is the only coarse knob and it must stay even, so 20 is the closest
+reachable value -- 18 would undershoot to ~1.85x. Do not read the 2x in this section as
+exact; the measured ratio is **2.035**.
+
+### The auto-widener had to be fixed to survive this
+
+The widener compared `tStableMs` against `settleMs`. That was a category error hidden
+by the old 250 ms value: `stable` needs `STABLE_N = 3` agreeing conversions, so
+`tStableMs` cannot report earlier than ~157 ms, and against a 30 ms settle the test
+would be true on **every** switch -- ratcheting the settle straight back up and undoing
+the configuration permanently on the first dwell.
+
+It now compares against `sampleInstantMs(settleMs) + CONVERSION_MS`, i.e. against when
+the published conversion actually ends, plus one conversion of headroom. The headroom
+is required, not padding: `tStableMs` is quantised to the conversion grid and its floor
+ranges over a whole conversion (~104-157 ms) depending on phase, so without it the
+widener fires on the unlucky phase alone. Rarely is worse than never here, because one
+spurious widen is permanent -- the widener only ever increases.
+
+Confirmed on the bench: over seven minutes the first half and second half of the run
+both median 2.356 s. A firing widener would show as a monotonically growing round trip.
+
 ## VMUX_B's oscillation is not a fault
 
 B (open input) shows ~50 µV peak-to-peak of slow sine. That is mains reaching the
@@ -389,6 +485,10 @@ corrupting timing as well as amplitude.
 
 ## Not verified
 
+- **Contact release time.** `DEAD_TIME_MS = 5` rests on Coto's *typical* 0.1 ms; no
+  maximum is published, and the datasheet is the only source. It cannot be measured
+  from the ADC (see the retune section: the node's own tau is ~2 ms against a 157 ms
+  sample), so this stays a scope job.
 - **High-voltage headroom.** The PGA margin table above is arithmetic. Nothing has
   been measured above 1.2 V in, so the 80 V and 100 V rows are unconfirmed.
 - **The 165 nA** figure, as noted.

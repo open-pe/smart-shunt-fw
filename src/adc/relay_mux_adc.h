@@ -107,7 +107,53 @@ private:
      *
      * MUST STILL BE EVEN, and the members must be genuinely adjacent -- see the
      * adjacency caveat on accLastGen, which this code CANNOT fully enforce. */
-    static constexpr uint32_t AVG_CONVERSIONS = 4;
+    static constexpr uint32_t AVG_CONVERSIONS = 20;
+
+    /* One ADS1262 conversion at FIR 20 SPS, CHOP on, with a single pair
+     * registered so the device's own mux stays parked. Measured, not nominal:
+     * the 2026-09-03 sweeps put the dwell at an exact whole number of these for
+     * all nine settle values (365.5 / 417.8 / 470.0 / 522.2 / 574.4 ms). */
+    static constexpr float CONVERSION_MS = 52.22f;
+
+    /* When the published conversion ENDS, relative to ARM.
+     *
+     * The converter free-runs, so the settle time does not set the sample instant
+     * -- it only decides which free-running conversion the discards land on. Any
+     * settle from 1 to 52.22 ms yields the SAME 157 ms instant, which is why 30 ms
+     * costs nothing in accuracy against 250 ms and why there is no point going
+     * below it. This is also the hardware floor: the delay-on slow corner closes
+     * the contact by 65 ms and this conversion does not start until 104.4 ms. */
+    static constexpr uint32_t sampleInstantMs(uint32_t settleMs) {
+        return (uint32_t) ((float) ((settleMs + (uint32_t) CONVERSION_MS - 1)
+                                    / (uint32_t) CONVERSION_MS) * CONVERSION_MS
+                           + DISCARD_SCANS * CONVERSION_MS);
+    }
+
+    /* RATE CLIFF, GUARDED -- AND THE GUARD NEEDS MARGIN, NOT JUST THE INEQUALITY.
+     *
+     * The dwell is a whole number of conversions:
+     * ceil((dead + settle) / 52.22) + 1 + AVG_CONVERSIONS, which fit all nine
+     * points of the settle sweep. Keeping dead + settle inside ONE conversion is
+     * worth a whole conversion of dwell -- 22 conversions rather than 23 -- and
+     * crossing back over the boundary silently costs 5 % of duty. Fail the build
+     * instead of letting that happen quietly.
+     *
+     * The bound is 40, not 52, because the quantity that actually gets rounded up
+     * is dead + settle + THE LOOP LATENCY. These timers are evaluated by
+     * realTimeTask, which also ticks the mux and updates every sampler on each
+     * pass. At dead + settle = 50 ms -- inside 52.22, so the inequality held --
+     * the bench returned 45 / 46 / 47 conversions per round trip with 47 the mode,
+     * against 44 predicted; at 35 ms the whole distribution moved down by one
+     * conversion per dwell. The cliff was fallen off with the inequality
+     * satisfied, so the inequality is not the guard: the headroom is.
+     *
+     * 40 leaves 12 ms of it. That does NOT make the dwell deterministic -- a
+     * residual ~0.4 conversions per dwell survives and is unexplained -- but it is
+     * worth a whole conversion per dwell, which is 5 % of duty. */
+    static_assert(RelayMux2::DEAD_TIME_MS + RelayMux2::SETTLE_MS_DEFAULT <= 40,
+                  "dead + settle (plus realTimeTask's loop latency) must fit inside "
+                  "one 52.22 ms conversion, or the dwell grows by a whole conversion "
+                  "-- see the rate cliff note");
 
 #ifdef RELAYMUX_SETTLE_SWEEP
 #  ifdef RELAYMUX_DEAD_SWEEP
@@ -167,8 +213,27 @@ private:
      * and bounds the release time from above; the shortest window whose deadV is
      * still the termination is the break point. Below ~50 ms the window holds no
      * conversion at all and deadV is NaN -- unobservable, and reported as such. */
+    /* CONTACT NON-OVERLAP SWEEP. The old list stopped at 25 ms, above the region
+     * that matters: the question is not "does 25 ms work" but "where does overlap
+     * begin", and DEAD_MIN_MS is 1. Log-spaced down to 2 ms.
+     *
+     * WHAT THIS MEASURES, and why the ADC can do it despite a 52.22 ms conversion
+     * being far coarser than a reed's release. It does NOT time the release. It
+     * detects the FAILURE the dead time exists to prevent -- both contacts closed
+     * at once -- and it is very sensitive to it, because the two channels are at
+     * wildly different potentials and B is high-impedance. With A driven to
+     * ~0.4 V at the ADC and B's input open, any overlap charges B's 100 nF through
+     * ~19.6 kOhm (tau ~ 2 ms), and B then HOLDS that charge because its own
+     * discharge path is ~1 MOhm (tau ~ 100 ms). So even a sub-millisecond overlap
+     * leaves a large, persistent offset on B: a 1 % charge transfer is ~4000 uV
+     * against B's ~15 uV noise. The detector is B's mean moving toward A.
+     *
+     * Note the dead time is not the only non-overlap margin: after it expires ARM
+     * rises and the NEW coil's delay-on network still needs 15.95 ms in its fastest
+     * corner (DESIGN.md) before it can engage. So the true margin is dead + 15.95 ms
+     * minimum, and this sweep measures the sum, which is the quantity that matters. */
     static constexpr uint32_t SWEEP_REF_MS = 300;
-    static constexpr uint32_t SWEEP_MS[] = {300, 250, 200, 150, 100, 70, 50, 35, 25};
+    static constexpr uint32_t SWEEP_MS[] = {300, 150, 70, 35, 20, 12, 7, 4, 2};
 #else
     static constexpr uint32_t SWEEP_REF_MS = 250;
     static constexpr uint32_t SWEEP_MS[] = {250, 200, 150, 120, 90, 70, 50, 35, 20};
@@ -861,7 +926,33 @@ public:
          * rather than the relay. */
         if (false) {
 #else
-        if (tStableMs > mux.settleMs()) {
+        /* Compare against WHEN WE ACTUALLY SAMPLE, not against settleMs.
+         *
+         * settleMs is a state-machine delay; the property that must hold is "the
+         * channel was stable before the published conversion ended". Comparing
+         * against settleMs was a category error that only stayed hidden while
+         * settleMs was 250 ms, i.e. larger than the observer's own resolution.
+         *
+         * That resolution is the trap: `stable` needs STABLE_N = 3 consecutive
+         * agreeing conversions, so tStableMs CANNOT report earlier than
+         * ~3 x 52.22 = 157 ms. Against a 45 ms settle the test is true on every
+         * single switch, and the widener would ratchet 45 -> 235 ms on the first
+         * one and undo the configuration permanently. It would be measuring its
+         * own floor, not the relay.
+         *
+         * A genuinely slow contact still fires this: tStableMs then exceeds the
+         * sample instant, which is the real failure and the one worth widening
+         * for.
+         *
+         * The + CONVERSION_MS is required, not padding. tStableMs is quantised to
+         * the conversion grid and its floor depends on where the first conversion
+         * after ARM falls, so the earliest it can report ranges over a whole
+         * conversion (~104-157 ms). Comparing without that headroom fires on the
+         * unlucky phase alone -- rarely, which is worse than never, because one
+         * spurious widen is permanent: the widener only ever increases. A
+         * difference smaller than one conversion is not resolvable and must not
+         * be treated as evidence. */
+        if (tStableMs > sampleInstantMs(mux.settleMs()) + (uint32_t) CONVERSION_MS) {
 #endif
             const uint32_t was = mux.settleMs();
             /* CAPPED. Widening is evaluated only after settleMs_ elapses, and
@@ -871,6 +962,9 @@ public:
              * with stableEpsV near the noise floor flicker is normal rather than
              * exceptional. Uncapped it ratchets x1.5 each time until the stall
              * detector fires. The cap turns a runaway into a bounded complaint. */
+            /* Widen so the SAMPLE lands after tStableMs, with 50 % margin. The
+             * old target was tStableMs * 1.5 as a settle, which over-corrected by
+             * the discard time (2 conversions) now that the two are distinguished. */
             const uint32_t want = tStableMs + tStableMs / 2;
             const uint32_t now = mux.setSettleMs(want);
             ++nWidened;
