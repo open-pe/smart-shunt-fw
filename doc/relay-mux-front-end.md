@@ -382,10 +382,23 @@ land on. Every settle from 1 to 52.22 ms yields the same 157 ms instant. Droppin
 to 30 therefore costs nothing in settling, and there is no point going below it either.
 A's spread over the seven minutes was 6.1 uV.
 
-**The dead time is bounded by the datasheet, not by a guess.** `DEAD_TIME_MS` exists to
-guarantee the outgoing contact has released before the incoming one closes; the Coto
-3502 datasheet gives **release 0.1 ms typical**. 5 ms is 50x that, and it is a floor
-chosen for the state machine's own comfort, not for the relay.
+**The dead time is still a margin over an unmeasured quantity -- the datasheet does not
+close it.** `DEAD_TIME_MS` exists to guarantee the outgoing contact has released before
+the incoming one closes. The Coto 3500-series datasheet gives the 3502 **release 0.1 ms
+typical**, and it is tempting to call 5 ms "50x that". It is not, for two reasons: the
+0.1 ms is measured "At Nominal Coil Voltage, 30 Hz Square Wave" with **no coil
+suppression specified**, while this board fits D3/D4, plain 1N4148W flyback diodes that
+hold coil current circulating at ~0.7 V of forcing and stretch the flux decay -- and
+DESIGN.md says so itself, *"change to a diode/Zener clamp only if the plain diode cannot
+meet dead-time requirements"*. Second, 0.1 ms is typical and Coto publishes no maximum.
+
+What makes 5 ms comfortable is that the dead window is **not** the primary non-overlap
+margin. On an A<->B alternation the incoming channel's delay-on capacitor has been
+discharged for a whole dwell, so after ARM rises that coil still needs the fastest-corner
+15.95 ms before it can pull in. The dead window is a second, independent margin -- the
+one that survives a failed delay-on network -- and 5 ms of it costs nothing at the
+current rate. Spending it down to `DEAD_MIN_MS = 1` would buy 4 ms of headroom nobody
+has shown is needed.
 
 That number was *not* measurable on this rig, and the attempt is worth recording. A
 dead-time sweep was written to read the ADC at the end of the dead window and look for

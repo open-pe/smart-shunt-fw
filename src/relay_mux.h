@@ -95,20 +95,33 @@ public:
      * TRACE of the actual contacts, which is what the board's qualification plan
      * asks for anyway; the console command below exists to make that measurement
      * possible without a rebuild. */
-    /* DEAD TIME -- now sourced from the datasheet rather than guessed (2026-09-03).
+    /* DEAD TIME -- STILL A MARGIN OVER AN UNMEASURED QUANTITY (2026-09-03).
      *
-     * Coto's own 3500-series datasheet gives the 3502 a RELEASE TIME of 0.1 ms
-     * typical (operate, including bounce, is 0.75 ms). This was previously 50 ms,
-     * a margin over an unmeasured quantity, and DESIGN.md's open gate still asks
-     * for a scope-measured release time -- which remains worth having, because
-     * 0.1 ms is TYPICAL and Coto publishes no maximum.
+     * Coto's 3500-series datasheet gives the 3502 a RELEASE TIME of 0.1 ms typical
+     * (operate, including bounce, 0.75 ms). DO NOT SIZE THIS FROM THAT NUMBER --
+     * an earlier revision of this comment did, and called 5 ms "50x the datasheet
+     * release", which is not what the datasheet says about THIS board:
      *
-     * The dead window is NOT the only non-overlap margin, and this is what makes
-     * 5 ms comfortable rather than brave. After it expires ARM rises, and the NEW
-     * coil's delay-on network still needs 15.95 ms in its FASTEST corner
-     * (DESIGN.md, derived expressly to bound how soon a coil can engage) before
-     * it can pull in. So the real margin is dead + 15.95 ms = 20.95 ms against a
-     * 0.1 ms release: 209x. Even at dead = 0 it would be 159x.
+     *   - The 0.1 ms is measured "At Nominal Coil Voltage, 30 Hz Square Wave" and
+     *     the datasheet specifies no coil suppression at all. This board fits D3/D4,
+     *     plain 1N4148W flyback diodes across the coils, which hold the coil current
+     *     circulating with ~0.7 V of forcing and stretch the flux decay. DESIGN.md
+     *     anticipates it in as many words: "change to a diode/Zener clamp only if
+     *     the plain diode cannot meet dead-time requirements." The release time as
+     *     built is an unmeasured MULTIPLE of 0.1 ms.
+     *   - 0.1 ms is TYPICAL. Coto publishes no maximum.
+     *
+     * So DESIGN.md's open gate -- a scope-measured contact release time -- is not
+     * closed, and this number is exactly what it was before the datasheet was read:
+     * a margin.
+     *
+     * What makes 5 ms comfortable rather than brave is that the dead window is NOT
+     * the primary non-overlap margin. On an A<->B alternation the INCOMING channel's
+     * delay-on capacitor has been discharged for a whole dwell, so after ARM rises
+     * that coil still needs 15.95 ms in its FASTEST corner (DESIGN.md, derived
+     * expressly to bound how soon a coil can engage) before it can pull in. The dead
+     * window is a SECOND, INDEPENDENT margin -- the one that survives a failed
+     * delay-on network -- and 5 ms of it costs nothing at the current rate.
      *
      * NOTE FOR ANYONE TIGHTENING THIS FURTHER: the ADC cannot check your work.
      * A brief overlap dumps charge onto the divider output, which decays through
