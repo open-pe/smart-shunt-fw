@@ -110,6 +110,13 @@ private:
     static constexpr uint32_t AVG_CONVERSIONS = 4;
 
 #ifdef RELAYMUX_SETTLE_SWEEP
+#  ifdef RELAYMUX_DEAD_SWEEP
+#    define SWEEP_APPLY(v) mux.setDeadMs(v)
+#    define SWEEP_VALUE()  mux.deadMs()
+#  else
+#    define SWEEP_APPLY(v) mux.setSettleMs(v)
+#    define SWEEP_VALUE()  mux.settleMs()
+#  endif
     /* SETTLE CHARACTERISATION BUILD. Not for production -- it deliberately drives
      * the settle time below anything trustworthy in order to find where the
      * measurement breaks.
@@ -145,8 +152,27 @@ private:
      * The reference value appears in the test list too, as a NULL CONTROL: ref
      * against ref must come out at zero bias, and if it does not, nothing else in
      * the run means anything. */
+#ifdef RELAYMUX_DEAD_SWEEP
+    /* DEAD-TIME CHARACTERISATION. Settle is held at the reference the whole time,
+     * so the two are never confounded.
+     *
+     * A bias/sd sweep would be the WRONG measurement here and would return a
+     * confident null: a too-short dead time does not corrupt the settled reading,
+     * it briefly closes both contacts, and that is over long before the sample is
+     * taken. So the observable is `deadV` -- what the ADC reads at the end of the
+     * dead window, published as I. Released contact -> the termination, ~0 V.
+     * Still closed -> the channel we just left, ~0.515 V on this rig.
+     *
+     * Swept from LONG to short. A long window proves release completed within it
+     * and bounds the release time from above; the shortest window whose deadV is
+     * still the termination is the break point. Below ~50 ms the window holds no
+     * conversion at all and deadV is NaN -- unobservable, and reported as such. */
+    static constexpr uint32_t SWEEP_REF_MS = 300;
+    static constexpr uint32_t SWEEP_MS[] = {300, 250, 200, 150, 100, 70, 50, 35, 25};
+#else
     static constexpr uint32_t SWEEP_REF_MS = 250;
     static constexpr uint32_t SWEEP_MS[] = {250, 200, 150, 120, 90, 70, 50, 35, 20};
+#endif
     static constexpr uint8_t SWEEP_N = sizeof(SWEEP_MS) / sizeof(SWEEP_MS[0]);
     /* PUBLICATIONS per block, across BOTH channels -- half this many per channel.
      * Short blocks keep the bracket span short, which is what makes the linear-drift
@@ -159,6 +185,8 @@ private:
     uint8_t sweepIdx = 0;
     uint32_t sweepPubs = 0;
     bool sweepOnRef = true;
+    float deadV = NAN;
+    uint32_t deadArmGen = 0;
 #endif
     static_assert(AVG_CONVERSIONS >= 2 && (AVG_CONVERSIONS % 2) == 0,
                   "AVG_CONVERSIONS must be even and >= 2");
@@ -486,8 +514,12 @@ public:
     /// settleMs, offset by SWEEP_REF_TAG on reference blocks so the analysis can
     /// separate the reference at 250 ms from the null-control test at 250 ms.
     uint32_t sweepTaggedSettleMs() const {
-        return mux.settleMs() + (sweepOnRef ? SWEEP_REF_TAG : 0);
+        return SWEEP_VALUE() + (sweepOnRef ? SWEEP_REF_TAG : 0);
     }
+
+    /// What the ADC read at the end of the last dead window, or NaN if no
+    /// conversion fell inside it.
+    float deadWindowVolts() const { return deadV; }
 #endif
 
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
@@ -625,7 +657,24 @@ public:
         if (dev.generation() != obsGen) {
             obsGen = dev.generation();
             observe(dev.volts(pair), mux.msSinceArm());
+#ifdef RELAYMUX_SETTLE_SWEEP
+            /* Inside the dead window BOTH contacts should be open, so this reads
+             * the divider network's own termination. If it still reads the channel
+             * we just left, that contact had not released -- which is the only
+             * direct evidence available that the dead time is long enough. */
+            if (mux.inDeadTime()) deadV = dev.volts(pair);
+#endif
         }
+#ifdef RELAYMUX_SETTLE_SWEEP
+        /* NaN at the START of every dead window, so "no conversion landed inside
+         * the window" reports NaN instead of the previous window's value. A dead
+         * time shorter than the 50 ms conversion period is UNOBSERVABLE here, and
+         * unobservable must not read as clean. */
+        if (mux.inDeadTime() && mux.armGeneration() != deadArmGen) {
+            deadArmGen = mux.armGeneration();
+            deadV = NAN;
+        }
+#endif
 
         if (!mux.isSettled() || mux.settledTarget() != ch) {
             armedForCapture = false;
@@ -865,13 +914,13 @@ public:
             if (sweepOnRef) {
                 sweepOnRef = false;
                 sweepIdx = (uint8_t) ((sweepIdx + 1) % SWEEP_N);
-                mux.setSettleMs(SWEEP_MS[sweepIdx]);
+                SWEEP_APPLY(SWEEP_MS[sweepIdx]);
             } else {
                 sweepOnRef = true;
-                mux.setSettleMs(SWEEP_REF_MS);
+                SWEEP_APPLY(SWEEP_REF_MS);
             }
-            ESP_LOGW("relaymux", "settle sweep -> %lums (%s)",
-                     (unsigned long) mux.settleMs(), sweepOnRef ? "ref" : "test");
+            ESP_LOGW("relaymux", "sweep -> %lums (%s)",
+                     (unsigned long) SWEEP_VALUE(), sweepOnRef ? "ref" : "test");
         }
 #endif
         serving = other(ch);
@@ -975,7 +1024,14 @@ public:
          * not-yet-converted pair writes NAN into volts_, and publishing that as
          * 0 V would be a measurement this channel never made. */
         lastSample.u = std::isnan(v) ? NAN : ((dividerRatio > 0) ? v * dividerRatio : v);
+#ifdef RELAYMUX_DEAD_SWEEP
+        /* I carries the dead-window reading. NaN in, NaN out: the collector drops
+         * NaN fields, so a window too short to hold a conversion produces no I at
+         * all rather than a plausible zero. */
+        lastSample.i = backend.deadWindowVolts();
+#else
         lastSample.i = NAN;
+#endif
 #ifdef RELAYMUX_SETTLE_SWEEP
         /* P carries the settle time in ms for this sample. Overriding the pin is
          * safe only because this build exists to be grouped by it; the production

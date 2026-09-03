@@ -96,6 +96,8 @@ public:
      * asks for anyway; the console command below exists to make that measurement
      * possible without a rebuild. */
     static constexpr uint32_t DEAD_TIME_MS = 50;          ///< step 3: both coils released
+    /// Lower clamp on the runtime dead time. Not a measurement -- see setDeadMs().
+    static constexpr uint32_t DEAD_MIN_MS = 1;
     static constexpr uint32_t SETTLE_MS_DEFAULT = 250;   ///< step 6: contact closed and quiet
 
     /* Hard floor. No evidence from the ADC, however convincing, may publish a
@@ -136,6 +138,7 @@ private:
     uint32_t tArmMs = 0;             ///< when ARM last rose; survives the SETTLED transition
     uint32_t armGen_ = 0;            ///< bumped once per ARM assertion (one per switch)
     uint32_t settleMs_ = SETTLE_MS_DEFAULT;
+    uint32_t deadMs_ = DEAD_TIME_MS;
     uint32_t generation_ = 0;        ///< bumped once per entry into SETTLED
     bool begun = false;
 
@@ -287,7 +290,7 @@ public:
                 break;
 
             case State::DEAD_TIME:
-                if ((uint32_t) (now - tStateMs) < DEAD_TIME_MS) break;
+                if ((uint32_t) (now - tStateMs) < deadMs_) break;
                 if (pending == Target::NONE) {
                     tStateMs = now;
                     state = State::OFF;
@@ -318,6 +321,30 @@ public:
     }
 
     bool isSettled() const { return state == State::SETTLED; }
+
+    /// True while both coils are released and neither contact should be closed.
+    /// Exposed so a characterisation build can look at what the ADC reads in that
+    /// window, which is the only direct evidence that the previous contact
+    /// actually opened before the next one was armed.
+    bool inDeadTime() const { return state == State::DEAD_TIME; }
+
+    uint32_t deadMs() const { return deadMs_; }
+
+    /* THE DEAD TIME IS A SAFETY INTERLOCK, NOT A SETTLING ALLOWANCE. It is what
+     * keeps the two inputs from ever being connected to each other: shorten it
+     * below the previous reed's release time and ARM rises while that contact is
+     * still closed, tying A to B through the mux. With one input open that is
+     * harmless; with two live sources it is a short between them.
+     *
+     * So this setter exists for characterisation, and a value derived on a rig
+     * with an open input MUST NOT be adopted for one where both inputs are driven.
+     * There is no clamp that can make a short dead time safe, so the floor here is
+     * only a sanity bound. */
+    uint32_t setDeadMs(uint32_t ms) {
+        if (ms < DEAD_MIN_MS) ms = DEAD_MIN_MS;
+        deadMs_ = ms;
+        return deadMs_;
+    }
 
     /// The channel whose contact is believed closed and quiet, or NONE. Callers
     /// must gate every published sample on this rather than on select()'s
