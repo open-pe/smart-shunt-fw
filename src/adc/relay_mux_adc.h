@@ -92,9 +92,12 @@ private:
      * INPMUX, then restores production config and toggles START -- restarting the
      * conversion cycle. ads1262.h:213 says it plainly: "every one of those
      * restarts is a fresh settling transient in the middle of a precision
-     * measurement." 64 * 52.22 ms = 3.34 s, and one channel round trip was
-     * ~836 ms, so exactly one dwell in four caught the transient. That also
-     * explains why the affected samples always arrived ~60-104 ms late.
+     * measurement." 64 * 52.22 ms = 3.34 s. Against the ~836 ms round trip in
+     * force when this was measured that is one dwell in four, which is where the
+     * period-4 pattern came from -- but at the ~1.15 s round trip AVG_CONVERSIONS=4
+     * produces it is ~2.9, so "one in four" is a fact about that measurement, not a
+     * standing property. It also explains why affected samples arrived ~60-104 ms
+     * late.
      *
      * So the correct fix is to DISCARD the conversions that follow a
      * temperature-read restart, the way DISCARD_SCANS already discards the ones
@@ -197,7 +200,24 @@ private:
      * "the step happened". Also the threshold for EXPECTING a step at all: when
      * the two channels are closer together than this, the switch is
      * unobservable -- and, by the same arithmetic, a failure to switch would
-     * change the result by less than this too. */
+     * change the result by less than this too.
+     *
+     * THE 1 mV DEFAULT IS WRONG FOR A RATIO INSTRUMENT, AND KNOWINGLY SO.
+     * Raw signals here are ~20 mV, so 1 mV is 5% -- 50,000 ppm against a ~100 ppm
+     * ambition. Two consequences, both bad and both currently live:
+     *
+     *  - When the two inputs differ by LESS than 1 mV the guard switches itself
+     *    off (expectMove goes false). That is precisely the interesting case: a
+     *    ratio measurement of two nearly equal voltages is where a failed switch
+     *    is most damaging and least visible.
+     *  - The re-baseline candidate test compares each reading against the FIRST
+     *    candidate, so an "agreeing" set can span nearly 2 * moveEpsV.
+     *
+     * It was sized when the front end had 3.3 mV of bias-current offset and a
+     * 141 uV transient, where 1 mV was defensible. With the PGA enabled the noise
+     * floor is ~0.9 uV sd, so this can come down by two or three orders -- but the
+     * right value is a bench fact about the contacts and the sources, not a guess.
+     * Same contract as stableEpsV: measure the step, then set it. */
     const float moveEpsV;
 
     /* Reason byte in the high octet, matching ads1262.h's encodeDiag() layout so
@@ -242,6 +262,28 @@ private:
      * channel that was working perfectly. A guard that cannot return to PASS on
      * healthy input is broken regardless of what it catches. */
     static constexpr uint32_t UNMATCHED_REBASELINE = 3;
+    /* AUTO-ADOPT IS OFF BY DEFAULT, because the premise it was written on is false.
+     *
+     * The idea was "a real source settles and repeats, an open contact floats and
+     * does not". Review killed it: with the mux open the ADC still sees the
+     * divider's own termination -- the tap is tied to the Kelvin return through the
+     * 20 kOhm low leg -- so an open contact reads a PERFECTLY STABLE value. Three
+     * agreeing readings therefore adopt it, take() writes it to lastAccepted[], and
+     * every later open reading then matches "mine" and is published forever.
+     *
+     * That trades permanent silence for a permanent plausible wrong number, which
+     * is the worse of the two failures and the one this whole guard exists to
+     * prevent. (See ~/dev/kb/adc/floating-mux-input-mirrors-previous-channel.md: a
+     * floating mux input can mirror the previous channel rather than produce noise.)
+     *
+     * One channel's readings cannot distinguish "the input moved" from "the contact
+     * opened" -- the information is not there. So the shipped behaviour is the safe
+     * one: publish NaN, count it, say so loudly, and let a REBOOT clear it (nothing
+     * here is persisted). On the nest that costs nothing: it reflashes and reboots
+     * over BLE without anyone at the bench.
+     *
+     * Set true only on a rig where a wrong number is cheaper than a dark channel. */
+    bool rebaselineOnUnmatched = false;
     uint32_t nUnmatched[3] = {0, 0, 0};
     float unmatchedV[3] = {NAN, NAN, NAN};
     uint32_t nRebaselined = 0;
@@ -313,12 +355,19 @@ public:
      * Ground-referenced means AINN sits at AGND, so V_cm = V_diff/2 and the PGA
      * outputs land at V_diff and 0 -- not at +-V_diff:
      *
-     *      80 V -> 1.569 V out -> pins at 1.569 / 0 V   (0.63 V of margin)
-     *     100 V -> 1.961 V out -> pins at 1.961 / 0 V   (0.24 V of margin)
+     *      80 V -> 1.569 V out -> pins at 1.569 / 0 V
+     *     100 V -> 1.961 V out -> pins at 1.961 / 0 V
      *
-     * so the PGA fits across the divider's whole rated range and clips only above
-     * ~112 V, past the board's own limit. THIS MARGIN IS THE DIVIDER'S, NOT THE
-     * ADC'S: re-range the divider and this choice must be re-derived.
+     * The +-2.2 V window is NOMINAL. AVDD comes from an ADP7118 specified +-1.8%
+     * over line/load/temperature, so worst-case AVDD is 2.455 V and the limit is
+     * 2.155 V, not 2.2. The GUARANTEED margins are 0.586 V at 80 V and 0.194 V at
+     * 100 V, and the guaranteed clip point is ~109.9 V, not ~112 V. The board's
+     * 100 V engineering limit still sits inside that, so the choice holds -- but
+     * quote the tolerated numbers, not the nominal ones.
+     *
+     * THIS MARGIN IS THE DIVIDER'S, NOT THE ADC'S: re-range the divider and this
+     * must be re-derived. AND NONE OF IT IS MEASURED -- nothing above 1.2 V in has
+     * ever been put through this front end.
      *
      * What bypass costs is input current. Bypassed, the ADC input is the raw
      * switched-cap modulator rather than a buffer, and the divider presents
@@ -455,6 +504,8 @@ public:
         if (wantManual != manual) {
             manual = wantManual;
             armedForCapture = false;
+            nUnmatched[1] = nUnmatched[2] = 0;
+            unmatchedV[1] = unmatchedV[2] = NAN;
             if (!manual) {
                 /* Discard any request still sitting in the mux inbox before
                  * resuming. `relaymux b` posts the mode and the target as two
@@ -512,6 +563,8 @@ public:
              * was taken against a generation counter that has just restarted.
              * Drop it and re-arm against the new one. */
             armedForCapture = false;
+            nUnmatched[1] = nUnmatched[2] = 0;
+            unmatchedV[1] = unmatchedV[2] = NAN;
         }
 
         /* NO mux.tick() here. realTimeTask ticks the state machine once per pass,
@@ -540,6 +593,11 @@ public:
         if (!mux.isSettled() || mux.settledTarget() != ch) {
             armedForCapture = false;
             accN = 0; accSum = 0.0f;
+            /* Drop any part-built re-baseline candidate too. "Three CONSECUTIVE
+             * readings" must mean consecutive PUBLICATIONS of this channel, not
+             * three readings with a manual-mode excursion, an ADC reinit or a
+             * settle failure in between. */
+            nUnmatched[(uint8_t) ch] = 0; unmatchedV[(uint8_t) ch] = NAN;
             return false;
         }
 
@@ -676,7 +734,7 @@ public:
                     ++nUnmatched[i];
                 }
 
-                if (nUnmatched[i] >= UNMATCHED_REBASELINE) {
+                if (rebaselineOnUnmatched && nUnmatched[i] >= UNMATCHED_REBASELINE) {
                     ++nRebaselined;
                     ESP_LOGW("relaymux", "%s: %lu consecutive readings agree at %.6g V "
                                          "(was %.6g V, other %.6g V) -- the INPUT changed, not a "
@@ -689,11 +747,11 @@ public:
                      * and take() will make it the new lastAccepted[]. */
                 } else {
                     ESP_LOGE("relaymux", "%s: reads %.6g V, matching neither channel "
-                                         "(%.6g / %.6g) -- open contact, or the input moved? "
-                                         "publishing NaN (%lu/%lu before re-baselining)",
+                                         "(%.6g / %.6g) -- an OPEN CONTACT and a CHANGED INPUT "
+                                         "look identical here; publishing NaN. If you changed the "
+                                         "source, reboot to re-baseline (%lu consecutive)",
                              RelayMux2::targetName(ch), (double) v, (double) mine,
-                             (double) stepFrom, (unsigned long) nUnmatched[i],
-                             (unsigned long) UNMATCHED_REBASELINE);
+                             (double) stepFrom, (unsigned long) nUnmatched[i]);
                     lastVolts = NAN;
                     lastDiagOverride = DIAG_RELAY_NO_STEP;
                     return true;

@@ -394,21 +394,27 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
              * the xiao_nest riser prints nothing and refuses every upload while
              * happily clicking relays and streaming telemetry over BLE.
              *
-             * ONE-SHOT, AND DISARMED FROM BOTH ENDS. The bit lives in the RTC
-             * domain and survives a CPU reset, so left alone it would send EVERY
-             * subsequent boot into the downloader. Two independent things clear
-             * it: esptool zeroes it on the reset it performs after a flash
-             * (tool-esptoolpy esp32s3.py, RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK,
-             * citing arduino-esp32#6762), and setup() clears it on any boot that
-             * reaches the app. So the trap disarms itself whether the flash
-             * happens or not -- the worst case is one extra reset.
+             * THE BIT SURVIVES A CPU RESET -- it is in the RTC domain -- and an
+             * earlier version of this comment claimed setup() would therefore
+             * always disarm it. THAT IS FALSE, and review caught it: while the
+             * chip sits in the ROM downloader the app never runs, so setup()
+             * never executes and cannot clear anything. Pressing RESET returns
+             * you to the downloader.
+             *
+             * Only two things actually clear it: esptool zeroes it on the reset
+             * it performs after a flash (tool-esptoolpy esp32s3.py,
+             * RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK) -- though it ignores failure to
+             * do so -- and a real POWER CYCLE, which resets the RTC domain to the
+             * register's documented default of zero. setup()'s REG_CLR_BIT is
+             * still worth having, but it only covers the case where the app did
+             * boot; it is not the safety net it was described as.
              *
              * COSTS: the app stops. No sampling, no telemetry, no BLE. The relays
              * release, because nothing drives ARM/REQ and the mux board's 100k
-             * pull-downs park every relay off. Recovery is a flash, or RESET
-             * twice (once to leave the downloader, once with the bit cleared). */
+             * pull-downs park every relay off. */
             UART_LOG("rebooting into ROM download mode -- sampling, telemetry and BLE stop, "
-                     "and the relays release. Flash to recover, or reset twice.");
+                     "and the relays release. Recover by FLASHING it, or by a POWER CYCLE; "
+                     "pressing reset just returns to the downloader.");
             Serial.flush();
             delay(100);
             REG_SET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);

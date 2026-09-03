@@ -533,11 +533,12 @@ void setup(void) {
     /* Before Serial.begin(): setCpuFrequencyMhz() re-derives the baud divider of every
      * HardwareSerial it knows about, and doing it first means nothing has to be
      * re-derived at all. */
-    /* Disarm the `download` console command. Its RTC-domain bit survives a CPU
-     * reset, so without this a board that entered the downloader and was reset by
-     * hand rather than flashed would return to the downloader every boot. Clearing
-     * it here means any boot that reaches the app is the last one that can.
-     * REG_CLR_BIT, not REG_WRITE(0): this register holds other fields. */
+    /* Disarm the `download` command's RTC-domain bit on any boot that reaches the
+     * app. NOTE WHAT THIS DOES NOT COVER: if the chip is sitting in the ROM
+     * downloader, this line never runs, so it cannot rescue a board from there --
+     * only a flash (esptool clears the bit itself) or a power cycle can. See the
+     * `download` handler in console.h. REG_CLR_BIT, not REG_WRITE(0): the register
+     * holds other fields. */
     REG_CLR_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
 
     setCpuFrequencyMhz(CPU_FREQ_MHZ);

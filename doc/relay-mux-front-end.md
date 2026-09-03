@@ -29,9 +29,11 @@ restores production config and toggles `START`. The comment there already said i
 *"every one of those restarts is a fresh settling transient in the middle of a
 precision measurement."* Nobody had measured what it cost.
 
-64 × 52.22 ms = **3.34 s**, against a ~836 ms channel round trip — so exactly **one
-dwell in four** caught the transient, which is the period-4 pattern that started
-this. Affected samples also arrived ~60 ms late, the restart's own latency.
+64 × 52.22 ms = **3.34 s**. Against the ~836 ms round trip in force when this was
+measured, that is **one dwell in four** — the period-4 pattern that started this.
+It is a fact about that measurement, not a standing property: at the ~1.15 s round
+trip that 4-conversion averaging produces, the ratio is ~2.9. Affected samples also
+arrived ~60 ms late, the restart's own latency.
 
 **How it was proved.** `ADS1262_TEMP_EVERY_N_SCANS=0` disables the read outright.
 The artefact vanished (141 µV → 3.9 µV), rather than merely becoming rarer. That is
@@ -44,8 +46,12 @@ halved with each doubling of N — 1/N dilution of *one* bad conversion, not
 cancellation of a periodic term. The reasoning was wrong even though the numbers
 improved, which is the trap: a change that helps is not thereby explained.
 
-`SHUNT_ADC` on the N16R8 rig runs the same driver and takes the same hit unnoticed.
-On a 35 mV shunt signal, 141 µV is ~4000 ppm against a board targeting ~100 ppm.
+**Does `SHUNT_ADC` have it too?** Unverified, and probably not in the same form.
+It runs the same driver and gets the same restart, but at **G=32 with the PGA
+already enabled** — so the bias-current-through-source-impedance mechanism that
+made this so large does not apply to it, and its source is Kelvin-sensed at near
+zero ohms besides. Only the relay-mux path was measured. Worth checking, not worth
+asserting.
 
 ## Defect 2 — PGA bypass cost 3.3 mV of offset
 
@@ -59,10 +65,14 @@ V_cm = V_diff/2 and the pins land at **V_diff and 0**, not ±V_diff:
 
 | input | divider out | PGA pins | margin to ±2.2 V |
 |---|---|---|---|
-| 80 V (qualified) | 1.569 V | 1.569 / 0 V | 0.63 V |
-| 100 V (engineering) | 1.961 V | 1.961 / 0 V | 0.24 V |
+| 80 V (qualified) | 1.569 V | 1.569 / 0 V | 0.586 V |
+| 100 V (engineering) | 1.961 V | 1.961 / 0 V | 0.194 V |
 
-The PGA fits across the divider's whole rated range, clipping only above ~112 V.
+Those margins are the **tolerated** ones. AVDD comes from an ADP7118 specified
+±1.8%, so worst-case AVDD is 2.455 V and the limit is 2.155 V rather than the
+nominal 2.2 V — putting the guaranteed clip point at **~109.9 V**, not ~112 V. The
+board's 100 V engineering limit still sits inside it.
+
 **That margin is the divider's, not the ADC's** — re-range the divider and this
 must be re-derived.
 
@@ -92,9 +102,25 @@ open?" branch fired — and `take()` refreshes `lastAccepted[]` only from *finit
 samples, so the stale baseline froze and every later sample failed identically.
 
 A guard that cannot return to PASS on healthy input is broken whatever else it
-catches. It now requires **three consecutive readings agreeing within `moveEpsV`**
-before adopting a changed input: a real source settles and repeats, a floating
-contact does not. The fault stays loud but can no longer be permanent.
+catches.
+
+**The obvious fix is also wrong, and review caught it.** Requiring three agreeing
+readings before adopting the new value rests on "a real source repeats, an open
+contact floats". It does not: with the mux open the ADC still sees the divider's
+own termination through the 20 kΩ low leg, so an **open contact reads a perfectly
+stable value**. Three agreeing readings would adopt it, `take()` would store it,
+and every later open reading would then match and publish forever — trading
+permanent silence for a permanent plausible wrong number, which is the worse
+failure and the one the guard exists to prevent.
+
+One channel's readings cannot separate "the input moved" from "the contact opened";
+the information is not there. So the shipped behaviour is the safe one: publish
+NaN, count it, say so loudly, and let a **reboot** clear it — which on this board
+costs nothing, since it reflashes and reboots over BLE. Auto-adoption survives only
+behind `rebaselineOnUnmatched`, default false.
+
+A second latch also survives and is *not* fixed: if A changes to within `moveEpsV`
+of B, `expectMove && !moved` fires and NaN persists indefinitely.
 
 ## VMUX_B's oscillation is not a fault
 
@@ -116,8 +142,22 @@ corrupting timing as well as amplitude.
   been measured above 1.2 V in, so the 80 V and 100 V rows are unconfirmed.
 - **The 165 nA** figure, as noted.
 - **The post-restart discard** — the direct fix for defect 1 — is not implemented.
-  Enabling the PGA removed the *symptom* on this path; `SHUNT_ADC` still has it.
+  Enabling the PGA removed the symptom on this path by removing the *mechanism*
+  (bias current into a 19.6 kΩ source); the restart itself is untouched.
 - **The BLE `download` trigger** is on the board but has never been fired.
+- **`moveEpsV = 1 mV` is wrong for this instrument** and is knowingly left alone.
+  At ~20 mV raw that is 5% — 50,000 ppm. Worse, when the two inputs differ by less
+  than 1 mV the switch-integrity guard **disables itself**, which is exactly the
+  ratio case it is most needed for. With the PGA enabled the noise floor is ~0.9 µV
+  sd, so it can come down two or three orders — but the value is a bench fact about
+  the contacts, not a guess.
+- **The BLE OTA/control surface is unauthenticated.** Any nearby client can write
+  `download` and force the board into the ROM downloader; secure boot is disabled,
+  so an attacker could already push a chosen image. Recoverable (power cycle), but
+  it is a denial-of-service on an open characteristic.
+- **`download` recovery was mis-documented.** "Reset twice" does not work: in the
+  ROM downloader the app never runs, so `setup()`'s disarm never executes. Only a
+  flash or a **power cycle** clears the bit.
 
 ## Reflashing this board
 
