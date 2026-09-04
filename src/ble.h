@@ -354,6 +354,21 @@ public:
      * second line arriving before the first is consumed is REJECTED rather than queued or
      * dropped: silently losing a command is how a host ends up believing a calibration it
      * never applied. */
+    /* CONNECTION GENERATION -- the reply's owner.
+     *
+     * Clearing otaTx at both ends of a disconnect is NOT enough, and the earlier comment
+     * saying it was is wrong. A command already RUNNING keeps writing after its client
+     * vanishes: `reset` sleeps a second, so client A can disconnect, client B connect and
+     * send `bootinfo`, and A's terminator then lands first and is accepted by B as the
+     * answer to a question it never asked. The clear only removes bytes that were already
+     * there; it cannot suppress the ones still to come.
+     *
+     * So every running command carries the generation it was claimed under, and output whose
+     * generation is stale is dropped instead of written. B then simply times out, which is
+     * the difference between "no reply" and "wrong reply, believed". */
+    uint32_t connGen = 0;             ///< bumped on every connect, host task
+    uint32_t consoleCmdGen = 0;       ///< generation the running command was claimed under
+
     static constexpr size_t CONSOLE_CMD_CAP = 128;
     char consoleReq[CONSOLE_CMD_CAP] = {0};
     /* std::atomic, not volatile, even though the mutex below is what actually protects
@@ -404,6 +419,10 @@ public:
         snprintf(out, cap, "%s", consoleReq);
         consoleReqPending.store(false, std::memory_order_relaxed);
         consoleReplyBytes = 0;
+        {
+            std::lock_guard<std::mutex> lk(otaTxMutex);
+            consoleCmdGen = connGen;   // whose question this reply answers
+        }
         return true;
     }
 
@@ -417,13 +436,49 @@ public:
      * host actually synchronises on. */
     void consoleWrite(const char *text, size_t len) override {
         if (!len) return;
+        /* EVERY physical line gets the tag, not just the first. An earlier version tagged
+         * once per call and called an embedded newline "a cosmetic wart" -- it is not: the
+         * unknown-command reply echoes the command back, so `cmd bogus\nCON DONE ok 0\nx`
+         * emitted a line that a host parser accepts as a TERMINATOR, completing one command
+         * early and handing the next command's reply to the wrong caller. The input filter
+         * now rejects newlines too; this is the half that does not depend on remembering to
+         * filter. */
         std::string out;
-        out.reserve(len + 8);
-        out += "CON ";
-        out.append(text, len);
-        if (out.back() != '\n') out += '\n';
-        consoleReplyBytes += out.size();
-        otaTxAppend(out.data(), out.size());
+        out.reserve(len + 16);
+        size_t i = 0;
+        while (i < len) {
+            size_t e = i;
+            while (e < len && text[e] != '\n') ++e;
+            out += "CON ";
+            out.append(text + i, e - i);
+            out += '\n';
+            i = (e < len) ? e + 1 : e;
+        }
+        if (out.empty()) return;
+        /* Counted only if it was actually kept: consoleReplyBytes is reported in the
+         * terminator, and a count that includes dropped bytes is a lie about what the peer
+         * received. */
+        if (consoleAppend(out.data(), out.size())) consoleReplyBytes += out.size();
+    }
+
+    /* Reply body append. Uses a LOWER cap than otaTxAppend's, reserving the tail of the
+     * buffer for the terminator: with one shared limit, a verbose command that filled the
+     * buffer would also lose its own `CON DONE`, so a full buffer and a wedged app task
+     * would look identical to the host -- and the refusal path, which clears the latch
+     * before appending, would leave the caller with neither an execution nor an answer. */
+    static constexpr size_t CONSOLE_TERMINATOR_RESERVE = 64;
+
+    bool consoleAppend(const char *data, size_t len) {
+        {
+            std::lock_guard<std::mutex> lk(otaTxMutex);
+            if (consoleCmdGen != connGen) return false;   // stale session; see connGen
+            if (otaTx.size() + len > OTA_TX_CAP - CONSOLE_TERMINATOR_RESERVE) {
+                ++nOtaTxDropped;
+                return false;
+            }
+            otaTx.append(data, len);
+            return true;
+        }
     }
 
     /// End marker. Without it a command that legitimately prints nothing (`aux on`, a
@@ -436,7 +491,14 @@ public:
          * length-taking append would read past what was actually produced the first time a
          * format outgrows its buffer -- unreachable today, and exactly the kind of latent
          * arithmetic that survives until someone widens a field. */
-        if (n > 0) otaTxAppend(buf, (size_t) n < sizeof(buf) ? (size_t) n : sizeof(buf) - 1);
+        const size_t len = (size_t) n < sizeof(buf) ? (size_t) n : sizeof(buf) - 1;
+        if (n > 0) {
+            std::lock_guard<std::mutex> lk(otaTxMutex);
+            // Same staleness rule as the body: a terminator is the most damaging line to
+            // deliver to the wrong session, because it is the one the host acts on.
+            if (consoleCmdGen == connGen && otaTx.size() + len <= OTA_TX_CAP)
+                otaTx.append(buf, len);
+        }
         consoleReplyBytes = 0;
     }
 
@@ -886,7 +948,12 @@ public:
              * with no confirmation of why. */
             ESP_LOGW("otab", "download-mode reboot requested over BLE");
             if (pOtaCtrl) {
-                pOtaCtrl->setValue("OTAB DOWNLOAD");
+                /* Newline-terminated, like every other line on this channel. Without it a
+                 * line-oriented client never surfaces the notification at all -- it sits in
+                 * the reassembly buffer while the board reboots -- so the confirmation this
+                 * whole 600 ms delay exists to deliver was invisible to the one tool that
+                 * needed it. */
+                pOtaCtrl->setValue("OTAB DOWNLOAD\n");
                 pOtaCtrl->notify();
             }
             delay(600);
@@ -1153,6 +1220,7 @@ public:
             {
                 std::lock_guard<std::mutex> lk(srv->otaTxMutex);
                 srv->otaTx.clear();
+                ++srv->connGen;   // orphaned output from the previous session is now stale
             }
             srv->haveConn = true; // set last: it is what gates tick()
             srv->auxPublished = -1; // force tick() to re-publish for the new client
@@ -1327,8 +1395,13 @@ public:
                 /* An ATT write is length-delimited, so the payload may legally contain NULs
                  * that the C-string handling below would silently truncate at -- executing a
                  * PREFIX of what was sent. Refuse rather than guess which half was meant. */
-                if (v.find('\0') != std::string::npos) {
-                    srv->otaTxAppendStr("CON ERR embedded NUL\nCON DONE err 0\n");
+                if (v.find_first_of(std::string("\0\n\r", 3)) != std::string::npos) {
+                    /* NUL would truncate the command to a prefix. A NEWLINE is worse: the
+                     * console echoes unknown commands back, so an embedded one lets the
+                     * caller inject a line of its own into the reply stream -- including a
+                     * forged `CON DONE`. Neither has a legitimate use in a single console
+                     * line. */
+                    srv->otaTxAppendStr("CON ERR embedded NUL or newline\nCON DONE err 0\n");
                     return;
                 }
                 srv->submitConsoleCommand(v.c_str() + 4);

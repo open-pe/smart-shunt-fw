@@ -76,8 +76,14 @@ Things worth knowing before relying on it:
 
 - **The terminator is the point.** A command that legitimately prints nothing — `aux on`, a
   successful `calibrate` — is otherwise indistinguishable from one that wedged the app task, so
-  `CON DONE` is emitted whatever happens. `ok` means the line was dispatched, not that the command
-  succeeded; the outcome is in the text, because `handleConsoleInput()` returns void.
+  `CON DONE` is emitted on every path that returns. It is **best-effort, not a guarantee**: a
+  handler that blocks forever never reaches it (nothing watchdogs the app task), and `cmd download`
+  restarts before it. Treat a missing terminator as "no answer", never as "no output".
+- **`ok` means the line was dispatched, not that the command succeeded.** `handleConsoleInput()`
+  returns void, so a `calibrate` naming a sampler that does not exist prints its error and is still
+  reported `ok`, and the client exits 0. **Read the text, do not trust the exit status** for
+  anything that matters. Fixing this properly means giving `handleConsoleInput()` a bool return —
+  worth doing, not yet done.
 - **Console errors must go through `UART_LOG`.** The reply reaches the client through a `UART_LOG`
   sink installed for the duration of the command. `esp_log` is deliberately *not* hooked (it would
   splice other tasks' output into the reply), so an error reported with `ESP_LOGW` prints on the
@@ -94,12 +100,24 @@ Things worth knowing before relying on it:
   deferred reply arrives minutes later, to a client that stopped listening.
 - **One command in flight.** A second `cmd` before the first is consumed is refused, not queued:
   silently losing a command is how a host comes to believe in a calibration it never applied.
-- **A latched command is dropped on disconnect, and the tx buffer is cleared at both ends of the
-  gap.** A command already *running* keeps writing into that buffer after the client vanishes, so
-  clearing only on disconnect would hand the next client the tail of someone else's `relaymux` —
-  and with no request id in the protocol, that client would splice it into whatever it was waiting
-  for and believe it. Clearing on connect as well turns "wrong reply, believed" into "no reply,
-  timed out".
+- **A latched command is dropped on disconnect; a running one is fenced off by a connection
+  generation.** Clearing the tx buffer at both ends of the gap is *not* sufficient on its own — it
+  removes only what is already buffered, while a command still executing (`reset` sleeps a second)
+  keeps writing afterwards. Each running command therefore carries the generation it was claimed
+  under, and output from a stale generation is discarded rather than sent. Without that fence a new
+  client can receive the previous client's terminator and, the protocol having no request id,
+  accept it as the answer to its own command.
+- **Embedded newlines and NULs are refused.** The unknown-command reply echoes the command back,
+  so `cmd bogus\nCON DONE ok 0\nx` could otherwise inject a forged terminator into the stream.
+  Every physical reply line is also tagged `CON ` independently, so injection fails even if the
+  input filter is ever loosened.
+- **Buffer saturation drops output, and reserves room for the terminator.** The 4 KB tx buffer is
+  shared with the OTA status stream; console body text is capped 64 bytes below it so `CON DONE`
+  always fits. Dropped body lines are not counted in the terminator's byte total.
+- **The OTA busy-check has a residual window.** `otaBleActive()` only becomes true when the OTA
+  module's app-task tick consumes a latched `begin`, so a `begin` arriving between that tick and
+  the console's execution check is not yet visible: the command runs and its reply interleaves with
+  the `OTAB` stream. The lines stay prefix-distinct, so a parser can still separate them.
 - **The link is unauthenticated**, so anything in radio range that can connect can run any console
   command. This widens an already severe surface rather than creating one: `download` reboots the
   board into the ROM bootloader today, from this characteristic, with no pairing. The fix, if it is

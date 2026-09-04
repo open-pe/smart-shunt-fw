@@ -100,13 +100,18 @@ void UART_LOG(const char *fmt, ...);
  * lock here and none is wanted: a sink installed from another task would race the
  * command that is already writing through it.
  *
- * WHICH MAKES THIS A RULE ABOUT UART_LOG ITSELF, not just about the sink: UART_LOG
- * MAY ONLY BE CALLED FROM THE APP TASK. Every call site obeys that today (the
+ * WHICH MAKES THIS A RULE ABOUT UART_LOG ITSELF, not just about the sink: ONCE THE
+ * TASKS ARE RUNNING, UART_LOG MAY ONLY BE CALLED FROM THE APP TASK. Setup-time calls
+ * are fine and there is one -- EnergyCounter's constructor prints stored calibration
+ * from SamplerRegistry::initAll(), on the Arduino setup task, before any other task
+ * exists and while the sink is null. An earlier version of this comment said "every
+ * call site", which was literally false. Every RUNTIME call site obeys it (the
  * energy-counter and telemetry prints all run inside Telemetry::update(), the same
- * chain that runs the console); the sampling and WiFi tasks use ESP_LOGx. A future
- * UART_LOG from realTimeTask would splice an unrelated line into whichever console
- * reply happens to be open -- and would race the shared static format buffer in the
- * implementation, which has no lock either. Use ESP_LOGx from other tasks.
+ * chain that runs the console); the sampling and WiFi tasks use ESP_LOGx.
+ *
+ * A future UART_LOG from realTimeTask would splice an unrelated line into whichever
+ * console reply happens to be open -- and would race the shared static format buffer
+ * in the implementation, which has no lock either. Use ESP_LOGx from other tasks.
  */
 using ConsoleSink = void (*)(const char *text, size_t len);
 void consoleSetSink(ConsoleSink sink);
