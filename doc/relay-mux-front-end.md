@@ -516,13 +516,35 @@ because it is genuinely not being measured.
 Held, the channel publishes **faster**, not slower: no dwell, no switch, no
 re-discard (`armedForCapture` is deliberately left set, since `genAtSettle` still
 describes the same close), so one mean of `AVG_CONVERSIONS = 20` conversions every
-**1.04 s** (derived: 20 × 52.22 ms; the 2.34 s round trip it is compared against is
-measured). Review caught that the first draft got 19 conversions, not 20: the
+**1.04 s** (predicted as 20 × 52.22 ms; **measured 1.044 s** on 2026-09-04, against
+the 2.34 s round trip). Review caught that the first draft got 19 conversions, not 20: the
 accumulator's `accN == 0` branch took `dev.volts()` immediately and `getSample()`
 runs in the same RT pass as `hasData()`, so each run re-used the conversion the
 previous one ended on. Consecutive held means would have shared a term — correlated
 samples, from an instrument whose consumers average them. `take()` now records that
 generation and the next run waits for a new one.
+
+### Measured, 2026-09-04
+
+First hardware run, on the xiao_nest riser (`7C:4F:AD:1E:9A:71`), driven over BLE with
+the collector stopped. `relaymux hold a` from a settled round-robin:
+
+- The cadence lands where the arithmetic put it: **1.044 s per `VMUX_A` sample**
+  (occasionally 1.104 s, one conversion of jitter), against 2.34 s round-robin. The
+  predicted 1.04 s therefore needs no correction, and whatever produces the AUTO path's
+  ~0.4-conversion dwell residual does not accumulate here.
+- **`VMUX_B` stops entirely** and raises no stall — the opt-out works.
+- Every held point carries `diag = 0x00800000` in InfluxDB and **nothing else**: no
+  other bit rode along, and the pre-hold points in the same series carry no `diag`
+  field at all (a zero `diag` is dropped, not stored). The bit is therefore a clean
+  discriminator for "held" in a query.
+- `relaymux` reports `relaymux HOLD on A: state=settled requested=A settled=A
+  serving=A`, and the fault counters (`no-step 0, never-settled 0`) did not move
+  across the transition.
+
+The value itself was unchanged by the hold — 1.38545 V before and after, well inside
+the µV-scale span — which is the expected result on a channel whose source is static,
+not evidence about drift.
 
 What a hold costs, in descending order of importance:
 
@@ -575,11 +597,10 @@ expect exactly one `no sample for <hold duration>, re-arming sampler` warning.
 
 ## Not verified
 
-- **`relaymux hold` has never been run on hardware.** It compiles on all five relay-mux
-  environments and has been reviewed twice; nothing below it has been observed. In
-  particular the **1.04 s held cadence is derived, not measured**, and the AUTO path's
-  own dwell is documented above as carrying an unexplained ~0.4-conversion residual
-  that a held cadence would presumably share.
+- **What a hold does *not* change has not been measured.** The hold itself now has
+  hardware behind it (see "Measured, 2026-09-04" above), but the claim that the AUTO
+  path is bit-identical to the pre-hold firmware rests on reading the diff, not on
+  comparing two runs of the round-robin.
 - **The dropped-coil-while-held analysis is on paper.** No contact has been opened
   under a hold to confirm that nothing flags it. The claim is that it fires *no*
   diagnostic on this rig (B open, both landing on the same termination); on a rig

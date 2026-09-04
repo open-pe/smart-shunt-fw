@@ -95,6 +95,11 @@ Other facts that cost real debugging time:
 - **The console is reachable over BLE**, not only over the serial port: write `cmd <line>` to the
   OTA control characteristic and read `CON …` lines back, terminated by `CON DONE`.
   `pwr-metering/smart-shunt-cmd.py "relaymux"` does it; stop the collector first, one central only.
+  **It must run on the collector's UB500 via bumble, not on BlueZ.** The rpi's onboard BCM4345
+  hears the vmux board at −31 dBm and still times out in `connect()` every time (then reports the
+  misleading `device 'dev_7C_4F_...' not found` on the retries) — the script's plain-bleak path
+  therefore never works from the rpi. Import `bumble_bleak.shadow` before `bleak` and pass
+  `adapter=AC:A7:F1:83:27:AD`, as root; `rpi.local:~/ssc/ssc-bumble.py` is that wrapper.
   This is the only control path into the xiao_nest riser, whose USB-CDC is dead both ways.
   `doc/ota-over-ble.md` owns the protocol and its traps — chiefly that a console error reported
   with `ESP_LOGW` instead of `UART_LOG` reaches the serial port and leaves the remote caller with
@@ -114,7 +119,8 @@ Other facts that cost real debugging time:
   a dropped coil reads as a plausible voltage with **no diagnostic at all** on this rig. Held
   samples therefore carry `diag` bit `0x00800000` (`DIAG_RELAY_HELD`), OR-ed onto any real fault
   code: that bit is how you tell held data from round-robin data in InfluxDB, where nothing else
-  distinguishes them. Never run on hardware yet. `doc/relay-mux-front-end.md` has the full trade.
+  distinguishes them. Verified on hardware 2026-09-04 (1.044 s cadence, B silent, `diag`
+  exactly `0x800000`). `doc/relay-mux-front-end.md` has the full trade.
 - **Fields are overloaded per channel, and units differ per channel.** `U`/`I`/`P` do not always
   mean voltage/current/power, and there is no single unit convention — check the sampler's FIELD
   MAPPING comment before reading a series.
