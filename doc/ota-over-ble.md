@@ -41,7 +41,7 @@ Both characteristics live on the existing telemetry service
 
 | UUID | Properties | Role |
 |---|---|---|
-| `b0e0d1a4-7f52-4a3e-9c61-2d8f5b3ae741` | write, notify | control in, `OTAB …` status out |
+| `b0e0d1a4-7f52-4a3e-9c61-2d8f5b3ae741` | write, notify | control in, `OTAB …` status out, **and the remote console** |
 | `b0e0d1a5-7f52-4a3e-9c61-2d8f5b3ae741` | write-no-response | firmware bytes |
 
 Commands are bare lines — `begin <size> <sha256hex>`, `end`, `abort` — and the protocol is the one
@@ -51,6 +51,49 @@ documented in the module README, including the credit window and the requirement
 **After any change to this GATT layout, macOS will keep serving the cached attribute table** and
 clients fail to find characteristics. Bust it with `blueutil -p 0 && blueutil -p 1`, or forget the
 device in System Settings. This bites `smart-shunt-ble-client.py` too, not just the OTA tool.
+
+## The remote console rides the same characteristic
+
+`b0e0d1a4` carries three tenants, not one: the OTA verbs, `download`, and console commands. That
+is a deliberate consequence of the cache warning above — every additional characteristic is
+another macOS GATT-cache bust for every client — and `download` set the precedent before the
+console existed.
+
+| direction | line | meaning |
+|---|---|---|
+| host → dev | `cmd <line>` | one console line, `<128` bytes |
+| dev → host | `CON <text>` | one reply line, as `UART_LOG` produced it |
+| dev → host | `CON DONE ok\|err <bytes>` | terminator, always sent |
+| dev → host | `CON ERR <reason>` | refused: too long, busy, or an OTA is in flight |
+
+```sh
+ssh rpi.local 'sudo systemctl stop smart-shunt-ble'          # one central only
+./smart-shunt-cmd.py "relaymux" "relaymux a"                 # in pwr-metering
+ssh rpi.local 'sudo systemctl start smart-shunt-ble'
+```
+
+Things worth knowing before relying on it:
+
+- **The terminator is the point.** A command that legitimately prints nothing — `aux on`, a
+  successful `calibrate` — is otherwise indistinguishable from one that wedged the app task, so
+  `CON DONE` is emitted whatever happens. `ok` means the line was dispatched, not that the command
+  succeeded; the outcome is in the text, because `handleConsoleInput()` returns void.
+- **Console errors must go through `UART_LOG`.** The reply reaches the client through a `UART_LOG`
+  sink installed for the duration of the command. `esp_log` is deliberately *not* hooked (it would
+  splice other tasks' output into the reply), so an error reported with `ESP_LOGW` prints on the
+  serial port and leaves the remote caller with an empty reply — which reads exactly like success.
+  Six such errors were converted when this shipped.
+- **`reset` and `download` reboot before the reply can leave.** Expect no terminator. Prefer the
+  bare `download` verb, which notifies `OTAB DOWNLOAD` and waits 600 ms for it to reach the air.
+- **One command in flight.** A second `cmd` before the first is consumed is refused, not queued:
+  silently losing a command is how a host comes to believe in a calibration it never applied.
+- **A latched command is dropped on disconnect.** Its reply would have nowhere to go, and a
+  `relaymux` executing minutes late — with the next client receiving the tail — is not a surprise a
+  bench instrument may produce.
+- **The link is unauthenticated**, so anything in radio range that can connect can run any console
+  command. This widens an already severe surface rather than creating one: `download` reboots the
+  board into the ROM bootloader today, from this characteristic, with no pairing. The fix, if it is
+  ever needed, is link encryption — an allowlist that still contains `download` protects nothing.
 
 ## What the device does during a push
 

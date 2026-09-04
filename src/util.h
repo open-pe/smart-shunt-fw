@@ -79,6 +79,40 @@ void scan_i2c();
 
 void UART_LOG(const char *fmt, ...);
 
+/* CONSOLE OUTPUT TEE.
+ *
+ * UART_LOG is what every console command answers with, and until now it went to
+ * the serial port and nowhere else. A command arriving over any other transport
+ * would therefore execute and reply into a port nobody is reading -- and silence
+ * is indistinguishable from success, which is the worst possible failure mode for
+ * a remote `calibrate`.
+ *
+ * So a transport that wants the reply installs a sink for the duration of ONE
+ * command and takes it down again. The serial print always happens as well: the
+ * UART log is the only view when the other transport is the thing misbehaving.
+ *
+ * NOT AN esp_log HOOK, deliberately. Mirroring esp_log_set_vprintf would also
+ * capture every other task's log lines into whichever reply happened to be open,
+ * which is why the console path uses UART_LOG for its responses (including its
+ * error responses -- see the note in console.h).
+ *
+ * Set and cleared on ONE task, the same task that runs the command. There is no
+ * lock here and none is wanted: a sink installed from another task would race the
+ * command that is already writing through it.
+ */
+using ConsoleSink = void (*)(const char *text, size_t len);
+void consoleSetSink(ConsoleSink sink);
+ConsoleSink consoleGetSink();
+
+/* Push whatever the sink has buffered, now, from inside a long-running command.
+ * Installed by a transport whose output is queued and drained from its own loop
+ * (BLE), so a command that blocks for seconds does not hold its entire reply
+ * until it returns. Null for synchronous transports; consoleFlush() is then a
+ * no-op, so a command may call it unconditionally. Lifted from
+ * fugu-mppt-firmware's consoleFlushHook, which exists for the same reason. */
+extern void (*g_consoleFlushHook)();
+void consoleFlush();
+
 unsigned long long getTimeStamp(struct timeval *tv, int secFracDigits);
 
 class TaskNotification {

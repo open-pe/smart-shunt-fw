@@ -92,6 +92,13 @@ Other facts that cost real debugging time:
   what it runs.
 - **Only one BLE central may hold a link**, which is why aux control and OTA go *through* the
   collector rather than connecting alongside it. Do not attach a second scanner casually.
+- **The console is reachable over BLE**, not only over the serial port: write `cmd <line>` to the
+  OTA control characteristic and read `CON …` lines back, terminated by `CON DONE`.
+  `pwr-metering/smart-shunt-cmd.py "relaymux"` does it; stop the collector first, one central only.
+  This is the only control path into the xiao_nest riser, whose USB-CDC is dead both ways.
+  `doc/ota-over-ble.md` owns the protocol and its traps — chiefly that a console error reported
+  with `ESP_LOGW` instead of `UART_LOG` reaches the serial port and leaves the remote caller with
+  an empty reply, which reads exactly like success.
 - **Console `calibrate` takes the PREFIXED name.** `samplers.add("DCCT", …)` plus board prefix
   `ftr` means the energy counter is `ftr_DCCT`, and `registry.findByName()` matches that
   exactly — `calibrate DCCT I …` silently finds nothing. Use `calibrate ftr_DCCT I 0.33333333`.

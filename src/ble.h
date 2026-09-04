@@ -324,6 +324,42 @@ public:
      * BOOT+RESET at the bench. */
     volatile bool dlReqPending = false;
     volatile bool auxReqValue = false;
+
+    /* ---- REMOTE CONSOLE over the OTA control characteristic ----------------------------
+     *
+     * WHY THIS CHARACTERISTIC AND NOT A NEW ONE. Adding a fifth characteristic changes the
+     * GATT table, and doc/ota-over-ble.md records what that costs: macOS then serves a
+     * stale cached attribute table to every client until it is manually busted. The
+     * `download` verb below already rides this channel for exactly that reason, so a
+     * console is the second tenant, not the first.
+     *
+     * WHY IT IS WORTH HAVING. BLE is the ONLY control channel that reaches the xiao_nest
+     * riser (its USB-CDC is dead in both directions), and it is the only one that reaches
+     * ANY board in service without walking to the bench and unplugging the collector. Until
+     * now that meant `relaymux`, `calibrate` and `bootinfo` were unreachable on a running
+     * rig.
+     *
+     * SECURITY, PLAINLY: this link is unauthenticated, so anything in radio range that can
+     * connect can run any console command -- `calibrate` rewrites NVS, `wifi on` arms the
+     * dormant UDP writer. That is a widening of an already severe surface rather than a new
+     * one: `download` reboots the board into the ROM bootloader today, from the same
+     * characteristic, with the same absence of pairing. If that ever stops being acceptable
+     * the fix is link encryption, not an allowlist -- an allowlist that still contains
+     * `download` protects nothing.
+     *
+     * ONE COMMAND IN FLIGHT. The line is latched here on the NimBLE host task and executed
+     * by the app task, the same split the aux switch and `download` use, because
+     * handleConsoleInput() writes NVS and starts WiFi and may not run on the host task. A
+     * second line arriving before the first is consumed is REJECTED rather than queued or
+     * dropped: silently losing a command is how a host ends up believing a calibration it
+     * never applied. */
+    static constexpr size_t CONSOLE_CMD_CAP = 128;
+    char consoleReq[CONSOLE_CMD_CAP] = {0};
+    volatile bool consoleReqPending = false;
+    std::mutex consoleReqMutex;
+    /// Bytes of reply emitted for the command currently running, so a command that prints
+    /// nothing can still be answered with something rather than a bare terminator.
+    size_t consoleReplyBytes = 0;
     /// Last value published to the characteristic, so tick() only notifies on an actual change.
     int8_t auxPublished = -1;
 
@@ -335,18 +371,113 @@ public:
         auxPublished = on ? 1 : 0;
     }
 
-    void otaStatusAppend(const char *line) {
+    /* ---- BleTransport remote-console hooks (app task) ---------------------------------- */
+
+    /// Claim a latched command line. App task only: the caller runs it through
+    /// handleConsoleInput(), which is not safe on the NimBLE host task.
+    bool takeConsoleCommand(char *out, size_t cap) override {
+        if (!consoleReqPending) return false;   // cheap unlocked pre-check; the lock confirms
+        std::lock_guard<std::mutex> lk(consoleReqMutex);
+        if (!consoleReqPending) return false;
+        snprintf(out, cap, "%s", consoleReq);
+        consoleReqPending = false;
+        consoleReplyBytes = 0;
+        return true;
+    }
+
+    /* One reply line, as UART_LOG produces it (newline included). Tagged so a host parsing
+     * this stream can tell console output from the OTAB protocol lines that share the
+     * channel -- and so a line that happens to begin with "OTAB" cannot be mistaken for one.
+     *
+     * The tag goes on once per call rather than per embedded newline: UART_LOG emits exactly
+     * one line per call, and a format string that smuggles in a newline of its own is a
+     * cosmetic wart in the reply, not a framing failure -- the terminator below is what the
+     * host actually synchronises on. */
+    void consoleWrite(const char *text, size_t len) override {
+        if (!len) return;
+        std::string out;
+        out.reserve(len + 8);
+        out += "CON ";
+        out.append(text, len);
+        if (out.back() != '\n') out += '\n';
+        consoleReplyBytes += out.size();
+        otaTxAppend(out.data(), out.size());
+    }
+
+    /// End marker. Without it a command that legitimately prints nothing (`aux on`, a
+    /// successful `calibrate`) looks exactly like one that wedged the app task.
+    void consoleReplyDone(bool ok) override {
+        char buf[48];
+        const int n = snprintf(buf, sizeof(buf), "CON DONE %s %u\n",
+                               ok ? "ok" : "err", (unsigned) consoleReplyBytes);
+        if (n > 0) otaTxAppend(buf, (size_t) n);
+        consoleReplyBytes = 0;
+    }
+
+    /* Latch one console line. NimBLE HOST TASK: this may parse and copy, and nothing else.
+     * Every rejection is announced on the same channel the reply would have used, because a
+     * host that gets no answer cannot tell "refused" from "the link ate it". */
+    void submitConsoleCommand(const char *line) {
+        while (*line == ' ') ++line;
+        const size_t n = strlen(line);
+        if (!n) {
+            otaTxAppendStr("CON DONE err 0\n");
+            return;
+        }
+        if (n >= CONSOLE_CMD_CAP) {
+            // Truncating would execute a DIFFERENT command than the one that was sent.
+            char buf[64];
+            const int k = snprintf(buf, sizeof(buf), "CON ERR too long (%u > %u)\nCON DONE err 0\n",
+                                   (unsigned) n, (unsigned) (CONSOLE_CMD_CAP - 1));
+            if (k > 0) otaTxAppend(buf, (size_t) k);
+            return;
+        }
+        /* An OTA push owns the app task's attention and the whole tx buffer; a console
+         * command landing mid-transfer would interleave its reply with the OTAB status
+         * stream and steal app-task time from the flash writes. */
+        if (otaBleActive()) {
+            otaTxAppendStr("CON ERR busy (ota in progress)\nCON DONE err 0\n");
+            return;
+        }
+        std::lock_guard<std::mutex> lk(consoleReqMutex);
+        if (consoleReqPending) {
+            otaTxAppendStr("CON ERR busy (command in flight)\nCON DONE err 0\n");
+            return;
+        }
+        memcpy(consoleReq, line, n);
+        consoleReq[n] = 0;
+        consoleReqPending = true;   // published last: the app task gates on it
+    }
+
+    /// consoleFlush() target: push what the running command has produced so far. App task
+    /// only -- it is the same drain tick() calls, and NimBLE notify is not reentrant.
+    static void consoleFlushHook() { if (s_self) s_self->drainOtaTx(); }
+
+    void otaTxAppendStr(const char *s) { otaTxAppend(s, strlen(s)); }
+
+    void otaTxAppend(const char *data, size_t len) {
         std::lock_guard<std::mutex> lk(otaTxMutex);
-        if (otaTx.size() + strlen(line) + 1 > OTA_TX_CAP) {
+        if (otaTx.size() + len > OTA_TX_CAP) {
             // Never silently: a dropped status line is a host that waits out a timeout instead of
             // learning what went wrong.
             ++nOtaTxDropped;
-            ESP_LOGW("ble", "OTA status buffer full, dropped a line (%lu total)",
-                     (unsigned long) nOtaTxDropped);
+            ESP_LOGW("ble", "BLE control-channel tx buffer full, dropped %u bytes (%lu total)",
+                     (unsigned) len, (unsigned long) nOtaTxDropped);
             return;
         }
-        otaTx += line;
-        otaTx += '\n';
+        otaTx.append(data, len);
+    }
+
+    void otaStatusAppend(const char *line) {
+        const size_t n = strlen(line);
+        /* One append, not two: with the cap checked per call a line could otherwise
+         * be admitted and its newline refused, splicing two protocol lines into one
+         * on the host's parser. */
+        std::string out;
+        out.reserve(n + 1);
+        out.append(line, n);
+        out += '\n';
+        otaTxAppend(out.data(), out.size());
     }
 
     static void otaStatusHook(OtaBleLevel level, const char *line) {
@@ -462,6 +593,15 @@ public:
         hooks.quiesce = &BleSrv::otaQuiesceHook;
         hooks.restart = &BleSrv::otaRestartHook;
         otaBleInit(hooks);
+        /* Reserve once, while the heap is still roomy. otaTxAppend() caps the SIZE, but
+         * without this the capacity still grows by doubling, and fugu-mppt-firmware took a
+         * bad_alloc on exactly that path (a log backlog needing a ~16 KB doubling on a
+         * ~27 KB-free heap). With the reserve in place the append path never reallocates. */
+        otaTx.reserve(OTA_TX_CAP + 64);
+        /* Long commands can push their output mid-run instead of holding it until they
+         * return. Nothing else installs this, and it is a no-op until a console command
+         * calls consoleFlush(). */
+        g_consoleFlushHook = &BleSrv::consoleFlushHook;
         // BLEAdvertising *pAdvertising = pServer->getAdvertising();  // this still is working for backward compatibility
         BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
         pAdvertising->addServiceUUID(SERVICE_UUID);
@@ -630,6 +770,15 @@ public:
         {
             std::lock_guard<std::mutex> lk(otaTxMutex);
             otaTx.clear();
+        }
+        /* A console command latched by a client that has since vanished is dropped, not run.
+         * Its reply has nowhere to go, and `calibrate` or `relaymux` executing minutes after
+         * the operator lost the link -- with the next client receiving the tail of it -- is
+         * exactly the surprise a bench instrument must not produce. A command already
+         * RUNNING on the app task is not affected; only an unclaimed one is discarded. */
+        {
+            std::lock_guard<std::mutex> lk(consoleReqMutex);
+            consoleReqPending = false;
         }
     }
 
@@ -1129,6 +1278,15 @@ public:
              * reboot so the confirming notification can actually go out first. */
             if (v == "download") {
                 srv->dlReqPending = true;
+                return;
+            }
+            /* Console command. EXPLICITLY PREFIXED, never "try OTA and fall back": with a
+             * fallback a mistyped `bagin ...` would stop being a clean protocol Rejected and
+             * become a mystery console command, and the OTA module's own synchronous
+             * rejection -- the thing that lets a host fail a push instead of hanging -- would
+             * only ever fire for lines the console also refused. */
+            if (v.rfind("cmd ", 0) == 0) {
+                srv->submitConsoleCommand(v.c_str() + 4);
                 return;
             }
             // A rejection is announced by the module itself, on the same OTAB status channel as

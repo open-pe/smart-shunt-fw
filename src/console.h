@@ -32,6 +32,16 @@ extern bool telemetrySetIntervalUs(unsigned long us);
 extern unsigned long telemetryMinIntervalUs();
 #endif
 
+/* EVERY CONSOLE RESPONSE GOES THROUGH UART_LOG, INCLUDING THE ERRORS.
+ *
+ * That is not a style preference. A command can now arrive over BLE (see the remote-console
+ * section in ble.h), and the reply reaches that caller through the UART_LOG sink installed
+ * for the duration of the command -- not through esp_log, which is deliberately not hooked
+ * because it would splice every other task's output into the reply.
+ *
+ * So an error reported with ESP_LOGW prints on the serial port and leaves a remote caller
+ * with an empty reply, which reads exactly like success. Six of them were converted for this
+ * reason; do not add a seventh. */
 inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, BleTransport &ble) {
     while (1) {
         String inp(buf);
@@ -42,13 +52,17 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             ESP_LOGW("main", "Reset in 1s!");
             delay(1000);
             registry.resetAll();
+            /* The counters are zeroed in place -- nothing reboots -- so this reply does
+             * reach a remote caller, unlike the `download` case help warns about. */
+            UART_LOG("energy counters zeroed");
         } else if (inp.startsWith("calibrate ")) {
             std::string samplerName = inp.substring(10, inp.indexOf(' ', 10)).c_str();
             size_t i = 10 + samplerName.size() + 1;
 
             EnergyCounter *ec = registry.findByName(samplerName);
             if (!ec) {
-                ESP_LOGW("main", "Sampler with name %s not found", samplerName.c_str());
+                UART_LOG("calibrate: no sampler named '%s' (names carry the board prefix)",
+                         samplerName.c_str());
                 break;
             }
 
@@ -59,13 +73,13 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             if (multiply)++i;
             auto factor = inp.substring(i).toFloat();
             if (!checkCalibrationFactorBounds(factor)) {
-                ESP_LOGW("main", "Calibration factor %.9f out of bounds, rejected", factor);
+                UART_LOG("calibrate: factor %.9f out of bounds, rejected", factor);
                 break;
             }
 
 #if !APPLY_U_GAIN_CAL
             if (dim == "U") {
-                ESP_LOGW("main", "U gain calibration is disabled (APPLY_U_GAIN_CAL=0)");
+                UART_LOG("calibrate: U gain calibration is disabled (APPLY_U_GAIN_CAL=0)");
                 break;
             }
 #endif
@@ -77,7 +91,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             } else if (dim == "I") {
                 ec->setCalibrationFactors(NAN, factor, multiply);
             } else {
-                ESP_LOGW("main", "unknown dim %s", dim.c_str());
+                UART_LOG("calibrate: unknown dimension '%s', expected U or I", dim.c_str());
             }
         } else if (inp.startsWith("ina22x-resistor-range")) {
             int devIdx = 0;
@@ -98,7 +112,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 UART_LOG("INA228 mux setResistorRange(%.3fmOhm, %.3fA)", res * 1e3f, range);
                 ina228_mux_instance->setResistorRange(res, range);
             } else {
-                ESP_LOGW("main", "No INA22x instance!");
+                UART_LOG("ina22x-resistor-range: no INA22x instance on this board");
             }
         } else if (inp == "aux" || inp.startsWith("aux ")) {
             String arg = inp.substring(3);
@@ -108,7 +122,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             } else {
                 bool want;
                 if (!auxParseCommand((const uint8_t *) arg.c_str(), arg.length(), want)) {
-                    ESP_LOGW("aux", "expected: aux [on|off|toggle]");
+                    UART_LOG("aux: expected on, off or toggle");
                 } else {
                     auxSet(want);
                     UART_LOG("aux = %s", auxGet() ? "ON" : "off");
@@ -428,21 +442,40 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
         }
 #endif
         else if (inp == "help") {
-            UART_LOG("ina22x-resistor-range <resistance> <max expected current>");
+            /* THE LIST IS THE INTERFACE. This is now the only discovery mechanism a remote
+             * caller has -- there is no tab completion over BLE and no man page -- so a
+             * command missing from here is a command nobody else knows exists. Two of them
+             * were (`relaymux settle`, the whole ble group) before the remote console made
+             * that cost visible. Keep it in the order the commands are handled above, and
+             * add the line in the same commit as the command. */
+            UART_LOG("aux [on|off|toggle]           get/set the load switch (persisted)");
+            UART_LOG("reset                         zero the energy counters");
             UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
-            UART_LOG("aux [on|off|toggle]");
-            UART_LOG("reset   zero the energy counters");
+            UART_LOG("                              PREFIXED sampler name, e.g. ftr_DCCT");
+            UART_LOG("ina22x-resistor-range[2|3] <ohm> <max A>");
+            UART_LOG("board-prefix [<name>]         series-name prefix (NVS, needs reset)");
 #ifndef TARGET_STM32H5
-            UART_LOG("bootinfo              running slot + OTA verify state");
-            UART_LOG("wifi on|off           enable/disable WiFi + InfluxDB telemetry");
-            UART_LOG("cpufreq [80|160|240]  get/set CPU clock + die temp (not persisted)");
-            UART_LOG("download              reboot into ROM download mode (stops everything)");
+            UART_LOG("wifi on|off                   WiFi + the firmware's own InfluxDB writer");
+            UART_LOG("bletx [dBm]                   radio power, -27..20 (rounds to a ladder)");
+            UART_LOG("blerate [ms]                  telemetry interval");
+            UART_LOG("bleconn <min> <max> <latency> ask for link params, 1.25ms units");
+            UART_LOG("cpufreq [80|160|240]          CPU clock + die temp (not persisted)");
+            UART_LOG("bootinfo                      running slot, OTA verify state, uptime");
+            UART_LOG("download                      reboot into ROM download mode");
 #ifdef WITH_RELAY_MUX
-            UART_LOG("relaymux [a|b|off|auto] park the relay mux for bench work, or resume");
+            UART_LOG("relaymux                      mux state, settle stats, fault counts");
+            UART_LOG("relaymux a|b|off              park a channel (STOPS PUBLISHING)");
+            UART_LOG("relaymux auto                 resume the A/B round-robin");
+            UART_LOG("relaymux settle [ms]          settle time (not persisted)");
 #endif
-#endif
-            UART_LOG("board-prefix [<name>] get/set this board's series-name prefix (NVS, needs reset)");
-#ifndef TARGET_STM32H5
+            /* Only true over BLE, and cheap to print unconditionally: on the serial console
+             * it is a harmless note about the other transport, while a remote caller who
+             * cannot see this line has no way to learn the framing its client depends on. */
+            UART_LOG("--");
+            UART_LOG("over BLE: write 'cmd <line>' to the OTA control characteristic;");
+            UART_LOG("  replies come back as 'CON <text>' and end with 'CON DONE ok|err <n>'.");
+            UART_LOG("  'reset' and 'download' reboot before the reply can be sent -- expect");
+            UART_LOG("  no terminator, and use the bare 'download' verb, which notifies first.");
 #endif
         } else {
             UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());

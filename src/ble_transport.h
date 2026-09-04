@@ -19,6 +19,31 @@ public:
         (void) itvlMin, (void) itvlMax, (void) latency;
     }
 
+    /* REMOTE CONSOLE.
+     *
+     * A transport that can carry console commands latches an inbound line on
+     * whatever task received it and hands it over here, on the app task, where
+     * handleConsoleInput() may safely touch NVS, WiFi and the relay state machine.
+     * Default: no such channel, so nothing is ever taken and the caller's loop
+     * costs one virtual call per pass.
+     *
+     * consoleWrite() receives the reply as it is produced (installed as the
+     * UART_LOG sink for the duration of the command), and consoleReplyDone()
+     * closes the exchange -- the host needs an explicit end marker, because a
+     * command that legitimately prints nothing is otherwise indistinguishable
+     * from one that hung.
+     */
+    virtual bool takeConsoleCommand(char *out, size_t cap) {
+        (void) out, (void) cap;
+        return false;
+    }
+
+    virtual void consoleWrite(const char *text, size_t len) { (void) text, (void) len; }
+
+    /// `ok` is "the line was dispatched", not "the command succeeded" --
+    /// handleConsoleInput() returns void and reports its own outcome in the text.
+    virtual void consoleReplyDone(bool ok) { (void) ok; }
+
     /// Negotiated link parameters, for status reporting. Not pure: a transport with no
     /// real link (the STM32 stub, the UART bridge) has nothing to report and says so by
     /// returning false, rather than every such transport having to stub it out.

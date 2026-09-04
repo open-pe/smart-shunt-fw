@@ -390,7 +390,37 @@ public:
         wireSampleBuf.clear();
     }
 
+    /* Remote-console reply sink. A file-static pointer rather than a capture, because
+     * consoleSetSink() takes a plain function pointer -- see the contract in util.h, and the
+     * reason it is single-task state there. Set for the duration of one command. */
+    inline static BleTransport *consoleReplyTo = nullptr;
+
+    static void consoleSinkToBle(const char *text, size_t len) {
+        if (consoleReplyTo) consoleReplyTo->consoleWrite(text, len);
+    }
+
+    /* Run at most ONE remote command per pass. The command may block -- `reset` sleeps a
+     * second, `calibrate` writes NVS -- and this is the same app task that drains telemetry,
+     * so draining a queue of them here would stall the link the reply has to travel over. */
+    void processRemoteConsole() {
+        char cmd[128];
+        if (!ble.takeConsoleCommand(cmd, sizeof(cmd))) return;
+        /* Logged unconditionally: a command that arrives over the air and changes NVS or
+         * moves a relay must leave a trace in the place a bench operator actually looks. */
+        ESP_LOGW("ble", "remote console: %s", cmd);
+        consoleReplyTo = &ble;
+        consoleSetSink(&consoleSinkToBle);
+        handleConsoleInput(String(cmd), registry, ble);
+        /* Sink down BEFORE the terminator, so the terminator cannot be counted as reply
+         * output and a UART_LOG from anywhere else cannot land after it. */
+        consoleSetSink(nullptr);
+        consoleReplyTo = nullptr;
+        ble.consoleReplyDone(true);
+        noteWakeEvent();
+    }
+
     void processConsole() override {
+        processRemoteConsole();
         const uart_port_t uart_num = UART_NUM_0;
         static char buf[128];
         static int buf_pos = 0;

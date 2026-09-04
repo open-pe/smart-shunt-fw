@@ -7,6 +7,17 @@
 #include "adc/sampling.h"
 #include "settings.h"
 
+/* Console output tee. One sink, installed by a transport for the duration of one
+ * command and taken down again -- see the contract in util.h. Both UART_LOG
+ * implementations below feed it, so a console reply reaches the caller whichever
+ * target this is built for. */
+static ConsoleSink s_consoleSink = nullptr;
+void (*g_consoleFlushHook)() = nullptr;
+
+void consoleSetSink(ConsoleSink sink) { s_consoleSink = sink; }
+ConsoleSink consoleGetSink() { return s_consoleSink; }
+void consoleFlush() { if (g_consoleFlushHook) g_consoleFlushHook(); }
+
 #ifdef TARGET_STM32H5
 #include "esp_compat.h"
 
@@ -68,6 +79,7 @@ void UART_LOG(const char *fmt, ...) {
     auto l = strlen(UART_LOG_buf);
     UART_LOG_buf[l] = '\n';
     UART_LOG_buf[++l] = '\0';
+    if (s_consoleSink) s_consoleSink(UART_LOG_buf, l);
     Serial.print(UART_LOG_buf);
 }
 
@@ -303,6 +315,7 @@ void UART_LOG(const char *fmt, ...) {
     auto l = strlen(UART_LOG_buf);
     UART_LOG_buf[l] = '\n';
     UART_LOG_buf[++l] = '\0';
+    if (s_consoleSink) s_consoleSink(UART_LOG_buf, l);
     printf("%s", UART_LOG_buf);
 }
 
