@@ -474,8 +474,8 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("--");
             UART_LOG("over BLE: write 'cmd <line>' to the OTA control characteristic;");
             UART_LOG("  replies come back as 'CON <text>' and end with 'CON DONE ok|err <n>'.");
-            UART_LOG("  'reset' and 'download' reboot before the reply can be sent -- expect");
-            UART_LOG("  no terminator, and use the bare 'download' verb, which notifies first.");
+            UART_LOG("  'download' reboots before the reply can be sent, so it has no");
+            UART_LOG("  terminator -- send the bare 'download' verb, which notifies first.");
 #endif
         } else {
             UART_LOG("Unknown command '%s'. enter 'help' for help", inp.c_str());

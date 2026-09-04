@@ -26,6 +26,7 @@ NimBLECharacteristicCallbacks::onStatus
 
 #include <esp_log.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 
@@ -355,7 +356,13 @@ public:
      * never applied. */
     static constexpr size_t CONSOLE_CMD_CAP = 128;
     char consoleReq[CONSOLE_CMD_CAP] = {0};
-    volatile bool consoleReqPending = false;
+    /* std::atomic, not volatile, even though the mutex below is what actually protects
+     * consoleReq[]. relay_mux.h:296 states the house rule -- volatile orders volatile
+     * accesses within one thread and carries no release/acquire edge -- and it was learned
+     * from a two-field publication bug on exactly this shape. The unlocked read here is only
+     * a "bother taking the lock?" hint and would survive either way, but a volatile flag
+     * read across tasks is not a pattern this codebase wants a future reader to copy. */
+    std::atomic<bool> consoleReqPending{false};
     std::mutex consoleReqMutex;
     /// Bytes of reply emitted for the command currently running, so a command that prints
     /// nothing can still be answered with something rather than a bare terminator.
@@ -376,11 +383,26 @@ public:
     /// Claim a latched command line. App task only: the caller runs it through
     /// handleConsoleInput(), which is not safe on the NimBLE host task.
     bool takeConsoleCommand(char *out, size_t cap) override {
-        if (!consoleReqPending) return false;   // cheap unlocked pre-check; the lock confirms
+        // Cheap unlocked hint; the locked recheck below is what decides.
+        if (!consoleReqPending.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lk(consoleReqMutex);
-        if (!consoleReqPending) return false;
+        if (!consoleReqPending.load(std::memory_order_relaxed)) return false;
+        /* RE-CHECKED HERE, not just at submit. submitConsoleCommand() tests otaBleActive() on
+         * the host task; the command runs an app-task pass later, and a `begin` arriving in
+         * that window is processed by the same write callback and is NOT blocked by a pending
+         * console command. Without this recheck the reply lines interleave with the OTAB
+         * status stream -- the exact thing the submit-time gate exists to prevent.
+         *
+         * REFUSED, not deferred: deferring holds the latch for the minutes an image takes,
+         * by which time the client has long since timed out and the answer it finally gets
+         * belongs to a question it stopped asking. An answer now is worth more. */
+        if (otaBleActive()) {
+            consoleReqPending.store(false, std::memory_order_relaxed);
+            otaTxAppendStr("CON ERR busy (ota started before the command ran)\nCON DONE err 0\n");
+            return false;
+        }
         snprintf(out, cap, "%s", consoleReq);
-        consoleReqPending = false;
+        consoleReqPending.store(false, std::memory_order_relaxed);
         consoleReplyBytes = 0;
         return true;
     }
@@ -410,7 +432,11 @@ public:
         char buf[48];
         const int n = snprintf(buf, sizeof(buf), "CON DONE %s %u\n",
                                ok ? "ok" : "err", (unsigned) consoleReplyBytes);
-        if (n > 0) otaTxAppend(buf, (size_t) n);
+        /* snprintf returns what it WOULD have written. Handing that straight to a
+         * length-taking append would read past what was actually produced the first time a
+         * format outgrows its buffer -- unreachable today, and exactly the kind of latent
+         * arithmetic that survives until someone widens a field. */
+        if (n > 0) otaTxAppend(buf, (size_t) n < sizeof(buf) ? (size_t) n : sizeof(buf) - 1);
         consoleReplyBytes = 0;
     }
 
@@ -429,7 +455,7 @@ public:
             char buf[64];
             const int k = snprintf(buf, sizeof(buf), "CON ERR too long (%u > %u)\nCON DONE err 0\n",
                                    (unsigned) n, (unsigned) (CONSOLE_CMD_CAP - 1));
-            if (k > 0) otaTxAppend(buf, (size_t) k);
+            if (k > 0) otaTxAppend(buf, (size_t) k < sizeof(buf) ? (size_t) k : sizeof(buf) - 1);
             return;
         }
         /* An OTA push owns the app task's attention and the whole tx buffer; a console
@@ -440,13 +466,14 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lk(consoleReqMutex);
-        if (consoleReqPending) {
+        if (consoleReqPending.load(std::memory_order_relaxed)) {
             otaTxAppendStr("CON ERR busy (command in flight)\nCON DONE err 0\n");
             return;
         }
         memcpy(consoleReq, line, n);
         consoleReq[n] = 0;
-        consoleReqPending = true;   // published last: the app task gates on it
+        // Release: publishes the copy above to the app task's acquire load.
+        consoleReqPending.store(true, std::memory_order_release);
     }
 
     /// consoleFlush() target: push what the running command has produced so far. App task
@@ -778,7 +805,7 @@ public:
          * RUNNING on the app task is not affected; only an unclaimed one is discarded. */
         {
             std::lock_guard<std::mutex> lk(consoleReqMutex);
-            consoleReqPending = false;
+            consoleReqPending.store(false, std::memory_order_relaxed);
         }
     }
 
@@ -1116,6 +1143,17 @@ public:
              */
             // Accept whatever the central negotiated; tick() requests nothing in steady state.
             srv->connHandle = connInfo.getConnHandle();
+            /* onDisconnected() clears otaTx, but a console command already RUNNING on the app
+             * task keeps writing into it afterwards -- so the buffer can be non-empty again by
+             * the time the next client arrives, and it would be handed the tail of somebody
+             * else's `relaymux`. The protocol carries no request id, so the client cannot
+             * detect that; it would splice the stale lines into whatever it is waiting for and
+             * believe them. Clearing at BOTH ends of the gap is what makes "wrong reply,
+             * believed" into "no reply, timed out". */
+            {
+                std::lock_guard<std::mutex> lk(srv->otaTxMutex);
+                srv->otaTx.clear();
+            }
             srv->haveConn = true; // set last: it is what gates tick()
             srv->auxPublished = -1; // force tick() to re-publish for the new client
         }
@@ -1286,6 +1324,13 @@ public:
              * rejection -- the thing that lets a host fail a push instead of hanging -- would
              * only ever fire for lines the console also refused. */
             if (v.rfind("cmd ", 0) == 0) {
+                /* An ATT write is length-delimited, so the payload may legally contain NULs
+                 * that the C-string handling below would silently truncate at -- executing a
+                 * PREFIX of what was sent. Refuse rather than guess which half was meant. */
+                if (v.find('\0') != std::string::npos) {
+                    srv->otaTxAppendStr("CON ERR embedded NUL\nCON DONE err 0\n");
+                    return;
+                }
                 srv->submitConsoleCommand(v.c_str() + 4);
                 return;
             }

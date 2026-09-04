@@ -83,13 +83,23 @@ Things worth knowing before relying on it:
   splice other tasks' output into the reply), so an error reported with `ESP_LOGW` prints on the
   serial port and leaves the remote caller with an empty reply — which reads exactly like success.
   Six such errors were converted when this shipped.
-- **`reset` and `download` reboot before the reply can leave.** Expect no terminator. Prefer the
-  bare `download` verb, which notifies `OTAB DOWNLOAD` and waits 600 ms for it to reach the air.
+- **`download` reboots before the reply can leave.** Expect no terminator, and send it as the
+  bare OTA-control verb rather than through `cmd`: that path notifies `OTAB DOWNLOAD` and waits
+  600 ms for it to reach the air, which the console path cannot — its reply sits in `otaTx` and
+  `esp_restart()` beats the drain to it. `reset` does *not* reboot (it zeroes the energy counters)
+  and replies normally.
+- **The OTA busy-check is re-tested at execution, not only at submit.** A `begin` can land in the
+  window between latching a command and running it, since the write callback does not block on a
+  pending console command. The command is then refused with a terminator rather than deferred: a
+  deferred reply arrives minutes later, to a client that stopped listening.
 - **One command in flight.** A second `cmd` before the first is consumed is refused, not queued:
   silently losing a command is how a host comes to believe in a calibration it never applied.
-- **A latched command is dropped on disconnect.** Its reply would have nowhere to go, and a
-  `relaymux` executing minutes late — with the next client receiving the tail — is not a surprise a
-  bench instrument may produce.
+- **A latched command is dropped on disconnect, and the tx buffer is cleared at both ends of the
+  gap.** A command already *running* keeps writing into that buffer after the client vanishes, so
+  clearing only on disconnect would hand the next client the tail of someone else's `relaymux` —
+  and with no request id in the protocol, that client would splice it into whatever it was waiting
+  for and believe it. Clearing on connect as well turns "wrong reply, believed" into "no reply,
+  timed out".
 - **The link is unauthenticated**, so anything in radio range that can connect can run any console
   command. This widens an already severe surface rather than creating one: `download` reboots the
   board into the ROM bootloader today, from this characteristic, with no pairing. The fix, if it is
