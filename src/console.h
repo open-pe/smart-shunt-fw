@@ -166,13 +166,21 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
              * possible while the round-robin moves the contact every ~600 ms.
              * Parking a channel is what makes that measurement available without a
              * rebuild. Publishing stops while parked: a sample taken under manual
-             * control has no defensible channel identity. */
+             * control has no defensible channel identity.
+             *
+             * `hold a|b` is the OTHER kind of park -- same stopped relays, but the
+             * held channel keeps publishing. It exists because an idle round-robin
+             * ticks the contacts 0.428 times per second per relay for no reader.
+             * See the Mode comment in relay_mux_adc.h for what a hold gives up. */
             String v(inp.substring(8));
             v.trim();
             v.toLowerCase();
             if (v.length() == 0) {
-                UART_LOG("relaymux %s: state=%s requested=%s settled=%s serving=%s gen=%lu",
-                         relayMuxAdc.isManual() ? "MANUAL (not publishing)" : "auto",
+                UART_LOG("relaymux %s%s%s: state=%s requested=%s settled=%s serving=%s gen=%lu",
+                         RelayMuxAdcBackend::modeName(relayMuxAdc.requestedMode()),
+                         relayMuxAdc.isHeld() ? " on " : "",
+                         relayMuxAdc.isHeld()
+                             ? RelayMux2::targetName(relayMuxAdc.heldChannel()) : "",
                          relayMux.stateName(),
                          RelayMux2::targetName(relayMux.requested()),
                          RelayMux2::targetName(relayMux.settledTarget()),
@@ -211,7 +219,63 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 UART_LOG("  averaging %lu consecutive conversions/sample, %lu run restarts",
                          (unsigned long) RelayMuxAdcBackend::avgConversions(),
                          (unsigned long) pairBroken);
-                UART_LOG("  'relaymux a|b|off|auto' | 'relaymux settle <ms>'");
+                UART_LOG("  'relaymux a|b|off|auto' (park, silent) | 'relaymux hold a|b' "
+                         "(park, keeps publishing) | 'relaymux settle <ms>'");
+                break;
+            }
+            if (v.startsWith("hold")) {
+                String n(v.substring(4));
+                n.trim();
+                RelayMux2::Target h;
+                if (n == "a")      h = RelayMux2::Target::CH_A;
+                else if (n == "b") h = RelayMux2::Target::CH_B;
+                else {
+                    /* UART_LOG, not ESP_LOGW: an error reported through the logger
+                     * reaches the serial port only, and leaves a caller on the BLE
+                     * console with an empty reply that reads exactly like success
+                     * (doc/ota-over-ble.md). */
+                    UART_LOG("relaymux hold: expected a or b. A hold with no channel is "
+                             "'relaymux off', which also stops publishing.");
+                    break;
+                }
+                /* Both the mode and its target cross to the RT task in one call, in
+                 * the order the consumer acquires them -- unlike the manual path
+                 * below, which posts the mode here and the target into the mux's
+                 * own inbox as two independent writes. */
+                if (!relayMuxAdc.setHold(h)) {
+                    UART_LOG("relaymux hold: refused (no channel)");
+                    break;
+                }
+                /* A hold is applied from the RT task's hasDataFor(), which returns
+                 * early when the ADC never came up -- unlike `relaymux a`, whose
+                 * target reaches tick() through the mux's own inbox regardless. Say
+                 * so rather than reporting a park that will not happen. */
+                if (!relayMuxAdc.isInitialised()) {
+                    UART_LOG("relaymux hold: ADC not initialised -- the mode is recorded but "
+                             "NOTHING WILL PARK. Use 'relaymux a|b' (silent) to move the relay "
+                             "on a board whose ADC is down.");
+                    break;
+                }
+                UART_LOG("relaymux: holding %s -- it keeps publishing, %s goes silent, and "
+                         "the relays stop switching (in ~%lums if it has to move first)",
+                         RelayMux2::targetName(h),
+                         RelayMux2::targetName(h == RelayMux2::Target::CH_A
+                                                   ? RelayMux2::Target::CH_B
+                                                   : RelayMux2::Target::CH_A),
+                         (unsigned long) (RelayMux2::DEAD_TIME_MS + relayMux.settleMs()));
+                /* Said at the point of use, not only in a header comment: a held
+                 * channel looks exactly like a healthy round-robin channel in
+                 * InfluxDB, and the thing that changed is invisible from there. */
+                UART_LOG("  the A/B ratio is NOT valid across a hold -- the two channels are "
+                         "no longer sampled close together, so ADC drift stops cancelling.");
+                UART_LOG("  'relaymux auto' resumes; treat the first cycles after that as "
+                         "warm-up (one relay has been carrying all 71mW of coil).");
+                /* The one thing an operator cannot infer from the data itself. */
+                UART_LOG("  NOTE: the no-step guard is inactive while held -- nothing switches, "
+                         "so a dropped coil reads as a plausible voltage, not a fault.");
+                UART_LOG("  Held samples carry diag bit 0x%06lx so the database can tell them "
+                         "from round-robin ones.",
+                         (unsigned long) RelayMuxAdcBackend::diagHeldBit());
                 break;
             }
             if (v.startsWith("settle")) {
@@ -256,7 +320,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             else if (v == "b")   t = RelayMux2::Target::CH_B;
             else if (v == "off") t = RelayMux2::Target::NONE;
             else {
-                UART_LOG("relaymux: expected a, b, off or auto");
+                UART_LOG("relaymux: expected a, b, off, auto, hold a|b or settle <ms>");
                 break;
             }
             relayMuxAdc.setManual(true);
@@ -465,6 +529,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
 #ifdef WITH_RELAY_MUX
             UART_LOG("relaymux                      mux state, settle stats, fault counts");
             UART_LOG("relaymux a|b|off              park a channel (STOPS PUBLISHING)");
+            UART_LOG("relaymux hold a|b             park it and KEEP PUBLISHING (no ratio)");
             UART_LOG("relaymux auto                 resume the A/B round-robin");
             UART_LOG("relaymux settle [ms]          settle time (not persisted)");
 #endif

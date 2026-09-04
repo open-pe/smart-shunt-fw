@@ -39,6 +39,10 @@ class RelayMuxAdcBackend {
 public:
     using Target = RelayMux2::Target;
 
+    /// AUTO round-robins, MANUAL parks silently, HOLD parks and keeps publishing.
+    /// Documented at the `mode` member, which is where the reasoning lives.
+    enum class Mode : uint8_t { AUTO = 0, MANUAL = 1, HOLD = 2 };
+
 private:
     RelayMux2 &mux;
     Ads1262ShuntAdc &dev;
@@ -274,22 +278,85 @@ private:
      * likewise invisible to it: the generations either side are consecutive. */
     uint32_t accN = 0, accLastGen = 0;
     float accSum = 0.0f;
+    /// Held publications only: the next run must skip the conversion the previous
+    /// one ended on, or consecutive held means share a term. See take().
+    bool accAwaitNewGen = false;
     bool initialised = false;
 
-    /* Bench override. DESIGN.md's open gates require someone to observe all four
-     * contacts through supply, temperature and asynchronous-command tests, and the
-     * round-robin makes that impossible -- it moves the contact every ~600 ms, so
-     * there is nothing steady to put a scope on. Manual mode parks one channel and
-     * stops publishing, because a sample taken while a human is driving the mux by
-     * hand has no defensible channel identity. */
-    bool manual = false;
+    /* THREE MODES, and what separates the two parked ones is whether the parked
+     * channel still publishes.
+     *
+     *  AUTO   The round-robin. Both channels publish, and the contacts move every
+     *         ~1.17 s for as long as the board is powered.
+     *
+     *  MANUAL `relaymux a|b|off`. Parks a channel (or releases both coils) and
+     *         publishes NOTHING. DESIGN.md's open gates require someone to observe
+     *         all four contacts through supply, temperature and asynchronous-command
+     *         tests, and the round-robin makes that impossible -- there is nothing
+     *         steady to put a scope on. Publishing stops because a sample taken
+     *         while a human is driving the mux by hand has no defensible channel
+     *         identity.
+     *
+     *  HOLD   `relaymux hold a|b`. Parks a channel and KEEPS PUBLISHING IT. This is
+     *         the answer to a board that ticks 24/7 with nobody reading the ratio:
+     *         the relays stop moving, the held channel carries on as an ordinary
+     *         single-channel voltage series, and the other channel goes silent
+     *         because it is genuinely not being measured. At 0.428 operations per
+     *         second per relay, an idle round-robin spends ~13.5 % of the 3502's
+     *         100e6-operation typical life every year; a hold spends none of it.
+     *
+     * WHAT HOLD GIVES UP IS THE RATIO, and with it the drift bracketing that is the
+     * entire reason this fixture alternates: A and B are no longer sampled close
+     * together, so ADC offset and reference drift between them no longer cancels.
+     * It also parks 71 mW of coil dissipation in ONE relay instead of alternating
+     * it, so the thermal state when the round-robin resumes is not the one it left
+     * -- treat the first cycles after `relaymux auto` as warm-up. HOLD is a way to
+     * idle quietly, NOT a way to measure a ratio slowly.
+     *
+     * AND IT COSTS THE RUNTIME GUARD, WHICH IS THE PART WORTH SAYING OUT LOUD.
+     * `expectMove && !moved` catches a contact that did not close -- a released
+     * coil, a lost +5V_CTRL, a broken control wire -- by requiring the reading to
+     * move when the channel does. A held contact never switches, so that evidence
+     * does not exist. If the coil drops while held, both reeds open and the ADC
+     * reads the divider network's own termination (~-14 uV on this rig), and
+     * NOTHING CATCHES IT.
+     *
+     * Not even the UNMATCHED doubt, and an earlier version of this comment claimed
+     * it would. That test needs the reading to differ from BOTH channels'
+     * baselines. On this rig B's input is open and reads the same termination
+     * (measured, ~-14 uV -- see the guard's own note below), so an open A lands
+     * exactly on B's last accepted value: dOther ~ 0, the && fails, and not even
+     * the one-shot flag appears. take() then adopts the termination into
+     * lastAccepted[] because it is finite, and the channel publishes ~-0.7 mV
+     * referred to the input -- diag clear, cadence unchanged -- for as long as the
+     * hold lasts. Downstream that is indistinguishable from someone turning the
+     * source off.
+     *
+     * DIAG_RELAY_HELD is on every held sample precisely because this is the state
+     * they were taken in. A periodic A/B cycle is what would restore the guard
+     * itself; until one exists, a hold is an explicitly less-guarded mode, it says
+     * so in its own diagnostic, and the operator asked for it. */
+    Mode mode = Mode::AUTO;
 
-    /// Written by the console on appTask, applied by the RT task in hasDataFor().
-    /// Same reasoning as RelayMux2's command inbox: setManual(false) used to call
-    /// mux.select() directly, which is a state-machine mutation from the wrong
-    /// task. One aligned bool crossing the boundary, and the transition itself
-    /// happens where every other mutation happens.
-    std::atomic<bool> manualReq{false};
+    /* Written by the console on appTask, applied by the RT task in hasDataFor().
+     * Same reasoning as RelayMux2's command inbox: the transition re-drives
+     * mux.select(), and that is a state-machine mutation that may only happen on
+     * the task that calls tick().
+     *
+     * TWO fields now, so the ordering matters: holdReq is stored first and modeReq
+     * released after it, and the RT side acquires modeReq before reading holdReq.
+     * The other order would let the RT task see Mode::HOLD carrying the PREVIOUS
+     * hold target and park on the wrong channel -- silently, because a hold on the
+     * wrong channel looks exactly like a hold on the right one. */
+    std::atomic<uint8_t> modeReq{(uint8_t) Mode::AUTO};
+    std::atomic<uint8_t> holdReq{(uint8_t) Target::NONE};
+
+    /* True once this ARM has produced a published sample. In AUTO it is false for
+     * every publication by construction -- one publication per switch -- so it
+     * changes nothing there. In HOLD it is what stops the post-switch evidence
+     * gates from being re-applied to samples taken minutes after the switch they
+     * are supposed to be judging; see the guard on `firstAfterArm` below. */
+    bool publishedSinceArm = false;
 
     /// Retained from init() so the reset-recovery path below can bring the shared
     /// ADC back up without asking a channel facade for them.
@@ -374,6 +441,25 @@ private:
      * a verdict. */
     static constexpr uint32_t DIAG_RELAY_UNMATCHED = 0x42u << 24;
 
+    /* NOT a reason byte -- a FLAG BIT, OR-ed onto whatever diagnostic the sample
+     * already carries: this one says how the sample was taken, not what went wrong
+     * with it, and it must not displace a real fault code.
+     *
+     * ads1262.h's encodeDiag() lays out reason<<24 | sign<<20 | mag&0xFFFFF, which
+     * leaves bits 21-23 unused. Bit 23 is taken here, so `diag >> 24` still reads
+     * the reason and the magnitude field is untouched.
+     *
+     * IT EXISTS BECAUSE A HELD CHANNEL IS OTHERWISE INVISIBLE. U, I and P are
+     * identical in shape to a round-robin sample, the cadence merely doubles, and
+     * the OTHER channel simply stops -- which downstream is the same signature as
+     * a dead board or a wedged collector, both of which CLAUDE.md documents as
+     * common here. Without this, the one fact a reader needs six weeks later --
+     * that these samples came from a parked relay with the no-step guard inactive
+     * and no valid ratio partner -- exists only in a console session nobody kept.
+     * The collector stores diag when non-zero (`diag=diag or None`), so a held
+     * sample now carries diag = 0x00800000 and is queryable as such. */
+    static constexpr uint32_t DIAG_RELAY_HELD = 1u << 23;
+
     float lastAccepted[3] = {NAN, NAN, NAN};   ///< indexed by Target
     uint32_t armGenSeen = 0;
     uint32_t obsGen = 0;
@@ -415,6 +501,7 @@ private:
         tMoveMs = tStableMs = 0;
         tLastObsMs = 0;
         stepFrom = lastAccepted[(uint8_t) other(ch)];
+        publishedSinceArm = false;
     }
 
     void observe(float v, uint32_t tMs) {
@@ -448,6 +535,112 @@ private:
         if (!moved && std::isfinite(stepFrom) && fabsf(v - stepFrom) > moveEpsV) {
             moved = true;
             tMoveMs = tMs;
+        }
+    }
+
+    /* Apply a console-requested mode change. RT TASK ONLY: it re-drives
+     * mux.select(), which may only run on the task that calls tick(). */
+    void applyModeRequest() {
+        const Mode want = (Mode) modeReq.load(std::memory_order_acquire);
+        /* Acquired above, so this read sees the target that was stored before the
+         * mode was released. */
+        const Target wantHold = (Target) holdReq.load(std::memory_order_relaxed);
+
+        /* VALIDATE BEFORE MUTATING ANYTHING, and do not answer back.
+         *
+         * A hold on "no channel" is MANUAL wearing the wrong name -- the stall
+         * detector would stay armed on two channels that will never publish -- so
+         * it must not be adopted. It is also UNREACHABLE: setHold() refuses NONE
+         * and setMode() refuses HOLD, so the pair cannot be stored in the first
+         * place, and both refusals report to whoever asked.
+         *
+         * Handled anyway, by doing NOTHING. An earlier version rolled `mode` back
+         * and stored the old value into modeReq from here, which broke the single
+         * writer invariant this file relies on everywhere else: the console is the
+         * only writer of modeReq, and an RT-side corrective store can silently
+         * swallow a legitimate command issued in the same window. Doing nothing
+         * leaves the mode unchanged, costs no log spam on a repeating pass, and
+         * leaves the report where it belongs -- with the caller that was refused. */
+        if (want == Mode::HOLD && wantHold == Target::NONE) return;
+
+        /* THE MUX'S OWN INBOX BELONGS TO MANUAL -- the only path that posts to it.
+         * In any other mode an entry sitting there is stale by definition, so clear
+         * it on EVERY pass rather than only on a transition.
+         *
+         * Only-on-transition left a hole: `relaymux hold a` -> `relaymux b` ->
+         * `relaymux hold a`, all inside one RT pass, ends with modeReq back at its
+         * previous value, so the transition below never runs -- while the middle
+         * command's CH_B is still in the inbox. tick() would then consume it and
+         * walk the relay off the held channel, after which neither facade can
+         * publish (one fails `settledTarget() != ch`, the other `ch != serving`)
+         * until the stall detector repairs it seconds later.
+         *
+         * SAFE ONLY BECAUSE THE CONSOLE SETS THE MODE BEFORE POSTING THE TARGET.
+         * An RT pass landing between those two console writes sees MANUAL already
+         * and leaves the inbox alone. Reverse the two lines in console.h and this
+         * clears the very request it was meant to honour. */
+        if (want != Mode::MANUAL) mux.clearInbox();
+
+        /* A re-issued hold on the channel already held is a no-op, NOT a re-park:
+         * re-driving select() would reset armedForCapture and cost two discarded
+         * conversions every time somebody typed `relaymux` at it. But a hold on the
+         * OTHER channel while already holding is a genuine change and must move. */
+        const bool holdMoves = want == Mode::HOLD && wantHold != serving;
+        if (want == mode && !holdMoves) return;
+
+        mode = want;
+        armedForCapture = false;
+        accN = 0; accSum = 0.0f;
+        accAwaitNewGen = false;
+        /* The gates key off this, and a mode change is not a publication. Without
+         * it, resuming AUTO from a hold on the channel already settled leaves it
+         * set -- select() is idempotent there, so no new ARM and no
+         * resetObservation() -- and the first round-robin sample after `relaymux
+         * auto` would skip the very gates AUTO is documented to always run. */
+        publishedSinceArm = false;
+
+        switch (want) {
+            case Mode::MANUAL:
+                /* Nothing to drive: the console posts the target straight into the
+                 * mux's own inbox, which tick() consumes. */
+                break;
+
+            case Mode::HOLD:
+                serving = wantHold;
+                mux.select(serving);
+                ESP_LOGI("relaymux", "hold %s: relays stop switching, %s keeps publishing, "
+                                     "%s goes silent",
+                         RelayMux2::targetName(serving), RelayMux2::targetName(serving),
+                         RelayMux2::targetName(other(serving)));
+                break;
+
+            case Mode::AUTO:
+                /* The inbox was cleared above, on every non-MANUAL pass, for the
+                 * reason given there: `relaymux b` posts the mode and the target as
+                 * two separate writes, and a fast `relaymux auto` behind it could
+                 * otherwise let tick() consume the stale manual target AFTER the
+                 * round-robin resumed -- `serving` and the settled target would
+                 * disagree, every capture would be rejected, and both channels
+                 * would stall until EnergyCounter repaired it seconds later, with
+                 * the console having already said "round-robin resumed".
+                 *
+                 * Resume where we left off. Coming out of HOLD that is the held
+                 * channel, which is the right place to restart: the next take()
+                 * hands the mux to the other one and the alternation is back.
+                 *
+                 * TWO THINGS ARE STALE FOR ONE CYCLE AFTER THIS, both harmless and
+                 * neither obvious. lastAccepted[] for the silenced channel has not
+                 * been refreshed for the whole hold, so the first switch back to it
+                 * compares a live reading against an hours-old baseline: expectMove
+                 * may be computed from a value the input has since left, which can
+                 * spuriously raise DIAG_RELAY_UNMATCHED or DIAG_RELAY_NO_STEP (NaN,
+                 * flagged -- never a silently wrong number) for one cycle. And
+                 * EnergyCounter's lastSampleTime for that channel is equally old
+                 * the moment stallTimeoutUs() stops returning 0, so expect exactly
+                 * one "no sample for <hold duration>, re-arming sampler" warning on
+                 * resume. Neither is a fault; both look like one in a log. */
+                mux.select(serving);
+                break;
         }
     }
 
@@ -552,15 +745,43 @@ public:
          * The fixture would move under the scope, mid-measurement, with nothing on
          * the console to say why -- destroying the exact qualification run the mode
          * exists to enable. stallTimeoutUs() also returns 0 while parked so the
-         * detector does not fire in the first place; this is the backstop. */
-        if (manual) return;
+         * detector does not fire in the first place; this is the backstop.
+         *
+         * HOLD is deliberately NOT guarded here. The held channel publishes, so a
+         * stall verdict on it is a real one, and the recovery is right: `serving`
+         * IS the held channel, and select() is idempotent on a contact already
+         * settled there, so this re-drives the correct channel and cannot move the
+         * relay somewhere else. */
+        if (mode == Mode::MANUAL) return;
         mux.select(serving);
         armedForCapture = false;
     }
 
+    /* Mode requests. Callable from any task; the change lands on the next RT pass.
+     *
+     * setHold() publishes the target BEFORE the mode, pairing with the acquire in
+     * applyModeRequest() -- see the ordering note on holdReq.
+     *
+     * BOTH REFUSE ON THE WRITER'S SIDE rather than storing something the RT task
+     * would have to unpick. HOLD carries a target and the other two do not, so
+     * "HOLD" without one is not a mode this class has; keeping it unstorable is
+     * what lets applyModeRequest() treat it as unreachable, and lets the caller --
+     * which has a console to answer on -- do the reporting. */
+    bool setMode(Mode m) {
+        if (m == Mode::HOLD) return false;   // use setHold(); a hold needs a channel
+        modeReq.store((uint8_t) m, std::memory_order_release);
+        return true;
+    }
+
+    bool setHold(Target t) {
+        if (t == Target::NONE) return false;
+        holdReq.store((uint8_t) t, std::memory_order_relaxed);
+        modeReq.store((uint8_t) Mode::HOLD, std::memory_order_release);
+        return true;
+    }
+
     /// Park the mux under console control and stop publishing, or hand it back.
-    /// Callable from any task; the change lands on the next RT pass.
-    void setManual(bool m) { manualReq.store(m, std::memory_order_release); }
+    void setManual(bool m) { setMode(m ? Mode::MANUAL : Mode::AUTO); }
 
     float dieTempC() const { return dev.dieTempC(); }
 
@@ -583,8 +804,12 @@ public:
     }
 
     /// What the ADC read at the end of the last dead window, or NaN if no
-    /// conversion fell inside it.
-    float deadWindowVolts() const { return deadV; }
+    /// conversion fell inside it -- and NaN throughout a hold, which has no dead
+    /// windows at all. deadV is written only inside mux.inDeadTime() and cleared
+    /// only on a new ARM, so without this a held channel would republish the
+    /// pre-hold reading on every sample, indefinitely, as though it were current.
+    /// The file's own rule: unobservable must not read as clean.
+    float deadWindowVolts() const { return mode == Mode::HOLD ? NAN : deadV; }
 #endif
 
     void settleStats(uint32_t &lastMs, uint32_t &maxMs, uint32_t &closeMs,
@@ -605,24 +830,55 @@ public:
 
     /* Reports the REQUESTED mode, not the RT-task-applied one.
      *
-     * `manual` is only synced from `manualReq` inside hasDataFor(), which runs off
-     * the back of a registered sampler. The bring-up build (RELAY_MUX_ONLY)
-     * registers none, so hasDataFor() is never called and `manual` stays false
-     * forever -- the console reported "auto" immediately after a `relaymux a` had
-     * parked the mux. Harmless there (nothing publishes and reArm() is never
-     * reached), but a status line that contradicts the command just given is worse
-     * than no status line, and the same staleness would appear on any board where
-     * the ADC failed to come up.
+     * `mode` is only synced from `modeReq` inside applyModeRequest(), which runs off
+     * the back of a registered sampler's hasDataFor(). The bring-up build
+     * (RELAY_MUX_ONLY) registers none, so `mode` stays AUTO forever -- the console
+     * reported "auto" immediately after a `relaymux a` had parked the mux. Harmless
+     * there (nothing publishes and reArm() is never reached), but a status line that
+     * contradicts the command just given is worse than no status line, and the same
+     * staleness would appear on any board where the ADC failed to come up.
      *
      * The requested value is the authoritative answer to "what mode am I in": it is
-     * what the operator asked for, and `manual` only lags it by one RT pass in
-     * builds that have one. stallTimeoutUs() reading this is also correct, and
-     * marginally more responsive. reArm() deliberately keeps using RT-owned
-     * `manual`, because it must not act on a mode change the RT task has not yet
+     * what the operator asked for, and `mode` only lags it by one RT pass in builds
+     * that have one. stallTimeoutUs() reading this is also correct, and marginally
+     * more responsive -- a channel about to go silent under a hold should not be
+     * watched for a stall in the meantime. reArm() deliberately keeps using RT-owned
+     * `mode`, because it must not act on a mode change the RT task has not yet
      * applied. */
-    bool isManual() const { return manualReq.load(std::memory_order_acquire); }
+    Mode requestedMode() const { return (Mode) modeReq.load(std::memory_order_acquire); }
+    bool isManual() const { return requestedMode() == Mode::MANUAL; }
+    bool isHeld() const { return requestedMode() == Mode::HOLD; }
+
+    /// The channel a hold is parked on, or NONE when not holding. Read after
+    /// requestedMode() for the same reason applyModeRequest() does.
+    Target heldChannel() const {
+        return isHeld() ? (Target) holdReq.load(std::memory_order_relaxed) : Target::NONE;
+    }
+
+    static const char *modeName(Mode m) {
+        switch (m) {
+            case Mode::MANUAL: return "MANUAL (not publishing)";
+            case Mode::HOLD:   return "HOLD";
+            default:           return "auto";
+        }
+    }
+
     RelayMux2 &muxRef() const { return mux; }
     Target servingChannel() const { return serving; }
+
+    /* Whether the ADC came up. The console needs it because MANUAL and HOLD reach
+     * the hardware by DIFFERENT routes: `relaymux a` posts into the mux's own inbox
+     * and tick() consumes it whether or not this backend ever initialised, while a
+     * hold is applied from applyModeRequest(), which runs only from hasDataFor()
+     * -- and that returns at `!initialised`. On a board whose ADC did not start,
+     * `relaymux hold a` would otherwise print that the relays have stopped
+     * switching while nothing whatsoever had happened. */
+    bool isInitialised() const { return initialised; }
+
+    /// The flag bit every held sample carries in its diag field. Exposed so the
+    /// console can print the value an operator will have to query for, rather than
+    /// a second hardcoded copy of it drifting out of step with the definition.
+    static constexpr uint32_t diagHeldBit() { return DIAG_RELAY_HELD; }
 
     /*
      * The RT loop calls hasData() on EVERY registered sampler each pass, so the
@@ -633,34 +889,21 @@ public:
      */
     bool hasDataFor(Target ch) {
         if (!initialised) return false;
-        if (ch != serving) return false;
 
-        /* Apply a console-requested mode change here, on the RT task, rather than
-         * in setManual(). Resuming has to re-drive select(), and select() may only
-         * run on the task that calls tick(). */
-        const bool wantManual = manualReq.load(std::memory_order_acquire);
-        if (wantManual != manual) {
-            manual = wantManual;
-            armedForCapture = false;
-            if (!manual) {
-                /* Discard any request still sitting in the mux inbox before
-                 * resuming. `relaymux b` posts the mode and the target as two
-                 * separate writes; a fast `relaymux auto` behind it could be
-                 * applied first, and tick() would then consume the stale manual
-                 * target AFTER the round-robin resumed. `serving` and the settled
-                 * target would disagree, every capture would be rejected, and both
-                 * channels would stall until EnergyCounter's stall path repaired it
-                 * seconds later -- with the console having already said "round-robin
-                 * resumed". Authority over the mux is changing hands here, so a
-                 * request posted under the old owner is void by definition. */
-                mux.clearInbox();
-                mux.select(serving);   // resume where the round-robin left off
-            }
-        }
+        /* BEFORE the `ch != serving` test, not after it. A hold moves `serving` to
+         * the held channel, so applying the change only from the currently serving
+         * channel's call would mean a hold on the OTHER channel is applied by a
+         * call that then immediately returns -- which works, but only because both
+         * facades happen to be registered. Applying it from whichever facade is
+         * asked first has the same single-task guarantee (both run on realTimeTask)
+         * and does not depend on that. */
+        applyModeRequest();
+
+        if (ch != serving) return false;
 
         /* Manual mode still ticks the state machine -- the console command needs
          * the sequence to actually run -- but publishes nothing. */
-        if (manual) {
+        if (mode == Mode::MANUAL) {
             /* Keep pumping. If these channels are the only facades on this ADC,
              * dropping pump() would park the converter for the whole bench
              * session and the first sample after `relaymux auto` would come from
@@ -788,6 +1031,12 @@ public:
             if (accN >= AVG_CONVERSIONS) {
                 // full: hold the mean that vAvg is about to compute
             } else if (accN == 0) {
+                /* Set only by a held publication, and only to exclude the one
+                 * conversion it already consumed -- see the note in take(). */
+                if (accAwaitNewGen) {
+                    if (g == accLastGen) return false;
+                    accAwaitNewGen = false;
+                }
                 accLastGen = g; accSum = dev.volts(pair); accN = 1;
             } else if (g != accLastGen) {
                 if ((uint32_t) (g - accLastGen) != 1) {
@@ -809,7 +1058,29 @@ public:
          * that can talk itself into publishing a transient. */
         const uint32_t tMs = mux.msSinceArm();
 
-        if (stabilityGateEnabled() && !stable) {
+        /* THE POST-SWITCH GATES BELOW JUDGE A SWITCH, so they apply only to the
+         * first publication after each ARM -- which in AUTO is every publication,
+         * one per switch, leaving that path bit-identical.
+         *
+         * In HOLD there is no second switch to judge, and re-applying them to
+         * later samples would be actively wrong rather than merely useless:
+         *
+         *  - the stability gate compares against `3 * settleMs` from an ARM that
+         *    may be hours old, so any noise excursion that re-opens `stable`
+         *    publishes NaN with DIAG_RELAY_UNSETTLED immediately;
+         *  - the widener compares tStableMs against the sample instant, and
+         *    tStableMs is likewise measured from that same ancient ARM, so one
+         *    excursion ratchets the settle time to the 2 s cap and logs a bad
+         *    contact that does not exist -- permanently, since it never narrows;
+         *  - the no-step guard cannot say anything at all about a contact that did
+         *    not move.
+         *
+         * The UNMATCHED doubt is NOT gated: it is a statement about the VALUE
+         * ("this matches neither channel"), it never withholds a sample, and it
+         * stays meaningful on a held channel whose input changes. */
+        const bool firstAfterArm = !publishedSinceArm;
+
+        if (firstAfterArm && stabilityGateEnabled() && !stable) {
             /* Still moving after the full settle. Give it up to twice as long
              * again, then FAIL CLOSED: a reading that never stopped changing is
              * not a measurement, and publishing the last value of a bouncing
@@ -897,7 +1168,7 @@ public:
             }
         }
 
-        if (expectMove && !moved) {
+        if (firstAfterArm && expectMove && !moved) {
             ++nNoStep;
             ESP_LOGE("relaymux", "%s: expected a step of %.3g V and saw none -- mux did not "
                                  "switch (coil? supply? contact?); publishing NaN",
@@ -910,9 +1181,11 @@ public:
         /* Learned timings, reported only. tStableMs is bounded below by
          * STABLE_N conversions, so it is an UPPER bound on the true settle, never
          * a tight one -- see the resolution note on STABLE_N. */
-        settleObservedMs = tStableMs;
-        if (tStableMs > settleObservedMaxMs) settleObservedMaxMs = tStableMs;
-        if (moved) closeObservedMs = tMoveMs;
+        if (firstAfterArm) {
+            settleObservedMs = tStableMs;
+            if (tStableMs > settleObservedMaxMs) settleObservedMaxMs = tStableMs;
+            if (moved) closeObservedMs = tMoveMs;
+        }
 
         /* AUTO-WIDEN ONLY. If the contact is settling later than the configured
          * time, the configuration is wrong in the dangerous direction and is
@@ -952,7 +1225,8 @@ public:
          * spurious widen is permanent: the widener only ever increases. A
          * difference smaller than one conversion is not resolvable and must not
          * be treated as evidence. */
-        if (tStableMs > sampleInstantMs(mux.settleMs()) + (uint32_t) CONVERSION_MS) {
+        if (firstAfterArm &&
+            tStableMs > sampleInstantMs(mux.settleMs()) + (uint32_t) CONVERSION_MS) {
 #endif
             const uint32_t was = mux.settleMs();
             /* CAPPED. Widening is evaluated only after settleMs_ elapses, and
@@ -991,6 +1265,9 @@ public:
     float take(Target ch, uint32_t &diagOut) {
         diagOut = lastDiagOverride ? lastDiagOverride : dev.diag();
         lastDiagOverride = 0;
+        /* OR-ed, never substituted: a held sample that also over-ranged must still
+         * report DIAG_PGA_RANGE in its reason byte. See DIAG_RELAY_HELD. */
+        if (mode == Mode::HOLD) diagOut |= DIAG_RELAY_HELD;
         const float v = lastVolts;
         /* Remember what this channel actually read, so the NEXT switch away from
          * it knows what step to expect. Only finite values: a faulted sample must
@@ -998,8 +1275,50 @@ public:
          * observable. */
         if (std::isfinite(v)) lastAccepted[(uint8_t) ch] = v;
         lastVolts = NAN;
-        armedForCapture = false;
+        /* ONLY A FINITE PUBLICATION DISARMS THE POST-SWITCH GATES, and the
+         * distinction is the whole safety of the mechanism.
+         *
+         * The two NaN paths above (DIAG_RELAY_UNSETTLED, DIAG_RELAY_NO_STEP) reach
+         * take() exactly like a good sample does. Latching unconditionally meant
+         * that in HOLD -- where nothing ever re-arms the flag, because there is no
+         * second switch -- a channel that FAILED a gate on its first held sample
+         * published unguarded for the rest of the hold: one NaN, then a plausible
+         * finite mean of a still-bouncing contact, every second, forever. The
+         * guard's own failure disarmed it. That is the monotonicity failure the
+         * project checklist asks about, in the far tail rather than a near miss.
+         *
+         * Leaving it clear after a fault means the gate is re-evaluated on the next
+         * sample and keeps publishing NaN while the fault persists -- fail-closed,
+         * and it recovers by itself the moment the channel comes good.
+         *
+         * AUTO is unaffected either way: it takes exactly one publication per ARM,
+         * and the next ARM clears the flag through resetObservation(). */
+        if (std::isfinite(v)) publishedSinceArm = true;
         accN = 0; accSum = 0.0f;
+
+        if (mode == Mode::HOLD) {
+            /* Stay on this contact. armedForCapture is deliberately LEFT SET: the
+             * relay has not moved, so genAtSettle still describes this same close
+             * and the DISCARD_SCANS test remains satisfied. Clearing it would
+             * re-latch genAtSettle and throw away two conversions before every
+             * sample, to cover a switch that did not happen. The channel then
+             * publishes one mean of AVG_CONVERSIONS conversions back to back --
+             * ~1.04 s at 19.15 SPS, against 2.34 s per sample in the round-robin.
+             *
+             * BUT THE RUNS MUST NOT OVERLAP. The accumulator's `accN == 0` branch
+             * takes dev.volts() immediately, and getSample() is called in the same
+             * RT pass as hasData(), so without this the first term of the next run
+             * is the SAME CONVERSION as the last term of the one just published:
+             * consecutive held samples would share a conversion, the cadence would
+             * be 19 new conversions rather than 20, and successive means would be
+             * correlated -- an independence property the round-robin has and a hold
+             * would quietly lack. Remember the generation just consumed and make
+             * the next run wait for a genuinely new one. */
+            accLastGen = dev.generation();
+            accAwaitNewGen = true;
+            return v;
+        }
+        armedForCapture = false;
 #ifdef RELAYMUX_SETTLE_SWEEP
         /* Applied HERE, before select(), so the new value governs the whole of the
          * next dwell rather than half of it. */
@@ -1038,6 +1357,14 @@ public:
         // both channels switch, settle, and wait out their discarded scans
         return 2 * (RelayMux2::switchLatencyMs() +
                     (DISCARD_SCANS + AVG_CONVERSIONS) * SCAN_MS_PESSIMISTIC);
+    }
+
+    /// Publication interval for a HELD channel: no switch, no settle, no discards,
+    /// just one averaging run. Sized separately from cycleMsEstimate() so a stall
+    /// on the one channel that is supposed to be watched is not detected against a
+    /// round-trip time it no longer takes.
+    static constexpr uint32_t holdMsEstimate() {
+        return AVG_CONVERSIONS * SCAN_MS_PESSIMISTIC;
     }
 };
 
@@ -1095,6 +1422,17 @@ public:
          * not-publishing-because-dead are genuinely different states, and the
          * detector cannot tell them apart without being told. */
         if (backend.isManual()) return 0;
+        /* A HOLD publishes the held channel and silences the other one, so the two
+         * facades need different answers: the held channel keeps an ordinary
+         * timeout (it is expected to produce samples, and faster than in the
+         * round-robin), while the channel that is not being measured must opt out
+         * or EnergyCounter declares a stall that is not one -- and its recovery,
+         * startReading() -> reArm(), is exactly the thing that must not disturb a
+         * deliberate park. */
+        if (backend.isHeld()) {
+            if (backend.heldChannel() != channel) return 0;
+            return (int64_t) RelayMuxAdcBackend::holdMsEstimate() * 3000;
+        }
         return (int64_t) RelayMuxAdcBackend::cycleMsEstimate() * 3000;
     }
 

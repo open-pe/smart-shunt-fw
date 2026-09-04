@@ -496,8 +496,100 @@ been jittering the sample interval (1008–1208 ms), smearing the alias. Without
 the interval is 1147–1149 ms and the alias goes coherent. The same defect was
 corrupting timing as well as amplitude.
 
+## Idling: `relaymux hold a|b`
+
+The round-robin is unconditional — `take()` hands the mux to the other channel on
+every publication — so the board alternates for as long as it is powered, whether or
+not anyone is reading the ratio. At the retuned rate that is **0.428 operations per
+second per relay**: ~37,000 per relay per day, 13.5 M/year, against the 3502's
+**100 × 10⁶** typical life at signal level (1 V, 10 mA — Coto 3500 series, second
+column). So an idle year spends ~13.5 % of typical life and clicks four times every
+2.34 s, for nothing.
+
+`relaymux a|b` already parks a contact, but it is the *scope* mode: it stops
+publishing on purpose, because a sample taken while a human drives the mux by hand
+has no defensible channel identity. `relaymux hold a|b` is the other park — the
+relays stop, and the held channel keeps publishing as an ordinary single-channel
+voltage series. The other channel goes silent, and its stall detection opts out, both
+because it is genuinely not being measured.
+
+Held, the channel publishes **faster**, not slower: no dwell, no switch, no
+re-discard (`armedForCapture` is deliberately left set, since `genAtSettle` still
+describes the same close), so one mean of `AVG_CONVERSIONS = 20` conversions every
+**1.04 s** (derived: 20 × 52.22 ms; the 2.34 s round trip it is compared against is
+measured). Review caught that the first draft got 19 conversions, not 20: the
+accumulator's `accN == 0` branch took `dev.volts()` immediately and `getSample()`
+runs in the same RT pass as `hasData()`, so each run re-used the conversion the
+previous one ended on. Consecutive held means would have shared a term — correlated
+samples, from an instrument whose consumers average them. `take()` now records that
+generation and the next run waits for a new one.
+
+What a hold costs, in descending order of importance:
+
+1. **The runtime guard, entirely.** `expectMove && !moved` catches a contact that did
+   not close by requiring the reading to move when the channel does. Nothing switches
+   in a hold, so that evidence does not exist.
+
+   A first draft of this section claimed the `UNMATCHED` doubt survived as a one-shot
+   backstop. It does not, and the reason is specific to this rig: that test needs the
+   reading to differ from **both** channels' baselines, and B's input is open, reading
+   the same ~−14 µV termination an open A would land on. So `dOther ≈ 0`, the `&&`
+   fails, and no flag is raised at all. `take()` then adopts the termination as
+   `lastAccepted[A]` (it is finite), and the channel publishes ~−0.7 mV referred to
+   the input, `diag` otherwise clear, cadence unchanged, for as long as the hold
+   lasts — downstream indistinguishable from somebody switching the source off.
+
+   This is why every held sample carries **`DIAG_RELAY_HELD` (bit 23, `0x00800000`)**,
+   OR-ed onto whatever diagnostic it already has so a real reason byte is never
+   displaced. It does not restore the guard; it records that the guard was not
+   running. A periodic A/B cycle is what would restore it.
+2. **The ratio, and its drift bracketing.** A and B are no longer sampled close
+   together, so ADC offset and reference drift between them stops cancelling. A hold
+   is a way to idle quietly, not a way to measure a ratio slowly.
+3. **Thermal symmetry.** One relay carries all 71 mW of coil dissipation instead of
+   alternating it, so the state at `relaymux auto` is not the one the round-robin
+   left. Treat the first cycles after resuming as warm-up.
+
+The post-switch gates (stability, no-step, auto-widen) are applied only to the first
+publication after each ARM. In the round-robin that is every publication — one per
+switch — so that path is unchanged. In a hold it is what stops those gates from
+judging a switch that happened hours ago: the stability gate would publish NaN on any
+noise excursion, and the widener would ratchet the settle to its 2 s cap and report a
+bad contact that does not exist. (Both are reasoned failure modes, not observed ones;
+`stableEpsV` ships at 0, so the stability half is dormant in every current build.)
+
+**Only a *finite* publication disarms them**, which is the difference between a fix
+and a mute button. The two NaN paths reach `take()` exactly like a good sample, and
+latching on those meant a held channel that *failed* a gate on its first sample went
+unguarded for the rest of the hold — one NaN, then a plausible finite mean of a
+still-bouncing contact, every second, forever. The guard's own failure disarmed it.
+Leaving the flag clear after a fault re-evaluates the gate on the next sample: it
+keeps publishing NaN while the fault lasts and recovers by itself.
+
+Two things are stale for one cycle after `relaymux auto`, both harmless and neither
+obvious: `lastAccepted[]` for the silenced channel has not been refreshed for the
+whole hold, so the first switch back to it can spuriously raise `UNMATCHED` or
+`NO_STEP` (NaN and flagged — never a silently wrong number); and its
+`lastSampleTime` is equally old the moment `stallTimeoutUs()` stops returning 0, so
+expect exactly one `no sample for <hold duration>, re-arming sampler` warning.
+
 ## Not verified
 
+- **`relaymux hold` has never been run on hardware.** It compiles on all five relay-mux
+  environments and has been reviewed twice; nothing below it has been observed. In
+  particular the **1.04 s held cadence is derived, not measured**, and the AUTO path's
+  own dwell is documented above as carrying an unexplained ~0.4-conversion residual
+  that a held cadence would presumably share.
+- **The dropped-coil-while-held analysis is on paper.** No contact has been opened
+  under a hold to confirm that nothing flags it. The claim is that it fires *no*
+  diagnostic on this rig (B open, both landing on the same termination); on a rig
+  where B carries a different voltage, one `UNMATCHED` would appear.
+- **The warm-up assumption after a hold** — that the thermal state differs measurably
+  because one relay carried all 71 mW — has no number attached and has not been
+  looked for in the data.
+- **The 100 × 10⁶ life figure is Coto's at signal level (1 V, 10 mA).** This
+  application switches at µV and effectively no current, so the derating direction is
+  favourable, but by how much is unquantified and Coto publishes no curve for it.
 - **Contact release time.** `DEAD_TIME_MS = 5` rests on Coto's *typical* 0.1 ms; no
   maximum is published, and the datasheet is the only source. It cannot be measured
   from the ADC (see the retune section: the node's own tau is ~2 ms against a 157 ms

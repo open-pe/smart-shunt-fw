@@ -105,6 +105,16 @@ Other facts that cost real debugging time:
 - **Series names truncate to 16 chars** in `dev[16]`, so console and database names differ:
   `ftr_SHUNT_ADC_HEALTH` is `BLE_ftr_SHUNT_ADC_HE` in InfluxDB. Grepping the serial log for the
   name you see in Grafana finds nothing.
+- **The relay mux alternates 24/7 unless told not to.** The round-robin is unconditional, so
+  an idle vmux board clicks its contacts 0.428 times/s per relay (~13.5 % of the Coto 3502's
+  100 M typical life per year) for no reader. `relaymux hold a|b` parks it and **keeps the held
+  channel publishing** — faster, in fact (1.04 s/sample against 2.34 s), because there is no
+  dwell. `relaymux a|b|off` also parks it but publishes **nothing**; that one is the scope mode.
+  A hold gives up the A/B ratio's drift bracketing *and* the no-step guard — nothing switches, so
+  a dropped coil reads as a plausible voltage with **no diagnostic at all** on this rig. Held
+  samples therefore carry `diag` bit `0x00800000` (`DIAG_RELAY_HELD`), OR-ed onto any real fault
+  code: that bit is how you tell held data from round-robin data in InfluxDB, where nothing else
+  distinguishes them. Never run on hardware yet. `doc/relay-mux-front-end.md` has the full trade.
 - **Fields are overloaded per channel, and units differ per channel.** `U`/`I`/`P` do not always
   mean voltage/current/power, and there is no single unit convention — check the sampler's FIELD
   MAPPING comment before reading a series.
