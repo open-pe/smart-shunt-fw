@@ -19,6 +19,7 @@ extern RelayMuxAdcBackend relayMuxAdc;
 #ifndef TARGET_STM32H5
 #include <esp_ota_ops.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <soc/rtc_cntl_reg.h>
 extern bool otaBleActive();
 extern bool disableWifi;
@@ -48,7 +49,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
         inp.trim();
         if (inp.length() == 0) break;
 
-        if (inp == "reset") {
+        if (inp == "reset-counters") {
             ESP_LOGW("main", "Reset in 1s!");
             delay(1000);
             registry.resetAll();
@@ -140,7 +141,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             g_wifiRequest = 0;
             UART_LOG("WiFi disconnect requested (async via wifiTask)");
         } else if (inp == "board-prefix" || inp.startsWith("board-prefix ")) {
-            /* Per-board identity, persisted in NVS. Deliberately requires a reset to
+            /* Per-board identity, persisted in NVS. Deliberately requires a reboot to
              * take effect: sampler names are baked into the EnergyCounters at
              * initAll(), and renaming a live counter would split its series
              * mid-flight and orphan the energy total accumulated under the old
@@ -151,7 +152,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 const char *p = boardPrefixGet();
                 UART_LOG("board-prefix = '%s'%s", p, p[0] ? "" : " (unset -- names are unprefixed)");
             } else if (boardPrefixSet(v.c_str())) {
-                UART_LOG("board-prefix = '%s', reset to apply", boardPrefixGet());
+                UART_LOG("board-prefix = '%s', reboot to apply", boardPrefixGet());
             } else {
                 UART_LOG("board-prefix rejected (1..%u chars of [A-Za-z0-9_])",
                          (unsigned) BOARD_PREFIX_MAX);
@@ -471,6 +472,22 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
         }
 #endif
 #ifndef TARGET_STM32H5
+        else if (inp == "reboot") {
+            /* Deferred so the reply and its CON DONE terminator reach a remote caller
+             * before the link drops. */
+            static esp_timer_handle_t rebootTimer = nullptr;
+            if (!rebootTimer) {
+                esp_timer_create_args_t args = {};
+                args.callback = [](void *) { Serial.flush(); esp_restart(); };
+                args.name = "reboot";
+                esp_timer_create(&args, &rebootTimer);
+            }
+            if (rebootTimer && esp_timer_start_once(rebootTimer, 800 * 1000) == ESP_OK) {
+                UART_LOG("rebooting in 0.8 s");
+            } else {
+                UART_LOG("reboot: could not arm the timer");
+            }
+        }
         else if (inp == "download") {
             /* Reboot straight into the ROM downloader, so a board whose USB-CDC
              * has stopped serving esptool can still be reflashed without someone
@@ -513,11 +530,11 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
              * that cost visible. Keep it in the order the commands are handled above, and
              * add the line in the same commit as the command. */
             UART_LOG("aux [on|off|toggle]           get/set the load switch (persisted)");
-            UART_LOG("reset                         zero the energy counters");
+            UART_LOG("reset-counters                zero the energy counters");
             UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
             UART_LOG("                              PREFIXED sampler name, e.g. ftr_DCCT");
             UART_LOG("ina22x-resistor-range[2|3] <ohm> <max A>");
-            UART_LOG("board-prefix [<name>]         series-name prefix (NVS, needs reset)");
+            UART_LOG("board-prefix [<name>]         series-name prefix (NVS, needs reboot)");
 #ifndef TARGET_STM32H5
             UART_LOG("wifi on|off                   WiFi + the firmware's own InfluxDB writer");
             UART_LOG("bletx [dBm]                   radio power, -27..20 (rounds to a ladder)");
@@ -525,6 +542,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("bleconn <min> <max> <latency> ask for link params, 1.25ms units");
             UART_LOG("cpufreq [80|160|240]          CPU clock + die temp (not persisted)");
             UART_LOG("bootinfo                      running slot, OTA verify state, uptime");
+            UART_LOG("reboot                        restart the app (applies board-prefix)");
             UART_LOG("download                      reboot into ROM download mode");
 #ifdef WITH_RELAY_MUX
             UART_LOG("relaymux                      mux state, settle stats, fault counts");

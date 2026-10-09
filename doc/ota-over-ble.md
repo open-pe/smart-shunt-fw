@@ -92,8 +92,9 @@ Things worth knowing before relying on it:
 - **`download` reboots before the reply can leave.** Expect no terminator, and send it as the
   bare OTA-control verb rather than through `cmd`: that path notifies `OTAB DOWNLOAD` and waits
   600 ms for it to reach the air, which the console path cannot — its reply sits in `otaTx` and
-  `esp_restart()` beats the drain to it. `reset` does *not* reboot (it zeroes the energy counters)
-  and replies normally.
+  `esp_restart()` beats the drain to it. `reboot` restarts the app normally: it arms a 0.8 s
+  timer first, so its reply and terminator leave before the link drops. `reset-counters` zeroes
+  the energy counters and does not reboot.
 - **The OTA busy-check is re-tested at execution, not only at submit.** A `begin` can land in the
   window between latching a command and running it, since the write callback does not block on a
   pending console command. The command is then refused with a terminator rather than deferred: a
@@ -102,7 +103,7 @@ Things worth knowing before relying on it:
   silently losing a command is how a host comes to believe in a calibration it never applied.
 - **A latched command is dropped on disconnect; a running one is fenced off by a connection
   generation.** Clearing the tx buffer at both ends of the gap is *not* sufficient on its own — it
-  removes only what is already buffered, while a command still executing (`reset` sleeps a second)
+  removes only what is already buffered, while a command still executing (`reset-counters` sleeps a second)
   keeps writing afterwards. Each running command therefore carries the generation it was claimed
   under, and output from a stale generation is discarded rather than sent. Without that fence a new
   client can receive the previous client's terminator and, the protocol having no request id,

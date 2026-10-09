@@ -215,7 +215,7 @@ cross-calibrated. **Die temperature is not comparable between boards.**
 
 - **Board prefix is unset.** This unit publishes `ESP32_INA228_2` / `_4` with nothing
   identifying the board; they will collide with any other board using those names. One
-  console command: `board-prefix <name>`, reset to apply.
+  console command: `board-prefix <name>`, then `reboot`.
 - Publish-period sweep (200 / 400 / 700 ms at a pinned 195 ms / lat 3) is re-running after
   the cumulative-state bug above. Expect it to be thermally flat and to matter only at the
   throughput and latency bounds.
