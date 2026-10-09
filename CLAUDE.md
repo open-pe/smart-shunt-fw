@@ -90,11 +90,15 @@ Other facts that cost real debugging time:
 - **Collector source lives in `pwr-metering`**, not here (`smart-shunt-ble-client.py`); see
   `doc/receiver.md` for deploy. `rpi.local:~/pwr-metering` is a git clone, so it can be asked
   what it runs.
-- **Only one BLE central may hold a link**, which is why aux control and OTA go *through* the
-  collector rather than connecting alongside it. Do not attach a second scanner casually.
+- **Two BLE links, two roles** (firmware from 2026-10-10; older images take ONE link). The link
+  that subscribes to telemetry indications owns the telemetry stream; the link that last wrote
+  the OTA control characteristic gets the console/OTA replies, and cannot change hands while an
+  OTA runs. So a console client connects alongside the collector instead of replacing it. A
+  board still on an older image answers only one central: there aux control and OTA go
+  *through* the collector.
 - **The console is reachable over BLE**, not only over the serial port: write `cmd <line>` to the
   OTA control characteristic and read `CON …` lines back, terminated by `CON DONE`.
-  `pwr-metering/smart-shunt-cmd.py "relaymux"` does it; stop the collector first, one central only.
+  `pwr-metering/smart-shunt-cmd.py "relaymux"` does it; on an older single-link image, stop the collector first.
   **It must run on the collector's UB500 via bumble, not on BlueZ.** The rpi's onboard BCM4345
   hears the vmux board at −31 dBm and still times out in `connect()` every time (then reports the
   misleading `device 'dev_7C_4F_...' not found` on the retries) — the script's plain-bleak path

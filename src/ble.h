@@ -262,12 +262,31 @@ public:
     BLECharacteristic *pOtaCtrl = nullptr;
     BLECharacteristic *pOtaData = nullptr;
 
-    /// Negotiated ATT MTU. onMTUChange used to only print it; notifications have to be chunked to
-    /// it, and CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256 in the prebuilt libs caps the 512 we ask for,
-    /// so the requested value is not the value we get.
-    volatile uint16_t peerMtu = 23;
-    volatile uint16_t connHandle = 0;
-    volatile bool haveConn = false;
+    /* TWO LINKS, TWO ROLES. A console client can connect while the collector holds the
+     * telemetry link, so the console no longer costs a telemetry outage.
+     *   telemConn  the link subscribed to telemetry indications. Owns bleBuf, the ack and the
+     *              steady-state connection parameters. A second subscriber is ignored.
+     *   ctrlConn   the link that last wrote the control characteristic. Console replies and
+     *              OTA status go to it alone. It cannot change hands while an OTA runs.
+     * One central doing both (the collector's aux/OTA path) holds both roles, as before.
+     * Host task writes both handles; 16-bit stores, read once into a local by the app task. */
+    static constexpr uint8_t MAX_LINKS = 2;
+    static constexpr uint16_t NO_LINK = BLE_HS_CONN_HANDLE_NONE;
+    volatile uint16_t telemConn = NO_LINK;
+    volatile uint16_t ctrlConn = NO_LINK;
+    /// App task only: a separate control link that was given OTA connection parameters.
+    uint16_t fastConn = NO_LINK;
+    /// A link refused control during another link's OTA, to be told so by tick(). Host task sets.
+    volatile uint16_t refusedConn = NO_LINK;
+    /// Telemetry subscriptions ignored because another link held telemetry (a squatter).
+    uint32_t nSubRefused = 0;
+
+    /// ATT payload on link `h`, from its NEGOTIATED MTU: CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256 in
+    /// the prebuilt libs caps the 512 we ask for, so the requested value is not the value we get.
+    uint16_t attPayloadOf(uint16_t h) const {
+        const uint16_t mtu = pServer ? pServer->getPeerMTU(h) : 0;
+        return mtu > 3 ? (uint16_t) (mtu - 3) : 20;
+    }
 
 #ifdef BLE_STATUS_NEOPIXEL_PIN
     // Minimum nonzero WS2812 channel value: visible status with the least light.
@@ -366,7 +385,7 @@ public:
      * So every running command carries the generation it was claimed under, and output whose
      * generation is stale is dropped instead of written. B then simply times out, which is
      * the difference between "no reply" and "wrong reply, believed". */
-    uint32_t connGen = 0;             ///< bumped on every connect, host task
+    uint32_t connGen = 0;             ///< bumped when the control link changes or drops, host task
     uint32_t consoleCmdGen = 0;       ///< generation the running command was claimed under
 
     static constexpr size_t CONSOLE_CMD_CAP = 128;
@@ -606,10 +625,11 @@ public:
     /// link, so the caller prints "no link" rather than a stale set of numbers.
     /// intervalMs/timeoutMs are already converted out of the LL's 1.25 ms / 10 ms units.
     bool connSnapshot(float &intervalMs, uint16_t &latency, uint16_t &timeoutMs) const override {
-        if (!pServer || !haveConn) return false;
-        NimBLEConnInfo info = pServer->getPeerInfoByHandle(connHandle);
+        const uint16_t h = telemConn;
+        if (!pServer || h == NO_LINK) return false;
+        NimBLEConnInfo info = pServer->getPeerInfoByHandle(h);
         const uint16_t itvl = info.getConnInterval();
-        if (!itvl) return false; // handle went stale between haveConn and the lookup
+        if (!itvl) return false; // handle went stale between the read and the lookup
         intervalMs = itvl * 1.25f;
         latency = info.getConnLatency();
         timeoutMs = info.getConnTimeout() * 10;
@@ -745,7 +765,7 @@ public:
             inFlightLen = 0;
             return;
         }
-        if (!subscribed || !isConnected()) {
+        if (!subscribed || telemConn == NO_LINK) {
             // Nobody can receive this sample, so there is no point buffering it. The old
             // code queued it anyway: bleBuf filled up within a few seconds of running
             // unconnected and then EVERY subsequent sample logged "ble buf overflow",
@@ -840,10 +860,10 @@ public:
          * batch is never stranded. */
     }
 
-    /// Drop every trace of the previous connection. Without this, a stale bleBufPos and a
-    /// stale waitingForAck survive into the next connection, where they either ship a
-    /// fragment of the old session or wedge flush() before it ever sends.
-    void onDisconnected() {
+    /// The telemetry link ended. Without this, a stale bleBufPos and a stale waitingForAck
+    /// survive into the next session, where they either ship a fragment of the old session or
+    /// wedge flush() before it ever sends.
+    void onTelemetryLost() {
         // Host-task context: flags only. The app task tears the transfer state down when it
         // consumes sessionChanged.
         subscribed = false;
@@ -853,22 +873,46 @@ public:
          * afterwards silently runs on whatever the central chose -- which looks
          * identical in the log to a request that was made and honoured. */
         connParamsApplied = ConnParams::None;
-        // Undelivered OTA status belongs to the session that just ended. Carrying it over would
-        // hand the next client the previous one's READY/FAIL lines -- the same trap the telemetry
-        // buffer avoids via sessionChanged, and it would desynchronise a host's line parser.
+    }
+
+    /// The control link ended or changed hands (`next`, or NO_LINK): its undelivered output, its
+    /// unclaimed command and any OTA it had published belong to it. Host task.
+    void dropControlSession(uint16_t next) {
+        // Undelivered OTA status and console replies would hand the next client the previous
+        // one's READY/FAIL lines and desynchronise its line parser. connGen also drops the rest
+        // of a command that is still running (see CONNECTION GENERATION). The owner changes
+        // under the same lock, so drainOtaTx() never pairs new bytes with the old link.
         {
             std::lock_guard<std::mutex> lk(otaTxMutex);
             otaTx.clear();
+            ++connGen;
+            ctrlConn = next;
         }
+        // A `begin` published but not yet consumed would otherwise start an OTA owned by the new
+        // link, and the old one's image bytes would be dropped. No-op when idle.
+        otaBleRequestAbort();
         /* A console command latched by a client that has since vanished is dropped, not run.
-         * Its reply has nowhere to go, and `calibrate` or `relaymux` executing minutes after
-         * the operator lost the link -- with the next client receiving the tail of it -- is
-         * exactly the surprise a bench instrument must not produce. A command already
-         * RUNNING on the app task is not affected; only an unclaimed one is discarded. */
+         * `calibrate` or `relaymux` executing minutes after the operator lost the link, with
+         * the next client receiving the tail of it, is exactly the surprise a bench instrument
+         * must not produce. A command already RUNNING is not stopped, only muted. */
         {
             std::lock_guard<std::mutex> lk(consoleReqMutex);
             consoleReqPending.store(false, std::memory_order_relaxed);
         }
+    }
+
+    /// Make link `h` the control link. Host task. Refused while an OTA runs on another link:
+    /// the status stream and the staging ring belong to the link pushing the image.
+    bool claimControl(uint16_t h) {
+        if (h == ctrlConn) return true;
+        if (ctrlConn != NO_LINK && otaBleActive()) {
+            ESP_LOGW("ble", "link %u wrote the control channel during link %u's OTA, ignored",
+                     (unsigned) h, (unsigned) ctrlConn);
+            refusedConn = h;   // tick() tells it, so its host fails fast instead of timing out
+            return false;
+        }
+        dropControlSession(h);
+        return true;
     }
 
     /// App-task pump for everything that must not run on the NimBLE host task: the deferred
@@ -878,7 +922,22 @@ public:
         // Self-reconciling rather than hook-driven: an OTA wants a 7.5-15ms interval (the default
         // 30-60ms would stretch a 1.4MB image over minutes), and the link goes back to the relaxed
         // interval as soon as the transfer ends, however it ended.
-        if (haveConn) {
+        const bool ota = otaBleActive();
+        const uint16_t tc = telemConn, cc = ctrlConn;
+        /* An OTA on a SEPARATE control link gets the fast interval on that link, and the
+         * relaxed one back when the transfer ends. The telemetry link keeps its own steady
+         * state below throughout. */
+        if (fastConn != NO_LINK && !pServer->getPeerInfoByHandle(fastConn).getConnInterval())
+            fastConn = NO_LINK;   // that link is gone
+        const bool separateOta = ota && cc != NO_LINK && cc != tc;
+        if (separateOta && fastConn != cc) {
+            pServer->updateConnParams(cc, 12, 24, 0, 400);
+            fastConn = cc;
+        } else if (!separateOta && fastConn != NO_LINK) {
+            if (fastConn != tc) pServer->updateConnParams(fastConn, 80, 160, 0, 400);
+            fastConn = NO_LINK;
+        }
+        if (tc != NO_LINK) {
             // Steady state: request NOTHING. Whatever the central negotiated is the central's
             // business, and here it is a deliberate choice -- the bench rpi widens its interval to
             // 100-200ms with a 4s supervision timeout because BLE and WiFi share one radio
@@ -907,7 +966,7 @@ public:
              *
              * OTA still takes the link back to latency 0 via Fast, because a transfer is
              * exactly the case where every central-to-device packet is on the hot path. */
-            ConnParams want = otaBleActive() ? ConnParams::Fast : ConnParams::LowPower;
+            ConnParams want = (ota && cc == tc) ? ConnParams::Fast : ConnParams::LowPower;
             if (want != connParamsApplied) {
                 // 15-30ms during OTA, NOT the 7.5-15ms fugu uses. The bench rpi deliberately widens
                 // its connection interval to 100-200ms (ble-conn-params.service) because BLE and
@@ -916,22 +975,22 @@ public:
                 // for a tiny interval came from 20-byte writes anyway; with the MTU actually
                 // negotiated (509-byte chunks) this is far more headroom than the transfer needs.
                 if (want == ConnParams::Fast)
-                    pServer->updateConnParams(connHandle, 12, 24, 0, 400);
+                    pServer->updateConnParams(tc, 12, 24, 0, 400);
                 else if (want == ConnParams::LowPower && lowPowerOverride)
                     /* Sweep override, set from the console. Same code path as the
                      * default so an experiment cannot accidentally measure a
                      * different mechanism than the one that will ship. */
-                    pServer->updateConnParams(connHandle, ovItvlMin, ovItvlMax, ovLatency, 400);
+                    pServer->updateConnParams(tc, ovItvlMin, ovItvlMax, ovLatency, 400);
                 else if (want == ConnParams::LowPower)
                     /* Same 100-200 ms window the central already asks for, plus 3 events
                      * of slave latency. A central is free to refuse or to shorten this;
                      * the periodic status line prints what was actually negotiated, so a
                      * refusal shows up as latency 0 rather than as a silent no-op. */
-                    pServer->updateConnParams(connHandle, 80, 160, 3, 400);
+                    pServer->updateConnParams(tc, 80, 160, 3, 400);
                 else
                     // Post-OTA: relax to the coex-friendly end, matching what the bench central
                     // asks for anyway. NOT the old 24/48/180, which is what caused the drops.
-                    pServer->updateConnParams(connHandle, 80, 160, 0, 400);
+                    pServer->updateConnParams(tc, 80, 160, 0, 400);
                 connParamsApplied = want;
             }
         }
@@ -973,9 +1032,14 @@ public:
         }
 
         drainOtaTx();
+        if (refusedConn != NO_LINK && pOtaCtrl) {
+            static const char busy[] = "CON ERR busy (ota on another link)\nCON DONE err 0\n";
+            pOtaCtrl->notify((const uint8_t *) busy, sizeof(busy) - 1, refusedConn);
+            refusedConn = NO_LINK;
+        }
 
 #ifdef BLE_STATUS_NEOPIXEL_PIN
-        updateConnectionLed(haveConn);
+        updateConnectionLed(isConnected());
 #endif
     }
 
@@ -984,20 +1048,35 @@ public:
     /// and pick up on the next tick when it has refilled.
     void drainOtaTx() {
         if (!pOtaCtrl || !isConnected()) return;
-        const size_t chunk = peerMtu > 3 ? (size_t) (peerMtu - 3) : 20;
         for (;;) {
-            std::string out;
+            // To the control link only. Owner and generation are read together, so bytes are
+            // never paired with a link that has since handed over or gone.
+            uint16_t h;
+            uint32_t gen;
             {
                 std::lock_guard<std::mutex> lk(otaTxMutex);
                 if (otaTx.empty()) return;
+                h = ctrlConn;
+                gen = connGen;
+                if (h == NO_LINK) {
+                    otaTx.clear();   // nobody asked: no link has written the control channel
+                    return;
+                }
+            }
+            const size_t chunk = attPayloadOf(h);   // NimBLE call, outside the lock
+            std::string out;
+            {
+                std::lock_guard<std::mutex> lk(otaTxMutex);
+                if (connGen != gen || otaTx.empty()) continue;   // owner changed meanwhile
                 size_t n = otaTx.size() < chunk ? otaTx.size() : chunk;
                 out.assign(otaTx, 0, n);
                 otaTx.erase(0, n);
             }
-            if (!pOtaCtrl->notify((const uint8_t *) out.data(), out.size())) {
-                // Put it back at the front; it never reached the peer.
+            if (!pOtaCtrl->notify((const uint8_t *) out.data(), out.size(), h)) {
+                // Put it back at the front -- unless the owner changed: then it is not the new
+                // link's, and dropControlSession() has already cleared the rest.
                 std::lock_guard<std::mutex> lk(otaTxMutex);
-                otaTx.insert(0, out);
+                if (connGen == gen) otaTx.insert(0, out);
                 return;
             }
         }
@@ -1085,7 +1164,8 @@ public:
                  * accounted for any more. */
                 ESP_LOGE("ble", "no ack for %ums -- ATT bearer is stuck, dropping the link",
                          (unsigned) waited);
-                if (pServer) pServer->disconnect(connHandle);
+                const uint16_t tc = telemConn;
+                if (pServer && tc != NO_LINK) pServer->disconnect(tc);
                 return;
             }
             if (waited >= ACK_TIMEOUT_MS && !ackWarned) {
@@ -1098,7 +1178,8 @@ public:
             }
             return;
         }
-        if (!isConnected()) {
+        const uint16_t tc = telemConn;
+        if (tc == NO_LINK) {
             return;
         }
 
@@ -1113,11 +1194,11 @@ public:
              * indication.
              *
              * CLAMP TO THE NEGOTIATED MTU, NOT THE REQUESTED ONE. MAX_PAYLOAD_LEN
-             * is MTU-3 = 509 for the 512 we ASK for, but the comment on peerMtu
+             * is MTU-3 = 509 for the 512 we ASK for, but the comment on attPayloadOf
              * says plainly that we do not always get it --
              * CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256 in the prebuilt libs caps it.
              * NimBLE truncates an oversized indication to the negotiated MTU and
-             * still returns success, so with peerMtu=256 only 253 of 509 bytes
+             * still returns success, so with an MTU of 256 only 253 of 509 bytes
              * would reach the central while the ack retired all 509: samples
              * silently lost, and the collector fed a half frame that fails CRC
              * and desynchronises its parser.
@@ -1127,7 +1208,8 @@ public:
              * cap. Filling the buffer is what made it reachable, which is why the
              * bound belongs here and not only in drainOtaTx() (ble.h:462), where
              * it was already being done correctly. */
-            const uint16_t attPayload = peerMtu > 3 ? (uint16_t) (peerMtu - 3) : 20;
+            const uint16_t attPayload = attPayloadOf(tc);
+            const uint16_t mtu = attPayload + 3;
             uint16_t cap = attPayload < MAX_PAYLOAD_LEN ? attPayload : MAX_PAYLOAD_LEN;
 
             /* ROUND THE CAP DOWN TO A WHOLE RECORD -- see MAX_INDICATE_LEN. The
@@ -1150,12 +1232,12 @@ public:
                  * because telemetry on such a link is degraded by design and the
                  * resend hazard above is live. */
                 static uint16_t lastWarnedMtu = 0;
-                if (lastWarnedMtu != peerMtu) {
-                    lastWarnedMtu = peerMtu;
+                if (lastWarnedMtu != mtu) {
+                    lastWarnedMtu = mtu;
                     ESP_LOGW("ble", "peer MTU %hu leaves %hu payload bytes, under one %hu-byte "
                                     "record -- indications cannot be record-aligned and a "
                                     "re-sent payload may desynchronise the collector",
-                             peerMtu, attPayload, RECORD_LEN);
+                             mtu, attPayload, RECORD_LEN);
                 }
             }
             const uint16_t sendLen = bleBufPos > cap ? cap : bleBufPos;
@@ -1167,7 +1249,7 @@ public:
              * Rebuild with -DCORE_DEBUG_LEVEL=4 to watch batching behaviour. */
             ESP_LOGD("ble", "sending %hu of %hu queued", sendLen, bleBufPos);
             //pCharacteristic->setValue(const_cast<uint8_t *>(buf), len);
-            bool res = pCharacteristic->indicate(bleBuf, sendLen);
+            bool res = pCharacteristic->indicate(bleBuf, sendLen, tc);
             if (!res) {
                 // Throttled for the same reason as the backlog warning: flush() is now called at
                 // the app-task rate, so a congested host would produce ~100 identical lines/s.
@@ -1209,31 +1291,27 @@ public:
              *  later, which is soon enough and cannot assert.
              */
             // Accept whatever the central negotiated; tick() requests nothing in steady state.
-            srv->connHandle = connInfo.getConnHandle();
-            /* onDisconnected() clears otaTx, but a console command already RUNNING on the app
-             * task keeps writing into it afterwards -- so the buffer can be non-empty again by
-             * the time the next client arrives, and it would be handed the tail of somebody
-             * else's `relaymux`. The protocol carries no request id, so the client cannot
-             * detect that; it would splice the stale lines into whatever it is waiting for and
-             * believe them. Clearing at BOTH ends of the gap is what makes "wrong reply,
-             * believed" into "no reply, timed out". */
-            {
-                std::lock_guard<std::mutex> lk(srv->otaTxMutex);
-                srv->otaTx.clear();
-                ++srv->connGen;   // orphaned output from the previous session is now stale
-            }
-            srv->haveConn = true; // set last: it is what gates tick()
+            // Roles are taken later: telemetry by subscribing, control by writing the channel.
             srv->auxPublished = -1; // force tick() to re-publish for the new client
+            /* NimBLE stops advertising on every connect. Without a restart here the first
+             * central is also the last one, which is the single-link firmware this replaced. */
+            if (pServer->getConnectedCount() < MAX_LINKS && !NimBLEDevice::startAdvertising()) {
+                ESP_LOGE("ble", "startAdvertising() FAILED after connect -- no second link");
+            }
         }
 
         void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
-            Serial.printf("Client disconnected (reason %d) - start advertising\n", reason);
-            srv->onDisconnected();
-            srv->haveConn = false;
-            srv->peerMtu = 23;
-            // Harmless when no transfer is in flight -- otaBleRequestAbort() ignores it -- which
-            // matters, because this fires for every ordinary telemetry disconnect too.
-            otaBleRequestAbort();
+            const uint16_t h = connInfo.getConnHandle();
+            Serial.printf("Client disconnected (link %u, reason %d) - start advertising\n",
+                          (unsigned) h, reason);
+            // Tear down only what this link owned; the other link carries on untouched.
+            // NimBLE reports the TERM unsubscribe before this callback, so onCharSub has normally
+            // torn the telemetry role down already. Kept for a stack that does not.
+            if (h == srv->telemConn) {
+                srv->telemConn = NO_LINK;
+                srv->onTelemetryLost();
+            }
+            if (h == srv->ctrlConn) srv->dropControlSession(NO_LINK);   // also aborts its OTA
             // Unchecked, this is the difference between "the peer went away" and "this
             // device is never reachable again", with nothing in the log to tell them
             // apart. That is exactly the symptom we spent a day chasing from the client
@@ -1244,8 +1322,8 @@ public:
         }
 
         void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override {
+            // Chunking reads the live value per link (attPayloadOf); this is only the log line.
             Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, connInfo.getConnHandle());
-            srv->peerMtu = MTU; // notifications are chunked to this, so it has to be kept, not just printed
         }
 
         /********************* Security handled here *********************/
@@ -1295,8 +1373,25 @@ public:
         ESP_LOGD("ble", "onAck done=%i waiting=%hhu", (int)done, waitingForAck);
     }
 
-    void onCharSub(bool sub) {
+    void onCharSub(bool sub, uint16_t h) {
         // Host-task context: flags only, see the single-writer rule at the top.
+        if (sub) {
+            if (telemConn != NO_LINK && telemConn != h) {
+                // Indications go to telemConn by handle, so this one simply receives nothing.
+                ++nSubRefused;
+                ESP_LOGW("ble", "link %u subscribed to telemetry, link %u already has it; ignored "
+                         "(%lu refused so far)", (unsigned) h, (unsigned) telemConn,
+                         (unsigned long) nSubRefused);
+                return;
+            }
+            if (telemConn != h) connParamsApplied = ConnParams::None;   // new link, ask again
+            telemConn = h;
+        } else {
+            if (h != telemConn) return;   // not the telemetry link; its session is untouched
+            telemConn = NO_LINK;
+            onTelemetryLost();
+            return;
+        }
         subscribed = sub;
         sessionChanged = true;
         if (sub && nDroppedNoPeer) {
@@ -1345,12 +1440,12 @@ public:
             str += connInfo.getAddress().toString();
             if (subValue == 0) {
                 str += " Unsubscribed to ";
-                srv->onCharSub(false);
+                srv->onCharSub(false, connInfo.getConnHandle());
             } else if (subValue == 1) {
                 str += " Subscribed to notifications for ";
             } else if (subValue == 2) {
                 str += " Subscribed to indications for ";
-                srv->onCharSub(true);
+                srv->onCharSub(true, connInfo.getConnHandle());
             } else if (subValue == 3) {
                 str += " Subscribed to notifications and indications for ";
             }
@@ -1374,6 +1469,7 @@ public:
             // Tolerate a client that sends the newline the protocol is written with.
             while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
             if (v.empty()) return;
+            if (!srv->claimControl(connInfo.getConnHandle())) return;
             /* Reboot into the ROM downloader. Lives on the OTA control channel
              * because that is where "I am about to reflash this" belongs, and
              * because adding a characteristic would change the GATT table --
@@ -1441,6 +1537,8 @@ public:
     class OtaDataCallbacks : public NimBLECharacteristicCallbacks {
     public:
         void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
+            // Image bytes only from the control link, which is the one that sent `begin`.
+            if (!s_self || connInfo.getConnHandle() != s_self->ctrlConn) return;
             std::string v = pCharacteristic->getValue();
             otaBleStageBytes((const uint8_t *) v.data(), v.size());
         }
