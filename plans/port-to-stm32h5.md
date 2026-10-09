@@ -223,7 +223,7 @@ From STM32duino variant `variant_NUCLEO_H503RB.h`:
 - Sampler initialization loop — same logic
 - `realTimeTask` — same sampling loop, `xTaskCreate` instead of `xTaskCreatePinnedToCore`
 - `nonRealTimeTask` / `update()` — same structure, with `bleSrv` replaced by `bleBridge`
-- Console command parser (`handleConsoleInput`) — keep `calibrate`, `ina22x-resistor-range`, `aux`, `reset`, `help`; drop `bootinfo`, `wifi`
+- Console command parser (`handleConsoleInput`) — keep `calibrate`, `ina22x-resistor-range`, `aux`, `reset-counters`, `reboot`, `help`; drop `bootinfo`, `wifi`
 - Serial input — use `Serial.available()` / `Serial.readString()` (STM32duino Serial works reliably, unlike the ESP32 PlatformIO workaround)
 - Idle-sleep vote logic — keep the safety logic, stub the actual sleep (or implement STM32 Stop mode)
 

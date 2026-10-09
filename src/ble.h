@@ -358,7 +358,7 @@ public:
      *
      * Clearing otaTx at both ends of a disconnect is NOT enough, and the earlier comment
      * saying it was is wrong. A command already RUNNING keeps writing after its client
-     * vanishes: `reset` sleeps a second, so client A can disconnect, client B connect and
+     * vanishes: `reset-counters` sleeps a second, so client A can disconnect, client B connect and
      * send `bootinfo`, and A's terminator then lands first and is accepted by B as the
      * answer to a question it never asked. The clear only removes bytes that were already
      * there; it cannot suppress the ones still to come.

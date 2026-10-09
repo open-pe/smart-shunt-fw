@@ -399,7 +399,7 @@ public:
         if (consoleReplyTo) consoleReplyTo->consoleWrite(text, len);
     }
 
-    /* Run at most ONE remote command per pass. The command may block -- `reset` sleeps a
+    /* Run at most ONE remote command per pass. The command may block -- `reset-counters` sleeps a
      * second, `calibrate` writes NVS -- and this is the same app task that drains telemetry,
      * so draining a queue of them here would stall the link the reply has to travel over. */
     void processRemoteConsole() {

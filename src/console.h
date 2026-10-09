@@ -482,7 +482,9 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                 args.name = "reboot";
                 esp_timer_create(&args, &rebootTimer);
             }
-            if (rebootTimer && esp_timer_start_once(rebootTimer, 800 * 1000) == ESP_OK) {
+            if (rebootTimer && esp_timer_is_active(rebootTimer)) {
+                UART_LOG("reboot already pending");
+            } else if (rebootTimer && esp_timer_start_once(rebootTimer, 800 * 1000) == ESP_OK) {
                 UART_LOG("rebooting in 0.8 s");
             } else {
                 UART_LOG("reboot: could not arm the timer");
