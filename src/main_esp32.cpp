@@ -603,11 +603,10 @@ void setup(void) {
 
     /* Physical-layer check while the pins are still plain GPIOs. Not fatal: on the
      * shunt-adc board the ADS1262 is on SPI and must come up even with the I2C
-     * harness unplugged. See i2c_check_pins() for what it can and cannot see. */
+     * harness unplugged. See i2c_check_pins() for what it can and cannot see.
+     * i2c_begin() also records pins and clock for bus recovery (i2c.h). */
 #if !defined(RELAY_MUX_ONLY) && !defined(XIAO_NEST)
-    i2c_check_pins(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL);
-
-    Wire.begin(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
+    i2c_begin(0, settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
 #elif defined(XIAO_NEST)
     /* No I2C parts on this board at all -- the XIAO carries the shunt-adc board
      * on SPI and nothing else. The SHUNT_ADC_ONLY branch in settings.h names
@@ -623,8 +622,7 @@ void setup(void) {
 #endif
 
 #if defined(SHUNT_ADC_ONLY) && !defined(XIAO_NEST)
-    i2c_check_pins(TMP117_I2C2_SDA, TMP117_I2C2_SCL);
-    Wire1.begin(TMP117_I2C2_SDA, TMP117_I2C2_SCL, settings.I2C_Freq);
+    i2c_begin(1, TMP117_I2C2_SDA, TMP117_I2C2_SCL, settings.I2C_Freq);
 #endif
 
     if (!disableWifi) {

@@ -73,8 +73,9 @@ bool readRegister(uint16_t addr, uint8_t reg, uint16_t *regValue) {
     success = Wire.write(reg) == 1;
     success &= Wire.endTransmission(false) == 0;
     success &= Wire.requestFrom(static_cast<uint8_t>(addr), static_cast<uint8_t>(2)) == 2;
-    //i2cErrorCode = !success;
-    if (Wire.available() == 2) {
+    success &= Wire.available() == 2;
+    i2c_note(0, success);
+    if (success) {
         MSByte = Wire.read();
         LSByte = Wire.read();
         *regValue = (MSByte << 8) + LSByte;
@@ -93,15 +94,11 @@ bool readBuf(uint16_t addr, uint8_t reg, uint8_t *buffer, uint8_t len) {
     success = Wire.write(reg) == 1;
     success &= Wire.endTransmission(false) == 0;
     success &= Wire.requestFrom(static_cast<uint8_t>(addr), len) == len;
-    if (success && Wire.available() == len) {
+    success &= Wire.available() == len;
+    i2c_note(0, success);
+    if (success) {
         for (int i = 0; i < len; ++i)
             buffer[i] = Wire.read();
-        return true;
-        //return Wire.readBytes(buffer, len) == len;
-        //MSByte = Wire.read();
-        //LSByte = Wire.read();
-        //LSByte = Wire.read();
-        //*regValue = (MSByte<<8) + LSByte;
         return true;
     } else {
         return false;
