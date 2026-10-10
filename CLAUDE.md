@@ -29,18 +29,18 @@ gone — old transcripts still name them.)
   investigating; it is USB, not the build.
 - **`pio device monitor` does not work here** — miniterm dies on `termios.error: Operation not
   supported by device`. Read the port with pyserial instead.
-- **Reading the serial port does NOT reset the board — esptool's reset sequence does.** Opening
-  the port with pyserial (`dtr = False`, `rts = False` before `open()`) leaves a running board
-  alone, so reading serial on an in-service board is safe and costs the collector nothing. What
-  *does* reboot it is any esptool invocation that drives the reset lines — `write-flash`, or
-  even `read-mac` with `--after hard-reset`. Budget one BLE reconnect per esptool call, none
-  per serial read.
+- **Opening the serial port can reset the board; esptool's reset sequence always does.** On
+  2026-08-25, opening the port with pyserial (`dtr = False`, `rts = False` before `open()`)
+  left a running board alone: the uptime counter kept climbing across serial opens. But on
+  2026-10-10 board 7C:4F:AD:1E:9A:BC (env `esp32s3_2ina228`) reset on exactly that open of
+  `/dev/cu.usbmodem1101`: `rst:0x15` (USB_UART_CHIP_RESET) and a fresh boot banner. So budget
+  a possible reset (one BLE reconnect) per serial open, and check the uptime counter or the
+  `rst:` line before attributing anything to it. Any esptool invocation that drives the reset
+  lines (`write-flash`, or even `read-mac` with `--after hard-reset`) reboots it for certain.
 
-  Worth knowing because getting this backwards cost an hour on 2026-08-25: a `help` probe
-  returned a full boot banner and was read as reset-on-open, when the banner was simply the
-  tail of the esptool reset that had just run. **BLE dropouts were then blamed on serial access
-  when the cause was collector-side** (below). The uptime counter is the arbiter — it kept
-  climbing across serial opens, which was the clue that the attribution was wrong.
+  The 2026-08-25 lesson still stands: a boot banner right after an esptool call is the tail of
+  that reset, not reset-on-open, and **BLE dropouts were then blamed on serial access when the
+  cause was collector-side** (below).
 - **A stuck board is often a stuck COLLECTOR.** Symptom: the board advertises continuously
   (`last advertisement 0s ago`) and delivers a healthy few minutes of data, then
   `TimeoutError no data`, after which the collector loops `connecting to …` for minutes and
@@ -50,6 +50,10 @@ gone — old transcripts still name them.)
   smart-shunt-ble` clears it and the board returns immediately at full rate. Because the other
   boards are unaffected, this looks exactly like a fault in the one board that is actually
   fine — check the per-device rates before touching it.
+- **An I2C upset also looks like a silent board**: no samples means no indications, so the
+  collector times out. The firmware recovers the bus itself (`src/i2c.h`), logging one
+  `bus N recovery (...)` WARN per attempt; the `pwr:` line gains `i2c recovered N failed M`
+  once any has run, and console `i2c` / `i2c recover` show and force it.
 - Opening the port with default DTR/RTS can leave the board wedged and silent. If it goes
   quiet and re-flashing also fails, it needs a physical **BOOT + RESET** to re-enter download
   mode — ask, don't try to fix it over the wire.
