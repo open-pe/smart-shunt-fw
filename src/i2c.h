@@ -43,9 +43,13 @@
  * BUS RECOVERY (ESP32 only). Every transfer reports its outcome to i2c_note(). A
  * streak of failures (I2cRecoveryPolicy: >= 4 failures spanning >= 200 ms, with a
  * 0.5..30 s backoff between attempts) runs i2c_recover_bus() inline, in the task that
- * saw the failure, under the bus lock: reset the IDF driver, tear Wire down, clock SCL
- * up to 9 times until a slave holding SDA lets go, send a STOP, re-begin Wire with
- * the same pins and clock. Then the bus generation is bumped, and each sampler that
+ * saw the failure, under the bus lock: stop the IDF driver, free Wire's buffers, clock
+ * SCL up to 9 times until a slave holding SDA lets go, send a STOP, re-begin Wire with
+ * the same pins and clock. If the driver will not stop, Wire is left as it was; if
+ * Wire will not restart, I2cBus::running stays false and every helper refuses to touch
+ * Wire (a counted failure) until a later attempt restarts it. Wire must never be used
+ * without buffers: it then takes its own mutex and never releases it, and the next
+ * recovery hangs on it. Then the bus generation is bumped, and each sampler that
  * sees a new generation rewrites its device configuration (a part upset badly enough
  * to wedge the bus may also have reset). Seen 2026-10-10: a boost converter switching
  * hard next to the board made every transfer fail with 259 (ESP_ERR_INVALID_STATE,
@@ -170,6 +174,10 @@ struct I2cBus {
     uint32_t failedRecoveries = 0;
     uint32_t generation = 0;      // bumped by every attempt; samplers re-configure on change
     bool recovering = false;
+    // Wire has its buffers and the driver is up. While false no helper touches Wire: with
+    // no buffers, beginTransmission() takes Wire's mutex and endTransmission() returns 4
+    // WITHOUT releasing it, and the next Wire.end()/begin() then blocks forever.
+    bool running = !I2C_RECOVERY; // ESP32: set by i2c_begin() and every recovery
 };
 
 inline I2cBus &i2c_bus(uint8_t port) {
@@ -193,6 +201,7 @@ inline bool i2c_begin(uint8_t port, int8_t sda, int8_t scl, uint32_t freq) {
     wire.setTimeOut(I2C_TIMEOUT_MS);
     I2cBus &b = i2c_bus(port);
     b.sda = sda, b.scl = scl, b.freq = freq;
+    b.running = ok; // if not, the first recovery retries the begin
     return ok;
 }
 
@@ -210,17 +219,18 @@ inline bool i2c_recover_bus(uint8_t port, const char *trigger) {
     const int64_t spanMs = streak ? (esp_timer_get_time() - b.policy.firstFailUs) / 1000 : 0;
     TwoWire &wire = i2c_wire(port);
 
-    // The IDF driver refuses to remove its devices -- so Wire.end() cannot delete the bus --
-    // while its status says a transfer is in flight. This resets that status (and runs the
-    // controller's own clear-bus) so the teardown below can succeed. If it fails, leave the
-    // driver alone: a half-done Wire.end() frees Wire's buffers but keeps the port "started",
-    // and Wire.begin() then never reallocates them.
-    bool resetOk = true;
+    // The IDF driver refuses to remove its devices -- so the bus cannot be deleted --
+    // while its status says a transfer is in flight. This resets that status so the
+    // teardown below can succeed.
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
-    if (auto h = (i2c_master_bus_handle_t) i2cBusHandle(port)) resetOk = i2c_master_bus_reset(h) == ESP_OK;
+    if (auto h = (i2c_master_bus_handle_t) i2cBusHandle(port)) i2c_master_bus_reset(h);
 #endif
-    if (resetOk) wire.end();
-    const bool released = resetOk && !i2cIsInit(port);
+    // Stop the driver HERE, not through Wire.end(): that frees Wire's buffers even when
+    // its i2cDeinit() fails, leaving a started port with no buffers -- see `running`.
+    // Only once the driver is really gone may the buffers go.
+    const bool released = !i2cIsInit(port) || i2cDeinit(port) == ESP_OK;
+    if (released && b.running) wire.end(); // driver already down: only frees the buffers
+    if (released) b.running = false;
 
     bool sdaStuck = false, sclStuck = false, idle = false;
     int pulses = 0;
@@ -253,9 +263,10 @@ inline bool i2c_recover_bus(uint8_t port, const char *trigger) {
         idle = digitalRead(sda) && digitalRead(scl);
     }
 
-    const bool running = released && wire.begin(b.sda, b.scl, b.freq);
+    // Not released: the old driver and Wire's buffers are still in place and still usable.
+    if (released) b.running = wire.begin(b.sda, b.scl, b.freq); // false: retried next attempt
     wire.setTimeOut(I2C_TIMEOUT_MS);
-    const bool ok = running && idle;
+    const bool ok = b.running && idle;
     ++b.generation;
     ++(ok ? b.recoveries : b.failedRecoveries);
     b.policy.onRecoveryAttempt(esp_timer_get_time());
@@ -266,7 +277,8 @@ inline bool i2c_recover_bus(uint8_t port, const char *trigger) {
              released ? (sdaStuck ? "stuck low" : "high") : "?",
              released ? (sclStuck ? "stuck low" : "high") : "?", pulses,
              ok ? "ok" : !released ? "FAILED, driver would not release the bus"
-                       : !idle ? "FAILED, lines still low" : "FAILED, Wire re-init");
+                       : !b.running ? "FAILED, Wire re-init (transfers refused until a retry)"
+                       : "FAILED, lines still low");
     return ok;
 }
 #endif
@@ -286,24 +298,28 @@ inline void i2c_note(uint8_t port, bool ok) {
 #endif
 }
 
+/// True when Wire on this port may be used. Otherwise records a failed transfer (which
+/// may run the recovery that restarts Wire) and returns false. Call holding the bus lock,
+/// before the first Wire call of a transfer.
+inline bool i2c_ready(uint8_t port) {
+    if (i2c_bus(port).running) return true;
+    i2c_note(port, false);
+    return false;
+}
+
 /// Write `command` then `len` bytes on the selected hardware controller.
 inline esp_err_t i2c_write_buf(uint8_t port, uint8_t address, uint8_t command, const uint8_t *data, uint8_t len) {
     I2cLock lock{port};
     if (!lock) return ESP_ERR_TIMEOUT;
+    if (!i2c_ready(port)) return ESP_FAIL;
 
     TwoWire &wire = i2c_wire(port);
     wire.beginTransmission(address);
-    if (wire.write(command) != 1) {
-        wire.endTransmission();
-        return ESP_FAIL;
-    }
-    for (uint8_t i = 0; i < len; ++i) {
-        if (wire.write(data[i]) != 1) {
-            wire.endTransmission();
-            return ESP_FAIL;
-        }
-    }
-    const bool ok = wire.endTransmission() == 0;
+    // write() only fails here for a buffer overrun; endTransmission() with a STOP
+    // releases Wire's mutex either way.
+    bool ok = wire.write(command) == 1;
+    for (uint8_t i = 0; ok && i < len; ++i) ok = wire.write(data[i]) == 1;
+    ok = wire.endTransmission() == 0 && ok;
     i2c_note(port, ok);
     return ok ? ESP_OK : ESP_FAIL;
 }
@@ -344,15 +360,19 @@ inline esp_err_t i2c_write_short(uint8_t port, uint8_t address, uint8_t command,
 inline esp_err_t i2c_read_buf(uint8_t port, uint8_t address, uint8_t command, uint8_t *buffer, uint8_t len) {
     I2cLock lock{port};
     if (!lock) return ESP_ERR_TIMEOUT;
+    if (!i2c_ready(port)) return ESP_FAIL;
 
     TwoWire &wire = i2c_wire(port);
     wire.beginTransmission(address);
     if (wire.write(command) != 1) {
-        wire.endTransmission();
+        wire.endTransmission(); // with a STOP: releases Wire's mutex
+        i2c_note(port, false);
         return ESP_FAIL;
     }
-    const bool ok = wire.endTransmission(false) == 0 // repeated start, no stop
-                    && wire.requestFrom(address, len) == len;
+    // endTransmission(false) keeps Wire's mutex for the repeated start; only
+    // requestFrom() releases it, so it is called whatever the first one returned.
+    const bool sent = wire.endTransmission(false) == 0;
+    const bool ok = wire.requestFrom(address, len) == len && sent;
     i2c_note(port, ok);
     if (!ok) return ESP_FAIL;
     for (uint8_t i = 0; i < len; ++i) buffer[i] = wire.read();
@@ -370,7 +390,7 @@ inline uint16_t i2c_read_short(uint8_t port, uint8_t address, uint8_t command) {
 /// Address probe. Deliberately not reported to i2c_note(): a NACK is its normal answer.
 inline bool i2c_test_address(uint8_t addr, uint8_t port = 0) {
     I2cLock lock{port};
-    if (!lock) return false;
+    if (!lock || !i2c_bus(port).running) return false;
     TwoWire &wire = i2c_wire(port);
     wire.beginTransmission(addr);
     return wire.endTransmission() == 0;

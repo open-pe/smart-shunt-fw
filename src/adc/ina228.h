@@ -63,9 +63,12 @@ PowerSampler_INA228 *ina228_instance[4] = {nullptr, nullptr, nullptr, nullptr};
 // These two talk to the same bus as i2c.h, from the real-time task on the other core.
 // A register read is a three-call sequence (write pointer, repeated start, read), so
 // the whole sequence has to hold i2cLock -- not each call. See the comment in i2c.h.
+// requestFrom() is called unconditionally: endTransmission(false) keeps Wire's own mutex
+// for the repeated start, and only requestFrom() gives it back.
 bool readRegister(uint16_t addr, uint8_t reg, uint16_t *regValue) {
     I2cLock lock;
     if (!lock) return false;
+    if (!i2c_ready(0)) return false;
 
     uint8_t MSByte = 0, LSByte = 0;
     bool success = true;
@@ -88,6 +91,7 @@ bool readRegister(uint16_t addr, uint8_t reg, uint16_t *regValue) {
 bool readBuf(uint16_t addr, uint8_t reg, uint8_t *buffer, uint8_t len) {
     I2cLock lock;
     if (!lock) return false;
+    if (!i2c_ready(0)) return false;
 
     bool success = true;
     Wire.beginTransmission(addr);

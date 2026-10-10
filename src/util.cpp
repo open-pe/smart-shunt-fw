@@ -85,6 +85,7 @@ void UART_LOG(const char *fmt, ...) {
 
 #else
 
+#include "i2c.h"
 #include "secrets.h"
 #include <InfluxDbClient.h>
 #include <WiFiUDP.h>
@@ -265,8 +266,10 @@ void scan_i2c() {
     ESP_LOGI(TAG, "Scanning I2C bus 0... (SDA=%hhu, SCL=%hhu)", settings.Pin_I2C_SDA,
              settings.Pin_I2C_SCL);
 
+    // Wire without buffers takes its mutex in beginTransmission() and never gives it back
+    // (see I2cBus::running), so a bus whose begin failed is not scanned.
     nDevices = 0;
-    for (address = 1; address < 127; address++) {
+    for (address = 1; i2c_bus(0).running && address < 127; address++) {
         Wire.beginTransmission(address);
         error = Wire.endTransmission();
 
@@ -285,7 +288,7 @@ void scan_i2c() {
 #if defined(SHUNT_ADC_ONLY) && !defined(XIAO_NEST)
     ESP_LOGI(TAG, "Scanning I2C bus 1 (Wire1)...");
     int nDevices1 = 0;
-    for (address = 1; address < 127; address++) {
+    for (address = 1; i2c_bus(1).running && address < 127; address++) {
         Wire1.beginTransmission(address);
         error = Wire1.endTransmission();
 
