@@ -650,6 +650,10 @@ void setup(void) {
     if (sizeof(WireSample) != 64) assert(false);
     if (sizeof(Sample) != 32) assert(false);
 
+    /* Until every sampler has probed its part: absent parts fail transfers by design
+     * (four absent TMP117s are eight failures over ~210 ms), which is no bus upset. */
+    i2c_set_probing(true);
+
 #ifndef RELAY_MUX_ONLY
 
 #ifdef DUAL_INA228
@@ -765,6 +769,7 @@ void setup(void) {
 #endif
 
     samplers.initAll();
+    i2c_set_probing(false);
     samplers.startAll();
 
     if (!disableWifi) {

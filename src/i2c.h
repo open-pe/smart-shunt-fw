@@ -42,7 +42,7 @@
  *
  * BUS RECOVERY (ESP32 only). Every transfer reports its outcome to i2c_note(). A
  * streak of failures (I2cRecoveryPolicy: >= 4 failures spanning >= 200 ms, with a
- * 0.5..30 s backoff between attempts) runs i2c_recover_bus() inline, in the task that
+ * 0.5..30 s backoff between attempts, none counted during boot probing) runs i2c_recover_bus() inline, in the task that
  * saw the failure, under the bus lock: stop the IDF driver, free Wire's buffers, clock
  * SCL up to 9 times until a slave holding SDA lets go, send a STOP, re-begin Wire with
  * the same pins and clock. If the driver will not stop, Wire is left as it was; if
@@ -205,6 +205,13 @@ inline bool i2c_begin(uint8_t port, int8_t sda, int8_t scl, uint32_t freq) {
     return ok;
 }
 
+/// Boot-time device probing (sampler init): failures are counted in `errors` but cannot
+/// trigger a recovery. See I2cRecoveryPolicy::probing.
+inline void i2c_set_probing(bool probing) {
+    i2c_bus(0).policy.probing = probing;
+    i2c_bus(1).policy.probing = probing;
+}
+
 /// Clear a stuck bus and restart Wire on it. Task context only; takes the bus lock
 /// (recursive, so callers already inside a transfer helper are fine). Returns true when
 /// both lines end idle high and Wire is running again.
@@ -298,7 +305,7 @@ inline void i2c_note(uint8_t port, bool ok) {
 #if I2C_RECOVERY
     I2cBus &b = i2c_bus(port);
     if (ok) {
-        b.policy.onSuccess();
+        b.policy.onSuccess(esp_timer_get_time());
         return;
     }
     ++b.errors;
