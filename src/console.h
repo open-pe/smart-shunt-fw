@@ -469,6 +469,22 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                      running ? running->label : "?", state, next ? next->label : "none",
                      (unsigned) (next ? next->size : 0), (unsigned long) (millis() / 1000),
                      otaBleActive() ? "ACTIVE" : "idle");
+        } else if (inp == "i2c" || inp.startsWith("i2c recover")) {
+            const bool recover = inp != "i2c";
+            for (uint8_t port = 0; port < 2; ++port) {
+                I2cBus &b = i2c_bus(port);
+                if (b.sda < 0) continue; // never started on this board
+                if (recover) {
+                    UART_LOG("i2c bus %u: recovery %s", port,
+                             i2c_recover_bus(port, "console") ? "ok" : "FAILED (see log)");
+                }
+                UART_LOG("i2c bus %u SDA %d SCL %d %lu kHz: errors %lu (streak %lu), "
+                         "recovered %lu, failed %lu, generation %lu",
+                         port, b.sda, b.scl, (unsigned long) (b.freq / 1000),
+                         (unsigned long) b.errors, (unsigned long) b.policy.streak,
+                         (unsigned long) b.recoveries, (unsigned long) b.failedRecoveries,
+                         (unsigned long) b.generation);
+            }
         }
 #endif
 #ifndef TARGET_STM32H5
@@ -544,6 +560,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("bleconn <min> <max> <latency> ask for link params, 1.25ms units");
             UART_LOG("cpufreq [80|160|240]          CPU clock + die temp (not persisted)");
             UART_LOG("bootinfo                      running slot, OTA verify state, uptime");
+            UART_LOG("i2c [recover]                 bus error/recovery counters; force a recovery");
             UART_LOG("reboot                        restart the app (applies board-prefix)");
             UART_LOG("download                      reboot into ROM download mode");
 #ifdef WITH_RELAY_MUX

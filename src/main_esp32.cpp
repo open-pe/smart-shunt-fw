@@ -363,18 +363,24 @@ public:
     void onPrint() override {
         float itvl;
         uint16_t lat, tmo;
+        // Only once a bus recovery has been attempted, so the healthy line is unchanged.
+        char i2c[48] = "";
+        const uint32_t rec = i2c_bus(0).recoveries + i2c_bus(1).recoveries,
+                       fail = i2c_bus(0).failedRecoveries + i2c_bus(1).failedRecoveries;
+        if (rec || fail) snprintf(i2c, sizeof(i2c), " | i2c recovered %lu failed %lu",
+                                  (unsigned long) rec, (unsigned long) fail);
         if (ble.connSnapshot(itvl, lat, tmo)) {
             UART_LOG("pwr: cpu %u MHz die %.1f C psram %u B heap %u B | "
-                     "ble %.1f ms lat %u (eff %.0f ms) timeout %u ms",
+                     "ble %.1f ms lat %u (eff %.0f ms) timeout %u ms%s",
                      (unsigned) getCpuFrequencyMhz(), temperatureRead(),
                      (unsigned) ESP.getPsramSize(),
                      (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                     itvl, lat, itvl * (lat + 1), tmo);
+                     itvl, lat, itvl * (lat + 1), tmo, i2c);
         } else {
-            UART_LOG("pwr: cpu %u MHz die %.1f C psram %u B heap %u B | ble no link",
+            UART_LOG("pwr: cpu %u MHz die %.1f C psram %u B heap %u B | ble no link%s",
                      (unsigned) getCpuFrequencyMhz(), temperatureRead(),
                      (unsigned) ESP.getPsramSize(),
-                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL), i2c);
         }
     }
 
