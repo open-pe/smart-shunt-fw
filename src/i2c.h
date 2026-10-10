@@ -187,6 +187,12 @@ inline I2cBus &i2c_bus(uint8_t port) {
 
 inline uint32_t i2c_bus_generation(uint8_t port) { return i2c_bus(port).generation; }
 
+/// Sample `diag` reason (reason << 24, values NaN): the bus was recovered between the
+/// part's last configuration and this sample's reads, so a part that reset with it may
+/// have produced it (SHUNT_CAL = 0 reads as a plausible 0 A). Continues the reason codes
+/// of ina228.h (1, 2) and ads1262.h (3..10).
+static constexpr uint32_t I2C_DIAG_BUS_RECOVERED = 11;
+
 /// Upper bound on one Wire transfer. Arduino's default is 50 ms; a 3-byte register read at
 /// 100..400 kHz takes well under 1 ms, so this only shortens how long a dead bus can hold
 /// the real-time task per attempt.

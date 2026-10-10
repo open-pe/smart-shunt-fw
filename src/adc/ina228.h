@@ -145,6 +145,7 @@ class PowerSampler_INA228 : public PowerSampler {
     uint16_t adcConfig{0}; // last ADC_CONFIG written, replayed by startReading()
     uint16_t shuntCal{0};  // last SHUNT_CAL written, replayed by reconfigure()
     uint32_t busGen{0};    // i2c_bus_generation() this part was last configured at
+    bool discardCnvr{false}; // set by reconfigure(): the next CNVRF may predate it
 
     // Diagnostic state for implausible VBUS readings. The INA228's analog VBUS range is
     // 0-85V; anything outside that is either ADC railing (code near 0x7FFFF from a real
@@ -300,6 +301,8 @@ public:
     /// DIAG_ALRT) from RAM, without a reset, NVS access or logging. Covers a part that
     /// reset itself to defaults; energy and calibration live in RAM/NVS and are untouched.
     bool reconfigure() {
+        lastVoltage = NAN; // no VBUS "jump" across a reset
+        discardCnvr = true;
         const uint16_t config = (shuntLv ? 0x1 : 0x0) << 4;
         if (i2c_write_short(i2c_port, i2c_addr, INA228_CONFIG, config) != ESP_OK ||
             i2c_write_short(i2c_port, i2c_addr, INA228_SHUNT_CAL, shuntCal) != ESP_OK)
@@ -525,6 +528,13 @@ public:
             inOverflow = false;
         }
 
+        // A conversion that was already under way when the part was reconfigured ran
+        // with whatever SHUNT_CAL/ADCRANGE it had then -- after a reset, the defaults.
+        if (CNVRF && discardCnvr) {
+            discardCnvr = false;
+            return false;
+        }
+
         if (CNVRF) {
             if (acFreq) {
                 // accumulate
@@ -709,6 +719,14 @@ public:
 
         lastSample.diag = lastDiag;
         lastDiag = 0;
+
+        // A recovery since this part was last configured -- typically inside one of the
+        // reads above, when VBUS failed and the current was then read from a part that
+        // may have reset (SHUNT_CAL = 0: a plausible 0 A). Publish it as invalid.
+        if (i2c_bus_generation(i2c_port) != busGen) {
+            lastSample.u = lastSample.i = lastSample.p_ = lastSample.temp = NAN;
+            lastSample.diag = I2C_DIAG_BUS_RECOVERED << 24;
+        }
 
         //float busP = ina226.getBusPower();
         //float pErr = std::abs(lastSample.p() - busP) / busP;

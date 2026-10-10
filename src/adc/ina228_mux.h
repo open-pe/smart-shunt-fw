@@ -175,6 +175,7 @@ public:
     bool startReading() {
         state = State::IDLE;
         new_data = false;
+        lastVoltage[0] = lastVoltage[1] = NAN; // no VBUS "jump" across a reset
         const uint16_t config = (shuntLv ? 0x1 : 0x0) << 4;
         const uint16_t diagAlrt = 0x1 << 14;
         return i2c_write_short(0, i2c_addr, MUX_INA228_CONFIG, config) == ESP_OK &&
@@ -256,6 +257,11 @@ public:
         ms.temp = read_dietemp();
         ms.diag = lastDiag;
         lastDiag = 0;
+        // Recovered since the part was configured (see PowerSampler_INA228::getSample).
+        if (i2c_bus_generation(0) != busGen) {
+            ms.u = ms.temp = NAN;
+            ms.diag = I2C_DIAG_BUS_RECOVERED << 24;
+        }
 
         advanceTarget();
         state = State::IDLE;
@@ -301,7 +307,9 @@ private:
         if (!CNVRF) return;
 
         float v = read_voltage_raw(Target::ZERO);
-        zeroOffset = v;
+        // A failed read (NaN) or one across a recovery keeps the old offset: it would
+        // otherwise poison every sample until the next zero calibration.
+        if (std::isfinite(v) && i2c_bus_generation(0) == busGen) zeroOffset = v;
         new_data = false;
         zeroCalCounter = 0;
         nextTarget = Target::CH_A;
