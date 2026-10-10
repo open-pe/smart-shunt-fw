@@ -220,8 +220,10 @@ inline bool i2c_recover_bus(uint8_t port, const char *trigger) {
     TwoWire &wire = i2c_wire(port);
 
     // The IDF driver refuses to remove its devices -- so the bus cannot be deleted --
-    // while its status says a transfer is in flight. This resets that status so the
-    // teardown below can succeed.
+    // while its status says a transfer is in flight. This resets that status and the
+    // controller, so the teardown below can succeed. It is NOT a bus clear: on the S3 it
+    // starts the controller's clear-bus sequence and resets the peripheral straight
+    // after, without waiting for it. The bit-banged clear below is the real one.
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
     if (auto h = (i2c_master_bus_handle_t) i2cBusHandle(port)) i2c_master_bus_reset(h);
 #endif
@@ -235,31 +237,39 @@ inline bool i2c_recover_bus(uint8_t port, const char *trigger) {
     bool sdaStuck = false, sclStuck = false, idle = false;
     int pulses = 0;
     if (released) {
-        constexpr uint32_t HALF_US = 5; // 100 kHz
+        // 10 us half period (50 kHz): the shunt-adc harness runs on the ~45k internal
+        // pull-ups, a ~2 us rise (settings.h, I2C_Freq). Every SCL release also waits for
+        // the line to read high -- a slow rise or a part stretching the clock -- bounded
+        // at SCL_RISE_MAX_US.
+        constexpr uint32_t HALF_US = 10, SCL_RISE_MAX_US = 1000, SETTLE_US = 50;
         const uint8_t sda = b.sda, scl = b.scl;
+        auto releaseScl = [&] {
+            digitalWrite(scl, HIGH);
+            for (uint32_t us = 0; !digitalRead(scl) && us < SCL_RISE_MAX_US; ++us) delayMicroseconds(1);
+            delayMicroseconds(HALF_US);
+        };
         pinMode(sda, INPUT_PULLUP);
+        pinMode(scl, INPUT_PULLUP);
+        digitalWrite(scl, HIGH); // latch high BEFORE the output is enabled: no glitch low
         pinMode(scl, OUTPUT_OPEN_DRAIN | PULLUP);
-        digitalWrite(scl, HIGH);
-        delayMicroseconds(50);
+        delayMicroseconds(SETTLE_US);
         sclStuck = !digitalRead(scl); // short, or a part stretching the clock forever
         sdaStuck = !digitalRead(sda);
         // A slave mid-byte holds SDA low until it has clocked out its bits; release it.
         while (!digitalRead(sda) && pulses < 9) {
             digitalWrite(scl, LOW);
             delayMicroseconds(HALF_US);
-            digitalWrite(scl, HIGH);
-            delayMicroseconds(HALF_US);
+            releaseScl();
             ++pulses;
         }
         // STOP: SDA low -> high while SCL is high.
         digitalWrite(scl, LOW);
-        pinMode(sda, OUTPUT_OPEN_DRAIN | PULLUP);
         digitalWrite(sda, LOW);
+        pinMode(sda, OUTPUT_OPEN_DRAIN | PULLUP);
         delayMicroseconds(HALF_US);
-        digitalWrite(scl, HIGH);
-        delayMicroseconds(HALF_US);
+        releaseScl();
         digitalWrite(sda, HIGH);
-        delayMicroseconds(HALF_US);
+        delayMicroseconds(SETTLE_US); // pull-up rise before judging the bus idle
         idle = digitalRead(sda) && digitalRead(scl);
     }
 
