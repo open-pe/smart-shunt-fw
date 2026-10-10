@@ -148,6 +148,7 @@ private:
     bool pollFailed{false};  ///< sticky: DRDY poll failed, getSample() owes a NAN
     unsigned long tLastPoll{0};
     uint32_t readErrors{0};  ///< consecutive failures, for rate-limited logging
+    uint32_t busGen{0};      ///< i2c_bus_generation() CONFIG was last written at
 };
 
 

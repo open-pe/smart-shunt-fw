@@ -139,6 +139,8 @@ class PowerSampler_INA228 : public PowerSampler {
     TaskNotification notification;
     float current_LSB{};
     uint16_t adcConfig{0}; // last ADC_CONFIG written, replayed by startReading()
+    uint16_t shuntCal{0};  // last SHUNT_CAL written, replayed by reconfigure()
+    uint32_t busGen{0};    // i2c_bus_generation() this part was last configured at
 
     // Diagnostic state for implausible VBUS readings. The INA228's analog VBUS range is
     // 0-85V; anything outside that is either ADC railing (code near 0x7FFFF from a real
@@ -286,6 +288,19 @@ public:
         // total 1/((1052-6+1052-6) * 1)
 
         adcConfig = adc_config;
+        busGen = i2c_bus_generation(i2c_port);
+        return writeAdcConfig();
+    }
+
+    /// Rewrite every register this driver sets (CONFIG.ADCRANGE, SHUNT_CAL, ADC_CONFIG,
+    /// DIAG_ALRT) from RAM, without a reset, NVS access or logging. Covers a part that
+    /// reset itself to defaults; energy and calibration live in RAM/NVS and are untouched.
+    bool reconfigure() {
+        const uint16_t config = (shuntLv ? 0x1 : 0x0) << 4;
+        if (i2c_write_short(i2c_port, i2c_addr, INA228_CONFIG, config) != ESP_OK ||
+            i2c_write_short(i2c_port, i2c_addr, INA228_SHUNT_CAL, shuntCal) != ESP_OK)
+            return false;
+        avgCnt = 0;
         return writeAdcConfig();
     }
 
@@ -425,6 +440,7 @@ public:
             shuntCal *= 4;
         // auto shuntCalShort = (uint16_t) std::lround(shuntCal);
         auto shuntCalShort = (uint16_t) std::lround(shuntCal);
+        this->shuntCal = shuntCalShort;
 
         current_LSB = (float) shuntCalShort / 13107.2e6f / resistor;
 
@@ -445,8 +461,9 @@ public:
         // (and then blocking the real-time task for up to 10 s to celebrate). Rewriting
         // ADC_CONFIG and re-enabling the conversion-ready alert is the corrective action
         // that actually recovers the two failures seen here: a device that reset itself
-        // back to defaults, and a lost CNVR alert configuration.
-        if (adcConfig) writeAdcConfig();
+        // back to defaults, and a lost CNVR alert configuration. A reset also clears
+        // SHUNT_CAL and ADCRANGE, so all of it is rewritten, not just ADC_CONFIG.
+        if (adcConfig) reconfigure();
     }
 
     void alertNewDataFromISR() {
@@ -469,6 +486,14 @@ public:
 
         tLastDataCheck = micros();
         new_data = false;
+
+        // The bus was recovered since this part was configured: it may have reset too.
+        // Retried on the 50 ms poll until it sticks; no sample until it has.
+        const uint32_t gen = i2c_bus_generation(i2c_port);
+        if (gen != busGen) {
+            if (reconfigure()) busGen = gen;
+            return false;
+        }
 
         //auto diagAlrt = i2c_read_short(i2c_port, i2c_addr, INA228_DIAG_ALRT);
 

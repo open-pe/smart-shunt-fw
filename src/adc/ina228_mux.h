@@ -78,6 +78,9 @@ private:
     bool inOverflow = false;
     bool shuntLv = false;
     float current_LSB = 0;
+    uint16_t shuntCal = 0;
+    uint32_t busGen = 0; // i2c_bus_generation() the part was last configured at
+    unsigned long tLastReconfigure = 0;
 
 public:
     INA228MuxBackend(uint8_t addr, uint8_t alert, uint8_t pin_a, uint8_t pin_b, uint8_t pin_zero)
@@ -131,6 +134,7 @@ public:
         digitalWrite(mux_pin_b, LOW);
         digitalWrite(mux_pin_zero, LOW);
 
+        busGen = i2c_bus_generation(0);
         ESP_LOGI("ina228_mux", "initialized: addr=0x%02hhX alert=%d mux=%d/%d/%d zeroCalInterval=%hu",
                  i2c_addr, alert_pin, mux_pin_a, mux_pin_b, mux_pin_zero, zeroCalInterval);
         initialized = true;
@@ -151,6 +155,7 @@ public:
         auto shuntCal = 13107.2e6f * current_LSB * resistor;
         if (shuntLv) shuntCal *= 4;
         auto shuntCalShort = (uint16_t) std::lround(shuntCal);
+        this->shuntCal = shuntCalShort;
         current_LSB = (float) shuntCalShort / 13107.2e6f / resistor;
 
         ESP_LOGI("ina228_mux", "Set shuntCal %hu, Vmax_exp=%.1fmV", shuntCalShort, maxExpectedVoltage * 1e3f);
@@ -164,17 +169,30 @@ public:
         notification.notifyFromIsr();
     }
 
-    /// Idempotent stall recovery. Resets to IDLE, re-arms DIAG_ALRT.
+    /// Idempotent stall recovery. Resets to IDLE, rewrites CONFIG.ADCRANGE, SHUNT_CAL
+    /// and DIAG_ALRT from RAM (a part that reset itself lost all three).
     /// Safe to call from either MuxChannel's EnergyCounter.
-    void startReading() {
+    bool startReading() {
         state = State::IDLE;
         new_data = false;
-        uint16_t diagAlrt = 0;
-        diagAlrt |= 0x1 << 14;
-        i2c_write_short(0, i2c_addr, MUX_INA228_DIAG_ALRT, diagAlrt);
+        const uint16_t config = (shuntLv ? 0x1 : 0x0) << 4;
+        const uint16_t diagAlrt = 0x1 << 14;
+        return i2c_write_short(0, i2c_addr, MUX_INA228_CONFIG, config) == ESP_OK &&
+               i2c_write_short(0, i2c_addr, MUX_INA228_SHUNT_CAL, shuntCal) == ESP_OK &&
+               i2c_write_short(0, i2c_addr, MUX_INA228_DIAG_ALRT, diagAlrt) == ESP_OK;
     }
 
     bool hasDataFor(Target ch) {
+        // The bus was recovered since the part was configured: it may have reset too.
+        // Retried every 50 ms until it sticks.
+        const uint32_t gen = i2c_bus_generation(0);
+        if (gen != busGen) {
+            if (micros() - tLastReconfigure < 50000) return false;
+            tLastReconfigure = micros();
+            if (!startReading()) return false;
+            busGen = gen;
+        }
+
         // If a ZERO conversion just completed, consume it and trigger the next.
         // Only checks the volatile flag — no I2C, no notification wait.
         if (state == State::WAITING && currentTarget == Target::ZERO && new_data) {

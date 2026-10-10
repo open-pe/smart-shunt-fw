@@ -76,6 +76,7 @@ bool PowerSampler_TMP117::init() {
         return false;
     }
 
+    busGen = i2c_bus_generation(i2cPort);
     ESP_LOGI(TAG, "bus %hhu 0x%02hhX: init ok (id=0x%03X, config=0x%04X)",
              i2cPort, address, id, cfg);
     return true;
@@ -112,6 +113,17 @@ bool PowerSampler_TMP117::hasData() {
     // it sits below the sticky-flag check and not above it.
     if (micros() - tLastPoll < POLL_INTERVAL_US) return false;
     tLastPoll = micros();
+
+    // The bus was recovered since CONFIG was written. A part that reset with it reloads
+    // CONFIG from its EEPROM (see init()), so write it again; volatile, no EEPROM cycle.
+    const uint32_t gen = i2c_bus_generation(i2cPort);
+    if (gen != busGen) {
+        if (i2c_write_short(i2cPort, address, REG_CONFIGURATION, CONFIG) != ESP_OK) {
+            pollFailed = true;
+            return true;
+        }
+        busGen = gen;
+    }
 
     uint8_t buf[2];
     if (i2c_read_buf(i2cPort, address, REG_CONFIGURATION, buf, 2) != ESP_OK) {
