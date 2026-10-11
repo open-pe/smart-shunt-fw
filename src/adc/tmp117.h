@@ -137,6 +137,11 @@ public:
     /// part is re-probed every REPROBE_INTERVAL_US from hasData() (see tmp117.cpp).
     bool hotPluggable() const override { return true; }
 
+    /// Published T is corrected by EnergyCounter with the stored per-sensor offset
+    /// (temp_offset.h), keyed by getStorageId().  Firmware-side on purpose: the chip's own
+    /// TEMP_OFFSET register (0x07) stays at its default, see temp_offset.h.
+    bool acceptsTempOffset() const override { return true; }
+
     /// No stall reports while the part has never answered: there is nothing to re-arm,
     /// and "absent" is already logged once at boot.
     int64_t stallTimeoutUs() const override { return present ? 4000000 : 0; }

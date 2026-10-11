@@ -69,6 +69,12 @@ class PowerSampler {
   /// counter list is then fixed at boot, which is what keeps this safe: other tasks
   /// iterate `counters` without a lock, so it must never grow at runtime.
   virtual bool hotPluggable() const { return false; }
+
+  /// Does Sample::temp carry a SENSOR temperature that a stored per-sensor additive
+  /// offset (`calibrate <name> T <offset>`, temp_offset.h) may correct?  Only the
+  /// dedicated temperature sensors (TMP117) say yes.  Defaults to false so a die
+  /// temperature (INA228, ADS1262) can never pick up a correction meant for a sensor.
+  virtual bool acceptsTempOffset() const { return false; }
 };
 
 

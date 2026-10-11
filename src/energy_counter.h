@@ -10,6 +10,7 @@
 #include "util.h"
 #include "settings.h"
 #include "mean_window.h"
+#include "temp_offset.h"
 
 #include "readerwriterqueue.h"
 
@@ -214,6 +215,19 @@ public:
 
     float calibFactorU = 1, calibFactorI = 1;
 
+    /// Additive degC correction for Sample::temp; 0 unless the sampler acceptsTempOffset()
+    /// AND a valid offset is stored for it (temp_offset.h). Written by the console (app
+    /// task), read by the RT task: a single aligned float, like calibFactorI.
+    float tempOffsetC = 0;
+    /// Set by SamplerRegistry::initAll() when another offset-taking sampler shares this
+    /// storageId: the stored offset would be aliased, so none is applied or accepted.
+    bool tempOffsetBlocked = false;
+    /// What tempOffsetC is known to be, for the audit frames (temp_offset.h).
+    temp_offset::Status tempOffsetStatus = temp_offset::Status::Unset;
+    /// An audit frame is owed (set by the console on a change; consumed by Telemetry).
+    bool tempOffsetFramePending = false;
+    uint8_t tempOffsetFrameIdx = 0;
+
 private:
     const uint8_t eePromIndex;
 
@@ -235,6 +249,21 @@ public:
                          "voltage is published raw", name.c_str(), calibFactorU);
 #endif
         }
+        if (sampler->acceptsTempOffset()) {
+            temp_offset::Load st;
+            tempOffsetC = temp_offset::load(eePromIndex_, st);
+            tempOffsetStatus = st == temp_offset::Load::Ok ? temp_offset::Status::Set
+                             : st == temp_offset::Load::Invalid ? temp_offset::Status::Invalid
+                             : temp_offset::Status::Unset;
+            if (name.size() + 1 > sizeof(WireSample::dev))
+                UART_LOG("%s: name too long for a T-offset audit frame, none will be published",
+                         name.c_str());
+            if (st == temp_offset::Load::Ok)
+                UART_LOG("%s read temperature offset T %+.4f C (applied)", name.c_str(), tempOffsetC);
+            else if (st == temp_offset::Load::Invalid)
+                UART_LOG("%s: stored temperature offset is invalid, IGNORED -- T published "
+                         "uncorrected", name.c_str());
+        }
     }
 
     EnergyCounter(const EnergyCounter &) = delete; // no copy
@@ -246,6 +275,40 @@ public:
 
         storeCalibrationFactors(eePromIndex, calibFactorU, calibFactorI);
     }
+
+    /// Persist and apply a T offset (0 clears). False -- and nothing changes -- if this
+    /// sampler takes no offset, the value is out of bounds, or the store failed.
+    bool setTempOffset(float off) {
+        if (!sampler->acceptsTempOffset() || tempOffsetBlocked || !temp_offset::valid(off)) return false;
+        if (!temp_offset::store(eePromIndex, off)) return false;
+        tempOffsetC = off;
+        tempOffsetStatus = off == 0 ? temp_offset::Status::Unset : temp_offset::Status::Set;
+        tempOffsetFramePending = true;
+        return true;
+    }
+
+    /// Audit frame for the T offset (see temp_offset.h). False if this sampler takes no
+    /// offset, or its name plus the marker would not fit WireSample::dev -- a truncated name
+    /// would file the record under the wrong device.
+    bool tempOffsetFrame(temp_offset::Event ev, WireSample &ws) {
+        if (!sampler->acceptsTempOffset()) return false;
+        if (name.size() + 1 > sizeof(ws.dev)) return false;
+        ws = WireSample{};
+        ws.v = 1;
+        ws.idx = tempOffsetFrameIdx++;
+        ws.i_max = NAN;
+        ws.u_max = NAN;
+        ws.dev[0] = temp_offset::FRAME_MARKER;
+        name.copy(ws.dev + 1, sizeof(ws.dev) - 1);
+        ws.data = Sample{};
+        ws.data.u = temp_offset::frameValue(tempOffsetStatus, tempOffsetC);
+        ws.data.setTimeNow();
+        ws.diag = temp_offset::frameDiag(ev, tempOffsetStatus);
+        ws.crc = WireSample::compute_crc16((uint8_t *) &ws, (uint8_t *) &ws.crc - (uint8_t *) &ws);
+        return true;
+    }
+
+    uint8_t storageId() const { return eePromIndex; }
 
     void update() {
         PowerSampler &ps(*sampler);
@@ -267,6 +330,9 @@ public:
             s.u *= calibFactorU;
 #endif
             s.i *= calibFactorI;
+            // Sensor temperature only (acceptsTempOffset); a die temperature is never touched.
+            if (tempOffsetC != 0 && sampler->acceptsTempOffset())
+                s.temp = temp_offset::apply(s.temp, tempOffsetC);
 
             auto P = s.p();
             if (lastTime != 0) {

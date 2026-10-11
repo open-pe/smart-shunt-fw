@@ -204,6 +204,9 @@ public:
     volatile bool sessionChanged = false;
 
     volatile bool subscribed = false; // whether the client subscribed for indications
+    // Accepted telemetry subscriptions since boot; written only in onCharSub() (host task),
+    // read by the app task through telemetrySessions(). A 32-bit aligned load is atomic.
+    volatile uint32_t nTelemetrySessions = 0;
     volatile uint8_t waitingForAck = 0; // in-transit; written by app task, read by onAck
     uint32_t tLastIndicate = 0;
 
@@ -609,6 +612,8 @@ public:
     bool inTransmission() const { return waitingForAck > 0; }
 
     bool isConnected() const override { return pServer && pServer->getConnectedCount() > 0; }
+
+    uint32_t telemetrySessions() const override { return nTelemetrySessions; }
 
     /// Sweep hook: set the steady-state connection parameters and make tick() reissue
     /// the request. Intervals are in 1.25 ms units, latency in events -- the LL's own
@@ -1394,6 +1399,7 @@ public:
         }
         subscribed = sub;
         sessionChanged = true;
+        nTelemetrySessions = nTelemetrySessions + 1; // single writer (host task)
         if (sub && nDroppedNoPeer) {
             ESP_LOGI("ble", "subscriber attached, %lu samples were discarded unsent",
                      (unsigned long) nDroppedNoPeer);

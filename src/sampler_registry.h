@@ -50,6 +50,26 @@ struct SamplerRegistry {
                 ESP_LOGI("sampler", "Initialized energy counter for %s", composed[i].c_str());
             }
         }
+        /* T offsets are keyed by storageId (temp_offset.h). Two offset-taking samplers on
+         * one id would read and write the SAME stored correction -- the slot-aliasing bug
+         * tmp117.h and main_esp32.cpp document for U/I, one namespace over. Fail closed:
+         * neither gets an offset until the ids are made distinct. */
+        for (size_t a = 0; a < counters.size(); ++a) {
+            if (!counters[a].sampler->acceptsTempOffset()) continue;
+            for (size_t b = a + 1; b < counters.size(); ++b) {
+                if (!counters[b].sampler->acceptsTempOffset()) continue;
+                if (counters[a].storageId() != counters[b].storageId()) continue;
+                ESP_LOGE("sampler", "%s and %s share storageId %u: T offset DISABLED for both",
+                         counters[a].name.c_str(), counters[b].name.c_str(),
+                         (unsigned) counters[a].storageId());
+                counters[a].tempOffsetC = 0;
+                counters[b].tempOffsetC = 0;
+                counters[a].tempOffsetBlocked = true;
+                counters[b].tempOffsetBlocked = true;
+                counters[a].tempOffsetStatus = temp_offset::Status::Blocked;
+                counters[b].tempOffsetStatus = temp_offset::Status::Blocked;
+            }
+        }
         /* Scan on ANY failure, not only on a total wipeout. The old `counters.empty()`
          * gate meant a board with one working SPI sampler stayed silent while every
          * I2C part on it failed -- exactly the N16R8 clone case, where four TMP117s

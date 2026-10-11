@@ -263,6 +263,37 @@ i2c: TPT72616-SO1R (3peak)
 
 # Calibration
 
+Console commands (serial, or over BLE as `cmd <line>`). Sampler names carry the board
+prefix, if one is set (`ftr_DCCT`, not `DCCT`).
+
+| Command | Effect |
+|---|---|
+| `calibrate <sampler> U\|I [*]<factor>` | gain factor, absolute or `*` relative (U is stored but not applied, `APPLY_U_GAIN_CAL=0`) |
+| `calibrate <sampler> T <+/-degC>` | additive temperature offset for a TMP117 sampler, \|offset\| <= 2 °C |
+| `calibrate <sampler> T clear` (or `T 0`) | remove the T offset; T is published uncorrected |
+| `calibrate <sampler> T` | show the T offset |
+| `calibrate` / `calibrate list` | every sampler's U/I factors and T offset |
+
+The T offset is stored per sampler in its own NVS namespace (`tempoff`, key `s<storageId>`),
+apart from the U/I EEPROM image. It applies only to TMP117 samplers, never to INA228 or ADS1262 die
+temperatures. A missing, corrupt or out-of-range stored value loads as 0. The boot log prints
+every applied offset. The TMP117's own TEMP_OFFSET register is left at its default.
+See `src/temp_offset.h`.
+
+Each offset is also published over BLE on every boot, every collector reconnect, every change,
+and every 10 minutes. The collector writes it to the InfluxDB measurement
+`smart_shunt_calibration` (`T_offset`, `status`, `event`), so you can undo the correction on stored
+`T` later. An offset that could not be read is written as `status="invalid"` with no `T_offset`.
+`doc/receiver.md` has the frame format.
+
+Example: two TMP117s glued together at 19.5 °C, with 0x48 reading 0.145 °C above 0x49:
+
+```
+calibrate t17_48 T -0.145
+```
+
+Older U/I examples:
+
 ```
 
 ina22x-resistor-range 0.000333333333333333 120

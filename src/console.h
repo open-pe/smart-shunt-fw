@@ -57,7 +57,7 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             /* The counters are zeroed in place -- nothing reboots -- so this reply does
              * reach a remote caller, unlike the `download` case help warns about. */
             UART_LOG("energy counters zeroed");
-        } else if (inp.startsWith("calibrate ")) {
+        } else if (inp.startsWith("calibrate ") && inp != "calibrate list") {
             std::string samplerName = inp.substring(10, inp.indexOf(' ', 10)).c_str();
             size_t i = 10 + samplerName.size() + 1;
 
@@ -71,6 +71,53 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             auto dim = inp.substring(i, i + 1);
             dim.toUpperCase();
             i += 2;
+
+            /* T: additive per-sensor temperature offset in degC (temp_offset.h). Handled
+             * before the U/I factor parse: toFloat() turns garbage into 0, and the gain
+             * bounds reject 0, neither of which is right for an offset. */
+            if (dim == "T" && (inp.length() <= i - 1 || inp.charAt(i - 1) == ' ')) {
+                const String arg = inp.length() > i ? inp.substring(i) : String();
+                if (!ec->sampler->acceptsTempOffset()) {
+                    UART_LOG("calibrate: %s takes no T offset (only TMP117 sensors do; "
+                             "die temperatures are never corrected)", samplerName.c_str());
+                    break;
+                }
+                if (ec->tempOffsetBlocked) {
+                    UART_LOG("calibrate: %s shares its storageId %u with another TMP117, "
+                             "T offset disabled (see boot log)", samplerName.c_str(),
+                             (unsigned) ec->storageId());
+                    break;
+                }
+                float off;
+                const float was = ec->tempOffsetC;
+                switch (temp_offset::parse(arg.c_str(), off)) {
+                    case temp_offset::Parse::Show:
+                        UART_LOG("%s: temperature offset [T] = %+.4f C (storageId %u)",
+                                 samplerName.c_str(), was, (unsigned) ec->storageId());
+                        break;
+                    case temp_offset::Parse::Malformed:
+                        UART_LOG("calibrate: T offset '%s' is not a number, rejected "
+                                 "(absolute degC, e.g. -0.145; 'clear' or 0 removes it)", arg.c_str());
+                        break;
+                    case temp_offset::Parse::OutOfRange:
+                        UART_LOG("calibrate: T offset '%s' out of bounds (|offset| <= %.1f C), rejected",
+                                 arg.c_str(), temp_offset::MAX_ABS_C);
+                        break;
+                    case temp_offset::Parse::Clear:
+                    case temp_offset::Parse::Set:
+                        if (!ec->setTempOffset(off)) {
+                            UART_LOG("calibrate: storing T offset for %s FAILED, still %+.4f C",
+                                     samplerName.c_str(), ec->tempOffsetC);
+                        } else {
+                            UART_LOG("%s: set temperature offset [T] = %+.4f C (was %+.4f C)%s",
+                                     samplerName.c_str(), ec->tempOffsetC, was,
+                                     off == 0 ? ", cleared" : "");
+                        }
+                        break;
+                }
+                break;
+            }
+
             bool multiply = (inp.charAt(i) == '*');
             if (multiply)++i;
             auto factor = inp.substring(i).toFloat();
@@ -93,8 +140,21 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             } else if (dim == "I") {
                 ec->setCalibrationFactors(NAN, factor, multiply);
             } else {
-                UART_LOG("calibrate: unknown dimension '%s', expected U or I", dim.c_str());
+                UART_LOG("calibrate: unknown dimension '%s', expected U, I or T", dim.c_str());
             }
+        } else if (inp == "calibrate" || inp == "calibrate list") {
+            /* Everything that silently alters published values, per sampler. A stored
+             * factor nobody can see reads as a property of the sensor itself. */
+            for (auto &ec : registry.counters) {
+                char t[24] = "-";
+                if (ec.sampler->acceptsTempOffset())
+                    snprintf(t, sizeof t, ec.tempOffsetBlocked ? "BLOCKED" : "%+.4f C",
+                             ec.tempOffsetC);
+                UART_LOG("%-20s id %2u  U %.8f%s  I %.8f  T %s", ec.name.c_str(),
+                         (unsigned) ec.storageId(), ec.calibFactorU,
+                         APPLY_U_GAIN_CAL ? "" : " (not applied)", ec.calibFactorI, t);
+            }
+            if (registry.counters.empty()) UART_LOG("calibrate: no samplers registered");
         } else if (inp.startsWith("ina22x-resistor-range")) {
             int devIdx = 0;
             size_t i = strlen("ina22x-resistor-range");
@@ -563,6 +623,9 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
             UART_LOG("reset-counters                zero the energy counters");
             UART_LOG("calibrate <sampler> <U|I> [*]<factor>");
             UART_LOG("                              PREFIXED sampler name, e.g. ftr_DCCT");
+            UART_LOG("calibrate <sampler> T [<+/-degC>|clear]");
+            UART_LOG("                              TMP117 additive T offset (NVS), |x| <= 2");
+            UART_LOG("calibrate [list]              all samplers' U/I factors and T offsets");
             UART_LOG("ina22x-resistor-range[2|3] <ohm> <max A>");
             UART_LOG("board-prefix [<name>]         series-name prefix (NVS, needs reboot)");
 #ifndef TARGET_STM32H5

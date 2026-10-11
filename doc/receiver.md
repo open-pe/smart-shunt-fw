@@ -60,6 +60,17 @@ change on either side has to be made with the other in mind.
   rather than stamped with its arrival time; reception time is a different quantity from
   measurement time, and nothing downstream could separate them afterwards.
 
+- **T-offset audit frames** (2026-10-11, `src/temp_offset.h`) — a v=1 frame whose `dev` is `~` +
+  a TMP117 sampler name (`~t17_48`). `~` is outside the sampler-name alphabet, so it never collides
+  with a real series. `u` = the offset in °C this firmware adds to that sampler's published `T`
+  (an explicit 0 when none is stored, NaN when the stored value could not be trusted), `t` = now,
+  everything else NaN, `diag` = `0xCA << 24 | event << 8 | status` with status 0 unset, 1 set,
+  2 invalid, 3 blocked (storage key aliased) and event 1 boot (first subscription after boot),
+  2 reconnect, 3 console change, 4 periodic (10 min). The collector writes it to
+  `smart_shunt_calibration` (tags `device=BLE_t17_48` plus `address`/`board`; fields `T_offset`,
+  `status`, `event`), and writes `T_offset` only for status set/unset. A collector older than this
+  files it as an ordinary series `BLE_~t17_48` with `U` = offset, so update the collector first.
+
 ## In InfluxDB
 
 The collector tags points `BLE_` + the name in `dev[16]`, so the series key is the sampler name this

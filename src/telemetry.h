@@ -58,6 +58,36 @@ protected:
 
     int8_t auxPublished = -1;
 
+    /* T-offset audit frames (temp_offset.h). Sent on every new telemetry subscription --
+     * which is how "every boot" reaches the collector: a frame sent before anyone listens is
+     * discarded -- on a console change, and every REPUBLISH_US. Rides the telemetry tick so
+     * it is batched with the summaries, never as a lone indication. */
+    uint32_t tempOffsetSessionsSeen = 0;
+    int64_t tLastTempOffsetPublish = 0;
+
+    void publishTempOffsets() {
+        const uint32_t sessions = ble.telemetrySessions();
+        const int64_t now = platform::micros64();
+        temp_offset::Event ev;
+        bool all = true;
+        if (sessions != tempOffsetSessionsSeen) {
+            ev = tempOffsetSessionsSeen == 0 ? temp_offset::Event::Boot : temp_offset::Event::Reconnect;
+            tempOffsetSessionsSeen = sessions;
+        } else if (now - tLastTempOffsetPublish >= (int64_t) temp_offset::REPUBLISH_US) {
+            ev = temp_offset::Event::Periodic;
+        } else {
+            ev = temp_offset::Event::Console;
+            all = false;
+        }
+        if (all) tLastTempOffsetPublish = now;
+        for (auto &ec : registry.counters) {
+            if (!all && !ec.tempOffsetFramePending) continue;
+            ec.tempOffsetFramePending = false;
+            WireSample ws;
+            if (ec.tempOffsetFrame(ev, ws)) ble.send((uint8_t *) &ws, sizeof(ws));
+        }
+    }
+
     virtual void processConsole() {
         if (Serial.available()) {
 #ifdef TARGET_STM32H5
@@ -165,6 +195,8 @@ public:
                     }
                 }
             }
+
+            publishTempOffsets();
 
             const bool active = anyActive || !anyPowerVote;
             if (active) noteWakeEvent();
