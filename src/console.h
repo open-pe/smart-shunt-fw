@@ -18,6 +18,7 @@ extern RelayMuxAdcBackend relayMuxAdc;
 
 #ifndef TARGET_STM32H5
 #include <esp_ota_ops.h>
+#include "i2c_orient.h"
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <soc/rtc_cntl_reg.h>
@@ -486,6 +487,13 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                          b.running ? "" : " NOT RUNNING", (unsigned long) b.errors,
                          (unsigned long) b.policy.streak, (unsigned long) b.recoveries,
                          (unsigned long) b.failedRecoveries, (unsigned long) b.generation);
+            }
+            {
+                const auto &o = i2c_orient::report();
+                UART_LOG("i2c boot TMP117 orientation check (SDA %d SCL %d): %s, "
+                         "normal ACK mask 0x%X, swapped ID mask 0x%X (bit0 = 0x48)",
+                         o.sda, o.scl, i2c_orient::resultName(o.result),
+                         o.normalMask, o.swappedMask);
             }
             // Never an empty reply: over BLE that reads exactly like success.
             if (!any) UART_LOG("i2c: no bus started on this board");

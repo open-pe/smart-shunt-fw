@@ -62,6 +62,13 @@ class PowerSampler {
   /// tell "nothing to say yet" from "dead" without being told the cadence.
   /// Returning 0 disables stall detection for this sampler.
   virtual int64_t stallTimeoutUs() const { return 4000000; }
+
+  /// May a part that failed init() at boot appear later?  If true, SamplerRegistry
+  /// keeps an EnergyCounter for it anyway and the sampler is expected to re-probe its
+  /// part from hasData() (cheaply, rate-limited) and publish once it answers.  The
+  /// counter list is then fixed at boot, which is what keeps this safe: other tasks
+  /// iterate `counters` without a lock, so it must never grow at runtime.
+  virtual bool hotPluggable() const { return false; }
 };
 
 

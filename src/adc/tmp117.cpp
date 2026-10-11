@@ -77,6 +77,7 @@ bool PowerSampler_TMP117::init() {
     }
 
     busGen = i2c_bus_generation(i2cPort);
+    present = true;
     ESP_LOGI(TAG, "bus %hhu 0x%02hhX: init ok (id=0x%03X, config=0x%04X)",
              i2cPort, address, id, cfg);
     return true;
@@ -104,6 +105,23 @@ float PowerSampler_TMP117::readTemperature() {
 }
 
 bool PowerSampler_TMP117::hasData() {
+    // Hot-plug: a part absent at boot is looked for again every REPROBE_INTERVAL_US.
+    // The address probe is not counted as a bus error (a NACK is its normal answer),
+    // so an empty slot can never drive a bus recovery; only a part that ACKs gets the
+    // full init(). Once present, a part stays present: a later failure publishes NaN
+    // (below) rather than going quiet.
+    if (!present) {
+        if (tLastProbe != 0 && micros() - tLastProbe < REPROBE_INTERVAL_US) return false;
+        tLastProbe = micros() | 1; // never 0, which means "not probed yet"
+        if (!i2c_test_address(address, i2cPort)) return false;
+        if (init()) {
+            ESP_LOGI(TAG, "bus %hhu 0x%02hhX: appeared after boot (hot-plug), publishing",
+                     i2cPort, address);
+            tLastPoll = micros();
+        }
+        return false;
+    }
+
     // Both flags are sticky until getSample() consumes them, so re-polling here
     // would be pointless traffic as well as losing the pending state.
     if (dataReady || pollFailed) return true;

@@ -28,6 +28,7 @@ struct SamplerRegistry {
          * back tomorrow. */
         std::vector<std::string> composed;
         composed.reserve(entries.size());
+        counters.reserve(entries.size()); // never reallocated after boot
         for (auto &e : entries) composed.push_back(boardPrefixApply(e.name));
         boardPrefixCheckNames(composed);
 
@@ -35,8 +36,15 @@ struct SamplerRegistry {
         for (size_t i = 0; i < entries.size(); ++i) {
             auto &e = entries[i];
             if (!e.sampler->init()) {
-                ESP_LOGI("sampler", "%s: init failed", composed[i].c_str());
                 ++failed;
+                if (e.sampler->hotPluggable()) {
+                    /* Kept, silent until its part answers: the sampler re-probes from
+                     * hasData(). Created HERE, never later -- see hotPluggable(). */
+                    counters.emplace_back(EnergyCounter{e.sampler, composed[i], e.sampler->getStorageId()});
+                    ESP_LOGI("sampler", "%s: init failed, will re-probe (hot-plug)", composed[i].c_str());
+                } else {
+                    ESP_LOGI("sampler", "%s: init failed", composed[i].c_str());
+                }
             } else {
                 counters.emplace_back(EnergyCounter{e.sampler, composed[i], e.sampler->getStorageId()});
                 ESP_LOGI("sampler", "Initialized energy counter for %s", composed[i].c_str());

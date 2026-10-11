@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include "i2c_orient.h"
 
 #include <InfluxDbClient.h>
 #include <map>
@@ -612,6 +613,11 @@ void setup(void) {
      * harness unplugged. See i2c_check_pins() for what it can and cannot see.
      * i2c_begin() also records pins and clock for bus recovery (i2c.h). */
 #if !defined(RELAY_MUX_ONLY) && !defined(XIAO_NEST)
+    /* Before Wire owns the pins and before any sampler configures its part: a TMP117
+     * wired with SDA/SCL swapped otherwise reads exactly like an absent one. Diagnostic
+     * only -- see i2c_orient.h for why it is safe for the INA228s on this bus and why
+     * the bus is never run swapped. Result also on the `i2c` console command. */
+    i2c_orient::checkTmp117Orientation(settings.Pin_I2C_SDA, settings.Pin_I2C_SCL);
     i2c_begin(0, settings.Pin_I2C_SDA, settings.Pin_I2C_SCL, settings.I2C_Freq);
 #elif defined(XIAO_NEST)
     /* No I2C parts on this board at all -- the XIAO carries the shunt-adc board

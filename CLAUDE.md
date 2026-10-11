@@ -54,6 +54,14 @@ gone — old transcripts still name them.)
   collector times out. The firmware recovers the bus itself (`src/i2c.h`), logging one
   `bus N recovery (...)` WARN per attempt; the `pwr:` line gains `i2c recovered N failed M`
   once any has run, and console `i2c` / `i2c recover` show and force it.
+- **stackVolt (USB serial 7C:4F:AD:1E:9A:BC = BLE 7C:4F:AD:1E:9A:BD, base+1 because the
+  core builds with TWO universal MACs) had a dead USB on 2026-10-11**: zero bytes on
+  `/dev/cu.usbmodem1101`, and esptool's reset did not even reboot it ("No serial data
+  received", data in InfluxDB uninterrupted). OTA over BLE from the Mac worked instead, as a
+  second central next to the rpi collector (no collector stop needed on the two-link image):
+  `smart-shunt-ota-ble.py <bin> --address <CoreBluetooth UUID>`. All shunts advertise as
+  `smart-shunt`, so identify the UUID first, e.g. by `blerate 700` and watching that board's
+  point rate drop in InfluxDB, then `blerate 400`.
 - Opening the port with default DTR/RTS can leave the board wedged and silent. If it goes
   quiet and re-flashing also fails, it needs a physical **BOOT + RESET** to re-enter download
   mode — ask, don't try to fix it over the wire.

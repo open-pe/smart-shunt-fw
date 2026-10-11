@@ -133,6 +133,19 @@ public:
     /// by construction and must not vote on idle-sleep.  See PowerSampler.
     bool measuresPower() const override { return false; }
 
+    /// A TMP117 clipped onto a part after boot is found without a reboot: an absent
+    /// part is re-probed every REPROBE_INTERVAL_US from hasData() (see tmp117.cpp).
+    bool hotPluggable() const override { return true; }
+
+    /// No stall reports while the part has never answered: there is nothing to re-arm,
+    /// and "absent" is already logged once at boot.
+    int64_t stallTimeoutUs() const override { return present ? 4000000 : 0; }
+
+    /// One address-only transfer per absent part per interval -- not counted towards
+    /// the bus-recovery error streak (i2c_test_address()), and at 400 kHz ~25 us of bus
+    /// time, so four absent addresses cost the INA228s sharing the bus nothing visible.
+    static constexpr unsigned long REPROBE_INTERVAL_US = 5000000;
+
 private:
     static constexpr uint8_t storageIdForAddress(uint8_t address) {
         return address == ADDR_MAX ? STORAGE_ID_4B : STORAGE_ID_BASE + (address - ADDR_MIN);
@@ -144,6 +157,8 @@ private:
     uint8_t address;
     uint8_t i2cPort{0};
     uint8_t storageId;
+    bool present{false};     ///< init() succeeded once; until then hasData() re-probes
+    unsigned long tLastProbe{0};
     bool dataReady{false};   ///< sticky: reading CONFIG clears DRDY in the chip
     bool pollFailed{false};  ///< sticky: DRDY poll failed, getSample() owes a NAN
     unsigned long tLastPoll{0};
