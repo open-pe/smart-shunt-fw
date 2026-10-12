@@ -89,7 +89,7 @@ static constexpr uint8_t TMP117_I2C2_STORAGE_ID = 9;
 PowerSampler_TMP117 tmp117_i2c2{0x48, 1, TMP117_I2C2_STORAGE_ID};
 #define TMP117_I2C2 1
 #elif defined(DUAL_INA228)
-/* stackVolt: one more TMP117 (0x48) hand-wired to D5/D6 = GPIO6/GPIO43, on its own
+/* stackVolt: one more TMP117 hand-wired to D5/D6 = GPIO6/GPIO43, on its own
  * controller because 0x48/0x49 are taken on bus 0. Which pad is SDA is not known, so
  * setup() tries both orders and starts the bus in whichever answers -- safe only
  * because nothing else is on this bus (i2c_orient.h).
@@ -100,17 +100,22 @@ PowerSampler_TMP117 tmp117_i2c2{0x48, 1, TMP117_I2C2_STORAGE_ID};
  * on GPIO44 and the USB/BLE consoles are unaffected), and the ROM boot log still
  * bursts out on it before setup(), which a TMP117 tolerates.
  *
- * Storage slot 21, not 9: here 9 is INA228 0x41's derived resistor/range slot
- * (8 + addr - I2C_A0). 21 is in the free high range (19/20 are ina228_43). */
+ * All four ADD0 straps are registered, as on bus 0, and initAll() drops the absent
+ * ones: the first part fitted (2026-10-12) answered at 0x4A, not the expected 0x48.
+ *
+ * Storage slots 21..24, not 9: here 9 is INA228 0x41's derived resistor/range slot
+ * (8 + addr - I2C_A0). 21..24 are in the free high range (19/20 are ina228_43). */
 static constexpr uint8_t TMP117_I2C2_SDA = 6;  // D5, unless the boot check finds it swapped
 static constexpr uint8_t TMP117_I2C2_SCL = 43; // D6
-static constexpr uint8_t TMP117_I2C2_STORAGE_ID = 21;
 /* 50 kHz, not settings.I2C_Freq (400 kHz here): this bus has NO external pull-ups,
  * only the S3's ~45 kOhm internal ones -- a ~2 us rise (see I2C_Freq in settings.h).
  * One 2-byte read a second needs no more. Fit 4.7 kOhm to 3V3 to go faster. */
 static constexpr uint32_t TMP117_I2C2_FREQ = 50000;
-PowerSampler_TMP117 tmp117_i2c2{0x48, 1, TMP117_I2C2_STORAGE_ID};
-#define TMP117_I2C2 1
+PowerSampler_TMP117 tmp117_b48{0x48, 1, 21};
+PowerSampler_TMP117 tmp117_b49{0x49, 1, 22};
+PowerSampler_TMP117 tmp117_b4a{0x4A, 1, 23};
+PowerSampler_TMP117 tmp117_b4b{0x4B, 1, 24};
+#define TMP117_I2C2_ALL_STRAPS 1
 #define TMP117_I2C2_PICK_ORIENTATION 1
 #endif
 
@@ -741,6 +746,11 @@ void setup(void) {
 #endif
 #ifdef TMP117_I2C2
     samplers.add("t17b_48", &tmp117_i2c2);
+#elif defined(TMP117_I2C2_ALL_STRAPS)
+    samplers.add("t17b_48", &tmp117_b48);
+    samplers.add("t17b_49", &tmp117_b49);
+    samplers.add("t17b_4A", &tmp117_b4a);
+    samplers.add("t17b_4B", &tmp117_b4b);
 #endif
     /* ONE of these two, never both: they share the ADS1262 and configure it
      * differently. SHUNT_ADC_ZERO is the offset-drift characterisation run
