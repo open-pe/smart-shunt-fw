@@ -548,11 +548,17 @@ inline void handleConsoleInput(const String &buf, SamplerRegistry &registry, Ble
                          (unsigned long) b.policy.streak, (unsigned long) b.recoveries,
                          (unsigned long) b.failedRecoveries, (unsigned long) b.generation);
             }
-            {
-                const auto &o = i2c_orient::report();
-                UART_LOG("i2c boot TMP117 orientation check (SDA %d SCL %d): %s, "
+            for (uint8_t bus = 0; bus < 2; ++bus) {
+                const auto &o = i2c_orient::report(bus);
+                if (bus && o.result == i2c_orient::Result::NOT_RUN) continue;
+                /* Bus 1 is a dedicated TMP117 bus and is STARTED swapped when the part
+                 * answers that way (main_esp32.cpp), so there is nothing to rewire. */
+                const bool ranSwapped = bus && o.result == i2c_orient::Result::SWAPPED;
+                UART_LOG("i2c bus %u boot TMP117 orientation check (SDA %d SCL %d): %s, "
                          "normal ACK mask 0x%X, swapped ID mask 0x%X (bit0 = 0x48)",
-                         o.sda, o.scl, i2c_orient::resultName(o.result),
+                         bus, o.sda, o.scl,
+                         ranSwapped ? "swapped, bus started swapped"
+                                    : i2c_orient::resultName(o.result),
                          o.normalMask, o.swappedMask);
             }
             // Never an empty reply: over BLE that reads exactly like success.

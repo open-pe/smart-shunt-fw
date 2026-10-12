@@ -40,9 +40,10 @@ struct Report {
     int8_t sda = -1, scl = -1;
 };
 
-inline Report &report() {
-    static Report r;
-    return r;
+/// One report per I2C controller; bus 1 is checked only where it carries a TMP117.
+inline Report &report(uint8_t bus = 0) {
+    static Report r[2];
+    return r[bus ? 1 : 0];
 }
 
 /// Open-drain bit-bang master on two pins. ~50 kHz (10 us half period); every SCL
@@ -174,12 +175,15 @@ private:
 /// Probe 0x48..0x4B with the pins as configured; if nothing answers, try reading the
 /// TMP117 DEVICE_ID with SDA and SCL swapped. MUST run before Wire is started on these
 /// pins and before any sampler configures its part (see the file comment).
-inline const Report &checkTmp117Orientation(int8_t sda, int8_t scl) {
+/// `shared` = other parts are on this bus, so SWAPPED means "rewire". A dedicated bus
+/// (shared = false) is instead started in the swapped order by the caller.
+inline const Report &checkTmp117Orientation(int8_t sda, int8_t scl, uint8_t bus = 0,
+                                            bool shared = true) {
     static constexpr char TAG[] = "i2c_orient";
     static constexpr uint8_t ADDR_MIN = 0x48, ADDR_MAX = 0x4B, REG_DEVICE_ID = 0x0F;
     static constexpr uint16_t DEVICE_ID = 0x0117;
 
-    Report &r = report();
+    Report &r = report(bus);
     r = Report{};
     r.sda = sda, r.scl = scl;
     if (sda < 0 || scl < 0) return r;
@@ -213,7 +217,12 @@ inline const Report &checkTmp117Orientation(int8_t sda, int8_t scl) {
         bb.clear();
     }
 
-    if (r.swappedMask) {
+    if (r.swappedMask && !shared) {
+        r.result = Result::SWAPPED;
+        ESP_LOGW(TAG, "TMP117 answers with SDA/SCL swapped (mask 0x%X, bit0 = 0x48): "
+                      "dedicated bus, running it as SDA=GPIO%d SCL=GPIO%d",
+                 r.swappedMask, scl, sda);
+    } else if (r.swappedMask) {
         r.result = Result::SWAPPED;
         ESP_LOGE(TAG, "TMP117 answers ONLY WITH SDA/SCL SWAPPED (mask 0x%X, bit0 = 0x48): its "
                       "SDA is on GPIO%d and its SCL on GPIO%d. Not usable -- this bus is "
